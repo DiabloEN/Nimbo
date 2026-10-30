@@ -114,6 +114,22 @@ class ReadinessTests(unittest.TestCase):
             self.assertEqual(compose.call_count, 120)
             self.assertTrue(all(call.args == ('ps', '--format', 'json', 'antivirus') for call in compose.call_args_list))
 
+    def test_https_waits_for_proxy_startup(self):
+        self.settings.write_text('{"origin":"https://chat.example.org:7443"}')
+        with patch.object(self.control.urllib.request, 'urlopen') as request, patch.object(self.control.time, 'sleep'), contextlib.redirect_stdout(io.StringIO()):
+            response = unittest.mock.MagicMock()
+            response.__enter__.return_value.status = 200
+            response.__enter__.return_value.read.return_value = b'{"status":"ok"}'
+            request.side_effect = [ConnectionRefusedError(), response]
+            self.control.network_check()
+            self.assertEqual(request.call_count, 2)
+
+    def test_https_failure_is_not_reported_as_success(self):
+        self.settings.write_text('{"origin":"https://chat.example.org:7443"}')
+        with patch.object(self.control.urllib.request, 'urlopen', side_effect=OSError()), patch.object(self.control.time, 'sleep'):
+            with self.assertRaisesRegex(ValueError, 'Data is preserved'):
+                self.control.network_check()
+
 
 class HostTests(unittest.TestCase):
     def args(self, **values):

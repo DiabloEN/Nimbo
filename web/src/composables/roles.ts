@@ -1,0 +1,5 @@
+import type {Member, Role} from './useWorkspace';
+export const permissionLabels:Record<string,string>={manage_server:'Название, подпись и аватар сервера',manage_channels:'Создание и изменение каналов',manage_chat:'Удаление сообщений и временный запрет писать',kick_members:'Выключение медиа и отключение от голосовых комнат',ban_members:'Блокировка доступа к серверу',manage_roles:'Создание и назначение ролей'};
+export function roleLabel(member:Member|undefined,roles:Role[]){if(member?.role==='owner')return roles.find(r=>r.id==='owner')?.name||'Владелец';const ids=member?.roleIds??(member?.role==='admin'?['admin']:[]);return ids.map(id=>roles.find(r=>r.id===id)?.name).filter(Boolean).join(', ')||roles.find(r=>r.id==='member')?.name||'Участник';}
+export function permitted(member:Member|undefined,permission:string){return !!member&&!member.blocked&&(member.role==='owner'||!!member.permissions?.includes(permission));}
+export function editableMember(actor:Member|undefined,target:Member){return !!actor&&actor.id!==target.id&&target.role!=='owner'&&(actor.role==='owner'||!permitted(target,'manage_roles'));}

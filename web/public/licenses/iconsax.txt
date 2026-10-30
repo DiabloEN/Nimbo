@@ -1,0 +1,6 @@
+Iconsax Linear — Vuesax / Lusaxweb. Source: https://github.com/lusaxweb/iconsax/tree/master/static/Iconsax/Svg/All/linear
+Integrated into Nimbo code under Iconsax Free developer terms: https://docs.iconsax.io/license-and-terms/license
+Copyright belongs to Iconsax / Vuesax. Only selected SVG geometry is embedded; colors inherit currentColor; add rotated for close.
+
+Selected chat and media actions also use Iconsax Bold from the same official repository and license. Six-dot grip is Nimbo geometry.
+Reply glyph derives from the internal arrow of Iconsax Bold undo, without its outer square.

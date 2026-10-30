@@ -1,0 +1,33 @@
+[Unit]
+Description=Nimbo local ClamAV signature updater
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=clamav
+Group=65532
+ExecStart=/usr/bin/python3 /opt/nimbo/antivirus/manager.py
+Restart=on-failure
+RestartSec=10
+RuntimeDirectory=nimbo-antivirus
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+UMask=0007
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/var/lib/clamav /run/nimbo-antivirus
+MemoryMax=2G
+CPUQuota=60%
+TasksMax=32
+
+[Install]
+WantedBy=multi-user.target

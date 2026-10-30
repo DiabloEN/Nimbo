@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import host
+import not_found
 
 LIVEKIT = 'livekit/livekit-server@sha256:89ca9ce0791e18d6e03bf6e2c49ceb27e1c754eae8bd50c989386c1a5963791a'
 CADDY = 'livekit/caddyl4@sha256:9dd090159a6042a907dbff0ce9dda27a21d2a559dc7b03b60a8e6b1b60b8348e'
@@ -151,7 +152,8 @@ def configuration(a):
             'handle': [{'handler': 'tls'}, {'handler': 'proxy', 'proxy_protocol': 'v2',
                        'upstreams': [{'dial': [f'127.0.0.1:{a.turn_tls_port}']}]}]}]}, {'wrapper': 'tls'}],
         'tls_connection_policies': [{}],
-        'routes': [proxy(a.domain, a.api_port, None if a.web_preview else ['/api/*', '/healthz']),
+        'routes': [not_found.document_route(a.domain),
+                   proxy(a.domain, a.api_port, None if a.web_preview else ['/api/*', '/healthz']),
                    proxy(a.rtc_domain, a.signal_port),
                    {'handle': [{'handler': 'static_response', 'status_code': 404}]}]}
     # Each instance owns TLS on its chosen ports; ACME runs separately.

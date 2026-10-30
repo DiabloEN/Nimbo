@@ -3,15 +3,15 @@ import AvatarEditor from './AvatarEditor.vue';
 import ProfileServers from './ProfileServers.vue';
 import ProfileLibrary from './ProfileLibrary.vue';
 import type {LocalProfile} from '../composables/profileLibrary';
-import {ref,watch} from 'vue';import {type ProfileFile} from '../composables/profileFile';
+import {ref,watch} from 'vue';import {type ProfileFile,type SavedServer} from '../composables/profileFile';
 const props=defineProps<{name:string;nameLabel?:string;avatar:string;servers:ProfileFile['servers'];currentRole?:'owner'|'admin'|'member';saveServers:(servers:ProfileFile['servers'])=>void;leaveServer:(url:string)=>Promise<void>;profiles:LocalProfile[];activeProfileId:string;addProfile:(profile:ProfileFile)=>string;switchProfile:(id:string,code:string)=>Promise<void>;removeProfile:(id:string)=>Promise<void>;save:(name:string,avatar:string)=>Promise<void>;exportFile:(password:string)=>Promise<void>}>();
-const emit=defineEmits<{logout:[]}>();const draftName=ref(props.name),draftAvatar=ref(props.avatar),busy=ref(false),note=ref('');
+const emit=defineEmits<{logout:[];openServer:[server:SavedServer]}>();const draftName=ref(props.name),draftAvatar=ref(props.avatar),busy=ref(false),note=ref('');
 watch(()=>props.name,v=>draftName.value=v);watch(()=>props.avatar,v=>draftAvatar.value=v);
 async function save(){busy.value=true;note.value='';try{await props.save(draftName.value.trim(),draftAvatar.value);note.value='Профиль сохранён.';}catch(e){note.value=(e as Error).message;}finally{busy.value=false;}}
 </script>
 <template>
  <section class="profile-layout">
-  <ProfileServers :servers="servers" :name="name" :current-role="currentRole" :save="saveServers" :leave="leaveServer"/>
+  <ProfileServers @open="emit('openServer',$event)" :servers="servers" :name="name" :current-role="currentRole" :save="saveServers" :leave="leaveServer"/>
   <div class="profile-details">
    <form class="profile-identity" @submit.prevent="save">
     <AvatarEditor :value="draftAvatar" :fallback="draftName.slice(0,2).toUpperCase()" :disabled="busy" @change="draftAvatar=$event" @remove="draftAvatar=''"/>

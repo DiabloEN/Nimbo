@@ -4,7 +4,7 @@ export function uploadForm(url:string,body:FormData,token:string,signal:AbortSig
   const xhr=new XMLHttpRequest();
   const abort=()=>xhr.abort();
   const finish=()=>signal.removeEventListener('abort',abort);
-  xhr.open('POST',url);xhr.setRequestHeader('Authorization','Bearer '+token);xhr.timeout=240000;
+  xhr.open('POST',url);if(url.startsWith('https://')||url.startsWith('http://'))xhr.setRequestHeader('X-Nimbo-Client','1');xhr.setRequestHeader('Authorization','Bearer '+token);xhr.timeout=240000;
   xhr.upload.onprogress=e=>{if(e.lengthComputable)progress(Math.min(100,Math.round(e.loaded/e.total*100)));};
   xhr.upload.onload=()=>progress(100);
   xhr.onload=()=>{finish();resolve(new Response(xhr.responseText,{status:xhr.status,headers:{'Content-Type':'application/json'}}));};

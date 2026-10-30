@@ -32,6 +32,9 @@ func sessionCookie(c config, value string, maxAge int) *http.Cookie {
 		HttpOnly: true, Secure: strings.HasPrefix(c.Origin, "https://"), SameSite: http.SameSiteStrictMode}
 }
 func (s *workspaceStore) remember(w http.ResponseWriter, r *http.Request, c config, id string) error {
+	if portableClient(r) {
+		return nil
+	}
 	key := randomKey()
 	err := s.update(func(d *workspaceData) error {
 		if d.Sessions == nil {

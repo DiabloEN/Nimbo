@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import {ref,computed,watch,nextTick,onMounted,onBeforeUnmount} from 'vue';
-import AppIcon from './AppIcon.vue';import {serverProfileUrl,type SavedServer}from '../composables/profileFile';
+import {activeServer} from '../composables/serverConnection';
+import AppIcon from './AppIcon.vue';import {type SavedServer}from '../composables/profileFile';
 const props=defineProps<{servers:SavedServer[]}>();
 const open=ref(false),root=ref<HTMLElement>(),trigger=ref<HTMLButtonElement>(),list=ref<HTMLElement>();
 const scrollTop=ref(0),moreBelow=ref(false);
-const origin=location.origin;const sorted=computed(()=>[...props.servers].sort((a,b)=>Number(!!b.pinned)-Number(!!a.pinned)));
+const origin=activeServer;
+const emit=defineEmits<{open:[server:SavedServer];refresh:[]}>();const sorted=computed(()=>[...props.servers].sort((a,b)=>Number(!!b.pinned)-Number(!!a.pinned)));
 function measure(){const el=list.value;if(el){scrollTop.value=el.scrollTop;moreBelow.value=el.scrollTop+el.clientHeight<el.scrollHeight-2;}}
+watch(open,value=>{if(value)emit('refresh');});
 watch([open,()=>props.servers.length],async()=>{await nextTick();measure();});
 function tilt(index:number){return Math.max(0,Math.min(3,index-scrollTop.value/66))*4+'deg';}
 function outside(e:PointerEvent){if(!root.value?.contains(e.target as Node))open.value=false;}
@@ -20,7 +23,7 @@ onBeforeUnmount(()=>{document.removeEventListener('pointerdown',outside);window.
   </button>
   <Transition name="server-menu"><nav v-if="open" class="server-switch-menu" aria-label="Мои серверы">
    <div ref="list" class="server-switch-list" :class="{'fade-top':scrollTop>2,'fade-bottom':moreBelow}" @scroll.passive="measure">
-    <a v-for="(s,i) in sorted" :key="s.url" :style="{'--tilt':tilt(i)}" :href="serverProfileUrl(s)" :aria-current="s.url===origin?'page':undefined" @click="open=false">
+    <a v-for="(s,i) in sorted" :key="s.url" :style="{'--tilt':tilt(i)}" :href="'#/room'" :aria-current="s.url===origin?'page':undefined" @click.prevent="open=false;emit('open',s)">
      <span class="server-initial">{{Array.from(s.name)[0]}}</span><span><b>{{s.name}}</b><small>{{s.url.replace(/^https?:\/\//,'')}}</small></span><AppIcon v-if="s.pinned" name="pin" :size="14"/>
     </a>
    </div>

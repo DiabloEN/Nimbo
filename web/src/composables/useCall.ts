@@ -1,3 +1,4 @@
+import {apiFetch} from './serverConnection';
 import { computed, ref } from 'vue';
 import { Room, RoomEvent, Track, VideoPresets, AudioPresets, setLogLevel } from 'livekit-client';
 import type { Participant, LocalParticipant, LocalTrackPublication, LocalVideoTrack, RemoteTrackPublication, VideoCaptureOptions } from 'livekit-client';
@@ -180,7 +181,7 @@ export function useCall(devices: Devices, media: () => { videos: HTMLElement | n
     const timeout = setTimeout(() => controller.abort(), 15000);
     let candidate: Room | undefined;
     try {
-      const response = await fetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json', ...(form.session ? { Authorization: `Bearer ${form.session}` } : {}) }, signal: controller.signal,
+      const response = await apiFetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json', ...(form.session ? { Authorization: `Bearer ${form.session}` } : {}) }, signal: controller.signal,
         body: JSON.stringify({ name: form.name.trim(), password: form.password, room: form.room }) });
       const invitation = await response.json();
       clearTimeout(timeout);

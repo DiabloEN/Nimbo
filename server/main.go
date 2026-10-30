@@ -138,11 +138,11 @@ func newWorkspaceHandler(c config, store *workspaceStore, presence *presenceServ
 				rooms = append(rooms, ch)
 			}
 		}
-		jsonReply(w, 200, map[string]any{"rooms": rooms})
+		jsonReply(w, 200, map[string]any{"rooms": rooms, "serverName": store.data.Name})
 	})
 	accessHandler := func(w http.ResponseWriter, r *http.Request) {
-		// Native clients have no Origin. Browsers must use this site's origin.
-		if origin := r.Header.Get("Origin"); origin != "" && origin != c.Origin {
+		// Native clients omit Origin; portable browsers use key/token authentication.
+		if !allowedAPIOrigin(c, r) {
 			reject(w, 403, "Недопустимый источник запроса")
 			return
 		}
@@ -341,12 +341,16 @@ func newWorkspaceHandler(c config, store *workspaceStore, presence *presenceServ
 	if media.Scheme == "ws" {
 		mediaHTTP = "http://" + media.Host
 	}
+	localConnect := ""
+	if strings.HasPrefix(c.Origin, "http://") {
+		localConnect = " http://localhost:* http://127.0.0.1:* http://[::1]:* ws://localhost:* ws://127.0.0.1:* ws://[::1]:*"
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(self), microphone=(self), display-capture=(self), speaker-selection=(self)")
-		w.Header().Set("Content-Security-Policy", fmt.Sprintf("default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self' %s %s; media-src 'self' blob:; img-src 'self' data: blob:; worker-src 'self' blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'", c.MediaURL, mediaHTTP))
-		mux.ServeHTTP(w, r)
+		w.Header().Set("Content-Security-Policy", fmt.Sprintf("default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self' https: wss: %s %s%s; media-src 'self' blob:; img-src 'self' data: blob:; worker-src 'self' blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'", c.MediaURL, mediaHTTP, localConnect))
+		portableClients(c, mux).ServeHTTP(w, r)
 	})
 }
 

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import {activeServer} from '../composables/serverConnection';
 import {computed,onBeforeUnmount,onMounted,ref} from 'vue';
 import AppSelect from './AppSelect.vue';
 import type {Invitation} from '../composables/useWorkspace';
@@ -6,10 +7,10 @@ const props=defineProps<{invitations:Invitation[];request:(path:string,method:st
 const creating=ref(false),duration=ref('personal'),busy=ref(false),error=ref(''),copied=ref(''),now=ref(Date.now());
 const active=computed(()=>props.invitations.filter(i=>!i.expiresAt||i.expiresAt>now.value).slice().sort((a,b)=>b.createdAt-a.createdAt));
 let timer:ReturnType<typeof setInterval>|undefined;onMounted(()=>{timer=setInterval(()=>now.value=Date.now(),1000);});onBeforeUnmount(()=>clearInterval(timer));
-function link(item:Invitation){return window.location.origin+'/#/invite/'+encodeURIComponent(item.code);}
+function link(item:Invitation){return activeServer.value+'/#/invite/'+encodeURIComponent(item.code);}
 function expiry(item:Invitation){return item.expiresAt?'До '+new Date(item.expiresAt).toLocaleString('ru',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}):'Без срока';}
 async function run(action:()=>Promise<unknown>){if(busy.value)return;busy.value=true;error.value='';try{await action();creating.value=false;}catch(e){error.value=(e as Error).message;}finally{busy.value=false;}}
-function shareText(item:Invitation){return 'Приглашение в Nimbo\nСсылка для входа: '+link(item)+'\nАдрес сервера: '+window.location.origin+'\nКод приглашения: '+item.code;}
+function shareText(item:Invitation){return 'Приглашение в Nimbo\nСсылка для входа: '+link(item)+'\nАдрес сервера: '+activeServer.value+'\nКод приглашения: '+item.code;}
 async function copy(item:Invitation){try{await navigator.clipboard.writeText(shareText(item));copied.value=item.id;}catch{error.value='Не удалось скопировать. Выделите приглашение вручную.';}}
 </script>
 <template><section class="invitation-settings">

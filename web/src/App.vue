@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, onMounted, onBeforeUnmount, reactive, ref, watch, nextTick } from 'vue';
+import {activeServer,clientOrigin,apiFetch,serverFetch,prepareServer,selectServerOrigin,restoreServerOrigin} from './composables/serverConnection';
 import EnrollmentPage from './components/EnrollmentPage.vue';
 import ServerSwitcher from './components/ServerSwitcher.vue';
 import FileSettings from './components/FileSettings.vue';
@@ -29,7 +30,7 @@ import {downloadAudioDiagnostics} from './composables/audioDiagnostics';
 import AudioTests from './components/AudioTests.vue';
 import ProfilePanel from './components/ProfilePanel.vue';
 import SessionRecovery from './components/SessionRecovery.vue';
-import {readProfile,blankProfile,parseProfile,type ProfileFile} from './composables/profileFile';
+import {readProfile,blankProfile,parseProfile,type ProfileFile,type SavedServer} from './composables/profileFile';
 import {useProfileLibrary} from './composables/profileLibrary';
 import {downloadEncryptedProfile,decryptProfile,inspectEncryptedProfile} from './composables/encryptedProfile';
 import {useAvatars} from './composables/useAvatars';
@@ -54,7 +55,8 @@ const workspace = useWorkspace(access.session,async()=>{
 });
 const { name:spaceName, channels:rooms, members, self, ownerExists, presence, presenceAvailable, error:workspaceError, messages, sending } = workspace;
 const chatAlerts=useMentionAlerts(workspace.notifications,workspace.selfId,workspace.ready,workspace.chatActivity);
-const avatars=useAvatars(access.session,members);
+const serverAvatars=useAvatars(access.session,members);
+const avatars=computed(()=>({...serverAvatars.value,...(workspace.selfId.value&&profileAvatar.value?{[workspace.selfId.value]:profileAvatar.value}:{})}));
 const networkIndicator=computed(()=>{
  if(workspace.networkError.value)return {color:'red',label:'Сервер не отвечает'};
  if(call.linkQuality.value==='lost')return {color:'red',label:'Потеря связи в звонке'};
@@ -66,6 +68,9 @@ const networkIndicator=computed(()=>{
 const profileLibrary=useProfileLibrary();
 const localProfileOpen=ref(false);
 const personal=ref(profileLibrary.current()||readProfile()),importPreview=ref<ProfileFile>(),transferNote=ref('');
+if(!location.hash.startsWith('#/connect/'))restoreServerOrigin(personal.value.servers);
+const initialEntry=personal.value.servers.find(s=>s.url===activeServer.value);if(initialEntry)profileKey.value=initialEntry.profileKey;
+const switchingServer=ref(''),switchError=ref('');let serverSwitchAbort:AbortController|undefined;
 const encryptedImport=ref(''),importPassword=ref(''),decrypting=ref(false);let importGeneration=0;
 function cancelImport(){++importGeneration;encryptedImport.value='';importPassword.value='';decrypting.value=false;}
 async function unlockImport(){if(decrypting.value)return;const run=importGeneration;decrypting.value=true;transferNote.value='';try{const profile=await decryptProfile(encryptedImport.value,importPassword.value);if(run!==importGeneration)return;importPreview.value=profile;cancelImport();await acceptImport();}catch(e){if(run===importGeneration)transferNote.value=(e as Error).message;}finally{if(run===importGeneration)decrypting.value=false;}}
@@ -112,10 +117,12 @@ watch([workspace.selfId,workspace.ready],([id,ready])=>{
 },{flush:'post'});
 const locked = computed(() => hasRoom.value || joining.value);
 const qualityBusy = computed(() => joining.value || !!pending.value || (hasRoom.value && !connected.value));
-const invitationUrl = computed(() => window.location.origin+'/?room='+encodeURIComponent(selectedId.value));
+const invitationUrl = computed(() => activeServer.value+'/?room='+encodeURIComponent(selectedId.value));
 const configController = new AbortController();
 const drafts=reactive<Record<string,string>>({}), chatList=ref<HTMLElement|null>(null);
-const draft=computed({get:()=>drafts[selectedId.value]||'',set:(value:string)=>drafts[selectedId.value]=value});
+const serverFileDrafts=reactive<Record<string,Record<string,File[]>>>({});
+const activeFileDrafts=computed(()=>serverFileDrafts[activeServer.value]??(serverFileDrafts[activeServer.value]={}));
+const draft=computed({get:()=>drafts[activeServer.value+'|'+selectedId.value]||'',set:(value:string)=>drafts[activeServer.value+'|'+selectedId.value]=value});
 function initials(name: string) { return name.trim().slice(0, 2).toUpperCase() || 'Н'; }
 function navigate(path: string) { currentPath.value = path; if (window.location.hash !== '#'+path) window.location.hash = path; }
 function openHome(){
@@ -128,22 +135,59 @@ let connectingProfile=false;
 function readPath() {
  const path=window.location.hash.slice(1)||'/room';
  if(path.startsWith('/connect/')){
+ selectServerOrigin(clientOrigin);
   const key=path.slice(9);history.replaceState(null,'',window.location.pathname+window.location.search+'#/profile');currentPath.value='/profile';
   if(/^[A-Za-z0-9_-]{43}$/.test(key)){connectingProfile=true;void connectSavedServer(key);}return;
  }
  if(path.startsWith('/invite/')){let code='';try{code=decodeURIComponent(path.slice(8));}catch{}if(code.length>=16&&code.length<=256&&!/[\x00-\x1f]/.test(code)){form.password=code;localProfileOpen.value=false;history.replaceState(null,'',window.location.pathname+window.location.search+'#/profile');currentPath.value='/profile';return;}}
  currentPath.value=path;
 }
+let serverNamesBusy=false;
+async function refreshServerNames(){
+ if(serverNamesBusy)return;serverNamesBusy=true;const profileId=profileLibrary.activeId.value;
+ try{
+  const names=await Promise.all(personal.value.servers.filter(s=>!s.customName).map(async server=>{
+   try{const response=await serverFetch(server.url,'/api/config',{signal:AbortSignal.timeout(5000)});if(!response.ok)return;const data=await response.json();if(typeof data.serverName==='string'&&data.serverName.trim()&&[...data.serverName].length<=60&&!/[\u0000-\u001f\u007f]/.test(data.serverName))return {url:server.url,name:data.serverName};}catch{}
+  }));
+  if(profileId!==profileLibrary.activeId.value)return;
+  const servers=personal.value.servers.map(server=>{const next=names.find(n=>n?.url===server.url);return !server.customName&&next?{...server,name:next.name}:server;});
+  if(servers.some((s,i)=>s.name!==personal.value.servers[i]?.name))saveServers(servers);
+ }finally{serverNamesBusy=false;}
+}
+watch(()=>page.value,value=>{if(value==='/profile')void refreshServerNames();});
+async function switchServer(server:SavedServer){
+ if(switchingServer.value)return;
+ if(server.url===activeServer.value&&authenticated.value){openHome();return;}
+ if(workspace.sending.value||workspace.pendingMessages.value.length){switchError.value='Есть неотправленные вложения. Дождитесь отправки или удалите их перед переключением сервера.';return;}
+ switchingServer.value=server.name;switchError.value='';serverSwitchAbort=new AbortController();
+ try{
+  const prepared=await prepareServer(server,AbortSignal.any([serverSwitchAbort.signal,AbortSignal.timeout(15000)]));
+  if(authenticated.value){personal.value.hotkeys={...hotkeys.bindings.value};rememberProfile();}
+  clearResume();reportVoice('left');await call.leave();workspace.stop();configController.abort();
+  selectServerOrigin(server.url);access.reset();try{localStorage.removeItem('nimbo-signed-out:'+server.url);}catch{}
+  profileKey.value=server.profileKey;access.session.value=prepared.access.session;access.member.value=prepared.access.member;authenticated.value=true;
+  form.name=prepared.access.member.name;form.password='';form.room='';selectedId.value='';volumePerson.value=null;invite.value?.close();
+  profileAvatar.value=prepared.access.member.avatar||personal.value.avatar;localProfileOpen.value=false;
+  workspace.start(prepared.workspace);navigate('/room');await nextTick();rememberProfile();void syncProfileAvatar();
+ }catch(e){switchError.value=e instanceof Error&&e.name!=='TypeError'?e.message:'Не удалось подключиться. Проверьте доступность и версию сервера.';}
+ finally{switchingServer.value='';serverSwitchAbort=undefined;}
+}
+async function syncProfileAvatar(){
+ if(!authenticated.value||access.member.value?.avatar||!profileAvatar.value)return;
+ const avatar=profileAvatar.value,token=access.session.value;
+ try{await workspace.mutate('/api/profile','PATCH',{name:form.name,avatar});if(access.session.value===token&&access.member.value)access.member.value.avatar=avatar;}
+ catch{if(access.session.value===token)transferNote.value='Аватар пока не удалось сохранить на сервере. Нажмите «Сохранить профиль», чтобы повторить.';}
+}
 async function connectSavedServer(key:string){
  if(authenticated.value&&profileKey.value===key){connectingProfile=false;navigate('/profile');return;}
  const previousKey=profileKey.value;
  try{
-  const existing=profileLibrary.entries.value.find(p=>p.profile.servers.some(s=>s.url===location.origin&&s.profileKey===key));
+  const existing=profileLibrary.entries.value.find(p=>p.profile.servers.some(s=>s.url===activeServer.value&&s.profileKey===key));
   if(!existing&&profileLibrary.entries.value.length>=16)throw new Error('Можно хранить до 16 профилей. Сначала удалите ненужный.');
   profileKey.value=key;
   if(!await access.signIn('','',true)){profileKey.value=previousKey;throw new Error(access.error.value||'Не удалось открыть сервер.');}
   clearResume();await call.leave();workspace.stop();
-  const profile=existing?.profile||{...blankProfile(),name:access.member.value!.name,avatar:access.member.value?.avatar||'',servers:[{url:location.origin,name:location.host,displayName:access.member.value!.name,profileKey:key}]};
+  const profile=existing?.profile||{...blankProfile(),name:access.member.value!.name,avatar:access.member.value?.avatar||'',servers:[{url:activeServer.value,name:new URL(activeServer.value).host,displayName:access.member.value!.name,profileKey:key}]};
   const id=existing?.id||profileLibrary.add(profile);profileLibrary.select(id);applyPersonal(profile);finishSignIn(true);navigate('/profile');
  }catch(e){transferNote.value=(e as Error).message;}finally{connectingProfile=false;}
 }
@@ -158,13 +202,13 @@ function finishSignIn(addServer=false) {
   profileAvatar.value=access.member.value?.avatar||personal.value.avatar;
   rememberProfile(addServer||!personal.value.name);
   try { localStorage.setItem('nimbo-name', form.name); } catch { /* optional preference */ }
-  workspace.start();navigate(routes.includes(currentPath.value) ? currentPath.value : '/room');
+  workspace.start();void syncProfileAvatar();navigate(routes.includes(currentPath.value) ? currentPath.value : '/room');
 }
 async function signOut() {
   clearResume();reportVoice('left');
   if(!await access.signOut()){transferNote.value=access.error.value;return false;}
   workspace.stop();form.password = '';invite.value?.close();navigate('/login');
-  for(const key of Object.keys(drafts)) delete drafts[key];await call.leave();return true;
+  for(const key of Object.keys(serverFileDrafts))delete serverFileDrafts[key];for(const key of Object.keys(drafts)) delete drafts[key];await call.leave();return true;
 }
 watch(workspace.expired,value=>{if(value&&authenticated.value){
  // Only an explicit sign-out revokes the remembered session on the server.
@@ -172,21 +216,21 @@ watch(workspace.expired,value=>{if(value&&authenticated.value){
  transferNote.value='Сохранённый вход больше не действует. Войдите заново или обратитесь к владельцу.';
 }});
 function rememberProfile(addServer=false){
- const previous=personal.value.servers.find(s=>s.url===location.origin);
- const entry={...previous,url:location.origin,name:previous?.customName?previous.name:spaceName.value,displayName:form.name,profileKey:profileKey.value,...(self.value?.role?{role:self.value.role}:{})};
+ const previous=personal.value.servers.find(s=>s.url===activeServer.value);
+ const entry={...previous,url:activeServer.value,name:previous?.customName?previous.name:spaceName.value,displayName:form.name,profileKey:profileKey.value,...(self.value?.role?{role:self.value.role}:{})};
  const servers=previous?personal.value.servers.map(s=>s.url===entry.url?entry:s):addServer?[...personal.value.servers,entry]:personal.value.servers;
  personal.value={...personal.value,format:'nimbo-profile',version:1,name:form.name,avatar:profileAvatar.value,servers};
  try{profileLibrary.save(personal.value);localStorage.setItem('nimbo-name',form.name);}catch{transferNote.value='Профиль не сохранился в браузере. Скачайте его файл.';}
 }
-watch([spaceName,()=>self.value?.role],()=>{if(authenticated.value)rememberProfile();});
+watch([spaceName,()=>self.value?.role],()=>{if(authenticated.value&&!switchingServer.value)rememberProfile();});
 async function leaveServer(url:string){
- if(url!==location.origin)throw new Error('Откройте этот сервер, чтобы покинуть его.');
+ if(url!==activeServer.value)throw new Error('Откройте этот сервер, чтобы покинуть его.');
  if(!authenticated.value)throw new Error('Войдите на сервер, чтобы удалить своё участие.');
  if(self.value?.role==='owner')throw new Error('Сначала передайте владение сервером другому участнику.');
- const response=await fetch('/api/membership',{method:'DELETE',headers:{Authorization:'Bearer '+access.session.value},signal:AbortSignal.timeout(15000)});
+ const response=await apiFetch('/api/membership',{method:'DELETE',headers:{Authorization:'Bearer '+access.session.value},signal:AbortSignal.timeout(15000)});
  const result=await response.json();if(!response.ok)throw new Error(result.error||'Не удалось покинуть сервер.');
  clearResume();access.reset();workspace.stop();await call.leave();
- for(const key of Object.keys(drafts))delete drafts[key];
+ for(const key of Object.keys(serverFileDrafts))delete serverFileDrafts[key];for(const key of Object.keys(drafts))delete drafts[key];
  profileKey.value='';try{localStorage.removeItem('nimbo-profile-key');}catch{}
  saveServers(personal.value.servers.filter(s=>s.url!==url));
  localProfileOpen.value=true;navigate('/profile');transferNote.value='Вы покинули сервер. Ваш профиль удалён из списка участников.';
@@ -196,7 +240,7 @@ function addLocalProfile(profile:ProfileFile){const id=profileLibrary.add(profil
 async function saveProfile(name:string,avatar:string){await workspace.mutate('/api/profile','PATCH',{name,avatar});form.name=name;profileAvatar.value=avatar;rememberProfile();}
 async function exportProfile(password:string){if(authenticated.value){personal.value.hotkeys={...hotkeys.bindings.value};rememberProfile();}await downloadEncryptedProfile(personal.value,password);}
 function applyPersonal(profile:ProfileFile){
- personal.value=profile;call.effects.enabled.value=profile.cameraEffects?.enabled??false;call.effects.strength.value=profile.cameraEffects?.strength??12;const entry=profile.servers.find(s=>s.url===location.origin);
+ personal.value=profile;call.effects.enabled.value=profile.cameraEffects?.enabled??false;call.effects.strength.value=profile.cameraEffects?.strength??12;const entry=profile.servers.find(s=>s.url===activeServer.value);
  form.name=entry?.displayName||profile.name;profileKey.value=entry?.profileKey||'';profileAvatar.value=profile.avatar;
  importedHotkeys=profile.hotkeys;
  try{if(profile.hotkeys)sessionStorage.setItem('nimbo-import-hotkeys','pending');else sessionStorage.removeItem('nimbo-import-hotkeys');localStorage.setItem('nimbo-profile-key',profileKey.value);localStorage.setItem('nimbo-name',form.name);}catch{transferNote.value='Браузер не сохранил выбранный профиль.';}
@@ -204,12 +248,12 @@ function applyPersonal(profile:ProfileFile){
 async function switchLocalProfile(id:string,code:string){
  const target=profileLibrary.entries.value.find(p=>p.id===id);if(!target||id===profileLibrary.activeId.value)return;
  if(authenticated.value){personal.value.hotkeys={...hotkeys.bindings.value};rememberProfile();}
- const previousKey=profileKey.value,entry=target.profile.servers.find(s=>s.url===location.origin);
+ const previousKey=profileKey.value,entry=target.profile.servers.find(s=>s.url===activeServer.value);
  profileKey.value=entry?.profileKey||'';
  if(!await access.signIn(entry?.displayName||target.profile.name,code,!code)){profileKey.value=previousKey;throw new Error(access.error.value||'Не удалось переключить профиль.');}
  const nextKey=profileKey.value;
  clearResume();reportVoice('left');await call.leave();workspace.stop();
- for(const key of Object.keys(drafts))delete drafts[key];
+ for(const key of Object.keys(serverFileDrafts))delete serverFileDrafts[key];for(const key of Object.keys(drafts))delete drafts[key];
  profileLibrary.select(id);applyPersonal(target.profile);profileKey.value=nextKey;
  try{localStorage.setItem('nimbo-profile-key',nextKey);}catch{}
  finishSignIn(true);navigate('/profile');
@@ -222,7 +266,7 @@ async function removeLocalProfile(id:string){
  }else profileLibrary.remove(id);
 }
 async function loadProfile(e:Event){const input=e.target as HTMLInputElement,file=input.files?.[0];input.value='';if(!file)return;cancelImport();const run=importGeneration;importPreview.value=undefined;transferNote.value='';try{if(file.size>300000)throw new Error('Файл слишком большой.');const text=await file.text();if(run!==importGeneration)return;if(JSON.parse(text)?.format==='nimbo-encrypted-profile'){inspectEncryptedProfile(text);encryptedImport.value=text;}else{importPreview.value=parseProfile(text);await acceptImport();}}catch(e){if(run===importGeneration)transferNote.value=(e as Error).message;}}
-async function loginSavedProfile(){const entry=personal.value.servers.find(s=>s.url===location.origin);if(entry){await connectSavedServer(entry.profileKey);return;}localProfileOpen.value=false;transferNote.value='Для первого подключения нужен код приглашения.';}
+async function loginSavedProfile(){const entry=personal.value.servers.find(s=>s.url===activeServer.value);if(entry){await connectSavedServer(entry.profileKey);return;}localProfileOpen.value=false;transferNote.value='Для первого подключения нужен код приглашения.';}
 async function saveLocalProfile(name:string,avatar:string){const next=parseProfile(JSON.stringify({...personal.value,name,avatar}));profileLibrary.save(next);applyPersonal(next);}
 function selectLoginProfile(event:Event){const id=(event.target as HTMLSelectElement).value;try{profileLibrary.select(id);applyPersonal(profileLibrary.current()!);}catch(e){transferNote.value=(e as Error).message;}}
 async function acceptImport(){const imported=importPreview.value;if(!imported)return;try{const id=profileLibrary.add(imported);profileLibrary.select(id);applyPersonal(profileLibrary.current()!);importPreview.value=undefined;if(profileKey.value&&await access.signIn(form.name,'',true)){finishSignIn(true);navigate('/profile');}else{const reason=access.error.value;access.error.value='';localProfileOpen.value=true;navigate('/profile');transferNote.value=reason||'Это локальный профиль. Для первого подключения к этому серверу потребуется код приглашения.';}}catch(e){transferNote.value=(e as Error).message;}}
@@ -241,7 +285,7 @@ function rememberRoom(){
 }
 watch([connected,mic,()=>participants.value.find(p=>p.local)?.identity,workspace.selfId],()=>{if(!pageLeaving)rememberRoom();});
 watch(hasRoom,(present,previous)=>{if(previous&&!present&&!pageLeaving&&!changingRoom)clearResume();});
-function reportVoice(state:'reconnecting'|'left',identity=participants.value.find(p=>p.local)?.identity,roomId=form.room){if(!identity||!access.session.value)return;void fetch('/api/voice-state',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+access.session.value},body:JSON.stringify({identity,room:roomId,state}),keepalive:true}).catch(()=>{});}
+function reportVoice(state:'reconnecting'|'left',identity=participants.value.find(p=>p.local)?.identity,roomId=form.room){if(!identity||!access.session.value)return;void apiFetch('/api/voice-state',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+access.session.value},body:JSON.stringify({identity,room:roomId,state}),keepalive:true}).catch(()=>{});}
 watch(workspace.ready,async ready=>{if(!ready||!resumeRoom)return;const saved=resumeRoom;resumeRoom=undefined;if(saved.member!==workspace.selfId.value||!rooms.value.some(r=>r.id===saved.room&&r.kind==='voice')){clearResume();return;}form.withMic=saved.mic;await chooseRoom(saved.room);form.withMic=true;if(!hasRoom.value)clearResume();reportVoice('left',saved.identity,saved.room);});
 let changingRoom=false;const pendingRoom=ref('');
 function leaveRoom(){clearResume();reportVoice('left');pendingRoom.value='';void call.leave();}
@@ -274,7 +318,7 @@ watch(()=>messages.value.at(-1)?.id,async()=>{
 });
 watch(selectedId,async()=>{await nextTick();if(chatList.value)chatList.value.scrollTop=chatList.value.scrollHeight;});
 
-async function sendMessage(replyTo='',mentions:Mention[]=[],files?:File[]){const id=selectedId.value,text=draft.value;const accepted=await workspace.send(text,replyTo,mentions,files);if(accepted&&drafts[id]===text)drafts[id]='';return accepted;}
+async function sendMessage(replyTo='',mentions:Mention[]=[],files?:File[]){const id=activeServer.value+'|'+selectedId.value,text=draft.value;const accepted=await workspace.send(text,replyTo,mentions,files);if(accepted&&drafts[id]===text)drafts[id]='';return accepted;}
 function timeLabel(value:number){return new Intl.DateTimeFormat('ru',{hour:'2-digit',minute:'2-digit',day:'numeric',month:'short'}).format(value);}
 async function copyInvite(){try{await navigator.clipboard.writeText(invitationUrl.value);copied.value='Ссылка скопирована';}catch{copied.value='Не удалось скопировать. Ссылку можно выделить вручную.';}}
 function openInvite(){copied.value='';invite.value?.showModal();}
@@ -294,23 +338,24 @@ onMounted(()=>{
   if(enrollmentPage)return;
   readPath();
   try{form.name=localStorage.getItem('nimbo-name')||'';}catch{/* optional preference */}
-  if(!connectingProfile)void restoreSignIn();window.addEventListener('online',connectionOnline);
+  if(!connectingProfile){if(profileLibrary.current())applyPersonal(profileLibrary.current()!);void restoreSignIn();}window.addEventListener('online',connectionOnline);
   void devices.refresh();window.addEventListener('beforeunload',beforeUnload);window.addEventListener('pagehide',pageHide);window.addEventListener('pageshow',pageShow);window.addEventListener('hashchange',readPath);
   const timeout=setTimeout(()=>configController.abort(),10000);
-  void fetch('/api/config',{signal:configController.signal}).then(async response=>{
+  void apiFetch('/api/config',{signal:configController.signal}).then(async response=>{
     if(!response.ok)throw new Error();const config=await response.json();
     if(!workspace.ready.value)rooms.value=config.rooms as Channel[];
     const requested=new URLSearchParams(window.location.search).get('room');
     if(!selectedId.value&&workspace.ready.value)selectedId.value=rooms.value.find(room=>room.id===requested)?.id||firstChannel.value?.id||'';
   }).catch(()=>{status.value='Сервис пока недоступен. Попробуйте обновить страницу.';}).finally(()=>clearTimeout(timeout));
 });
-onBeforeUnmount(()=>{clearTimeout(restoreTimer);window.removeEventListener('online',connectionOnline);configController.abort();workspace.stop();access.reset();window.removeEventListener('beforeunload',beforeUnload);window.removeEventListener('pagehide',pageHide);window.removeEventListener('pageshow',pageShow);window.removeEventListener('hashchange',readPath);void call.leave();devices.dispose();});
+onBeforeUnmount(()=>{serverSwitchAbort?.abort();clearTimeout(restoreTimer);window.removeEventListener('online',connectionOnline);configController.abort();workspace.stop();access.reset();window.removeEventListener('beforeunload',beforeUnload);window.removeEventListener('pagehide',pageHide);window.removeEventListener('pageshow',pageShow);window.removeEventListener('hashchange',readPath);void call.leave();devices.dispose();});
 </script>
 
 <template>
+  <div v-if="switchingServer||switchError" class="server-switch-status" role="status" :aria-busy="!!switchingServer"><span>{{switchingServer?'Подключаемся: '+switchingServer:switchError}}</span><button v-if="switchingServer" class="text-button" @click="serverSwitchAbort?.abort()">Отмена</button><button v-else class="text-button" @click="switchError=''">Закрыть</button></div>
   <EnrollmentPage v-if="enrollmentPage"/>
   <SessionRecovery v-else-if="!authenticated&&(restoring||restoreFailed)" :failed="restoreFailed" :busy="restoring" @retry="restoreSignIn"/>
-  <main v-else-if="!authenticated&&localProfileOpen" class="local-profile-home"><header><a class="brand" href="#/profile">nimbo.</a><button class="text-button" @click="loginSavedProfile" :disabled="authenticating">Войти на этот сервер</button></header><h1>Профиль</h1><ProfilePanel name-label="Имя профиля" :name="personal.name" :avatar="personal.avatar" :servers="personal.servers" :save-servers="saveServers" :leave-server="leaveServer" :profiles="profileLibrary.entries.value" :active-profile-id="profileLibrary.activeId.value" :add-profile="addLocalProfile" :switch-profile="switchLocalProfile" :remove-profile="removeLocalProfile" :save="saveLocalProfile" :export-file="exportProfile" @logout="localProfileOpen=false"/><p v-if="transferNote" class="field-help" role="status">{{transferNote}}</p></main>
+  <main v-else-if="!authenticated&&localProfileOpen" class="local-profile-home"><header><a class="brand" href="#/profile">nimbo.</a><button class="text-button" @click="loginSavedProfile" :disabled="authenticating">Войти на этот сервер</button></header><h1>Профиль</h1><ProfilePanel @open-server="switchServer" name-label="Имя профиля" :name="personal.name" :avatar="personal.avatar" :servers="personal.servers" :save-servers="saveServers" :leave-server="leaveServer" :profiles="profileLibrary.entries.value" :active-profile-id="profileLibrary.activeId.value" :add-profile="addLocalProfile" :switch-profile="switchLocalProfile" :remove-profile="removeLocalProfile" :save="saveLocalProfile" :export-file="exportProfile" @logout="localProfileOpen=false"/><p v-if="transferNote" class="field-help" role="status">{{transferNote}}</p></main>
   <main v-else-if="!authenticated" class="auth-page">
     <div class="auth-brand"><span class="brand">nimbo<span>.</span></span></div><section class="auth-form" aria-labelledby="login-title">
       <div class="modal-symbol"><AppIcon name="sound" :size="26"/></div><h1 id="login-title">Войти в Nimbo</h1><p class="modal-intro">Войдите через свой файл .nimbo. Для первого подключения к серверу нужны имя и код приглашения.</p>
@@ -325,10 +370,10 @@ onBeforeUnmount(()=>{clearTimeout(restoreTimer);window.removeEventListener('onli
     </section>
   </main>
 
-  <div v-show="authenticated" class="app-shell" :class="{'with-members':page==='/room'&&membersExpanded,'has-member-panel':page==='/room'}">
+  <div v-show="authenticated" :inert="switchingServer?true:undefined" class="app-shell" :class="{'with-members':page==='/room'&&membersExpanded,'has-member-panel':page==='/room'}">
     <aside class="sidebar">
-      <div class="sidebar-brand-row"><a class="brand" href="#/room" @click.prevent="openHome">nimbo<span>.</span></a><ServerSwitcher :servers="personal.servers"/></div>
-      <a class="workspace" href="#/room" @click.prevent="openHome" :aria-label="spaceName+': открыть первый чат'"><div class="workspace-icon"><img v-if="workspace.avatar.value" :src="workspace.avatar.value" alt="Аватар сервера"><template v-else>{{Array.from(spaceName.trim())[0]?.toUpperCase()||'N'}}<b aria-hidden="true">.</b></template></div><div><div class="server-heading"><strong>{{spaceName}}</strong><span v-if="workspace.latency.value&&workspace.latency.value>700&&!workspace.networkError.value" class="network-latency">{{workspace.latency.value}} мс</span><span class="network-dot" :class="networkIndicator.color" :title="networkIndicator.label" :aria-label="networkIndicator.label" role="status"></span></div><span >{{workspace.description.value||'Закрытый тест Nimbo'}}</span><span v-if="workspace.networkError.value||call.linkQuality.value==='lost'||call.linkQuality.value==='poor'" class="network-warning" role="status">{{networkIndicator.label}}</span></div></a>
+      <div class="sidebar-brand-row"><a class="brand" href="#/room" @click.prevent="openHome">nimbo<span>.</span></a><ServerSwitcher :servers="personal.servers" @open="switchServer" @refresh="refreshServerNames"/></div>
+      <a class="workspace" href="#/room" @click.prevent="openHome" :aria-label="spaceName+': открыть первый чат'"><div class="workspace-icon"><img v-if="workspace.avatar.value" :src="workspace.avatar.value" alt="Аватар сервера"><template v-else>{{Array.from(spaceName.trim())[0]?.toUpperCase()||'N'}}<b aria-hidden="true">.</b></template></div><div><div class="server-heading"><strong>{{spaceName}}</strong><span v-if="workspace.latency.value&&workspace.latency.value>700&&!workspace.networkError.value" class="network-latency">{{workspace.latency.value}} мс</span><span class="network-dot" :class="networkIndicator.color" :title="networkIndicator.label" :aria-label="networkIndicator.label" role="status"></span></div><span >{{workspace.description.value||'Место для своих'}}</span><span v-if="workspace.networkError.value||call.linkQuality.value==='lost'||call.linkQuality.value==='poor'" class="network-warning" role="status">{{networkIndicator.label}}</span></div></a>
       <div class="channel-scroll"><div class="channel-section" v-for="group in workspace.sectionOrder.value.map(id=>workspace.sections.value.find(s=>s.id===id)!).filter(Boolean)" :key="group.id"><template v-if="group.kind==='voice'"><div class="channel-label"><span class="section-kind-icon" role="img" aria-label="Голосовые комнаты" title="Голосовые комнаты"><AppIcon name="sound" :size="12"/></span><span>{{group.name}}</span></div>
       <nav class="channels" aria-label="Голосовые комнаты"><div v-for="room in voiceRooms.filter(c=>(c.section||c.kind)===group.id)" :key="room.id" class="channel-item"><div class="voice-channel-row" :class="{selected:selectedId===room.id}"><button class="voice-channel-open" :disabled="joining" :aria-label="(connected && form.room===room.id ? 'Открыть ' : 'Подключиться: ') + room.name" @click="chooseRoom(room.id)"><AppIcon :name="room.icon||'sound'" :size="18"/><span>{{room.name}}</span></button><span v-if="peopleIn(room.id).length&&workspace.duration(room.id)" class="activity-time" title="Время активности комнаты">{{workspace.duration(room.id)}}</span><button v-if="locked&&form.room===room.id" class="voice-channel-exit" :aria-label="'Выйти из комнаты: '+room.name" title="Выйти из комнаты" @click="leaveRoom"><AppIcon name="exit" :size="18"/></button></div><ul v-if="peopleIn(room.id).length" class="channel-people"><li v-for="person in peopleIn(room.id)" :key="person.identity" :class="{speaking:person.speaking,pending:person.pending,reconnecting:person.reconnecting}" @contextmenu.prevent="openVolume(person,$event)"><span class="avatar tiny"><img v-if="avatarFor(person)" :src="avatarFor(person)" alt=""><template v-else>{{initials(person.name)}}</template></span><span>{{person.name}}{{person.local?' · вы':''}}<small v-if="person.pending">Подключение…</small><small v-else-if="person.reconnecting">Переподключается…</small></span><span class="person-media-hints"><AppIcon v-if="person.micKnown&&!person.mic" name="mic-off" :size="12"/><AppIcon v-if="person.camera" name="camera" :size="12"/><AppIcon v-if="person.screen" name="screen" :size="12"/></span></li></ul></div></nav>
       </template><template v-else><div class="channel-label text-channels-label"><span class="section-kind-icon" role="img" aria-label="Текстовые каналы" title="Текстовые каналы"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m9 4-2 16M17 4l-2 16M4 9h16M3 15h16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></span><span>{{group.name}}</span></div><nav class="channels" aria-label="Текстовые комнаты"><button v-for="room in textRooms.filter(c=>(c.section||c.kind)===group.id)" :key="room.id" :class="{selected:selectedId===room.id}" @click="chooseRoom(room.id)"><AppIcon :name="room.icon||'hash'" :size="18"/><span>{{room.name}}</span><small v-if="workspace.notifications.value.some(n=>n.channel===room.id)" class="channel-mention" aria-label="Есть непрочитанные упоминания или ответы"></small></button></nav></template></div><p v-if="!rooms.length" class="field-help">Комнат пока нет.</p></div>
@@ -353,24 +398,24 @@ onBeforeUnmount(()=>{clearTimeout(restoreTimer);window.removeEventListener('onli
             </section>
 
           </div>
-          <ChatPanel :pending-messages="workspace.pendingMessages.value.filter(p=>p.channel===selectedId)" :retry-pending="workspace.retryPending" :dismiss-pending="workspace.dismissPending" :edit-message="workspace.editMessage" :can-write="workspace.canWrite.value" :request="workspace.request" :download-file="workspace.downloadFile" :load-file="workspace.loadFile" :avatars="avatars" v-show="isText" :members="members" :roles="workspace.roles.value" :active="page==='/room'&&isText" :unread-mentions="workspace.notifications.value.filter(n=>n.channel===selectedId).map(n=>n.id)" @read-mentions="workspace.readMentions" v-model="draft" :messages="messages" :can-moderate="workspace.can('manage_chat')" :muted-until="workspace.chatMutedUntil.value" :remove-message="workspace.removeMessage" :channel="selectedId" :self-id="workspace.selfId.value" :has-more="workspace.hasMore.value" :loading-older="workspace.loadingOlder.value" :load-older="workspace.loadOlder" :sending="sending" :reaction-busy="workspace.reactionBusy.value" :send-message="sendMessage" @react="workspace.react" @member-menu="(message,event)=>openVolume({identity:message.authorId,name:message.name},event)"/>
+          <ChatPanel :file-drafts="activeFileDrafts" :key="activeServer" :pending-messages="workspace.pendingMessages.value.filter(p=>p.channel===selectedId)" :retry-pending="workspace.retryPending" :dismiss-pending="workspace.dismissPending" :edit-message="workspace.editMessage" :can-write="workspace.canWrite.value" :request="workspace.request" :download-file="workspace.downloadFile" :load-file="workspace.loadFile" :avatars="avatars" v-show="isText" :members="members" :roles="workspace.roles.value" :active="page==='/room'&&isText" :unread-mentions="workspace.notifications.value.filter(n=>n.channel===selectedId).map(n=>n.id)" @read-mentions="workspace.readMentions" v-model="draft" :messages="messages" :can-moderate="workspace.can('manage_chat')" :muted-until="workspace.chatMutedUntil.value" :remove-message="workspace.removeMessage" :channel="selectedId" :self-id="workspace.selfId.value" :has-more="workspace.hasMore.value" :loading-older="workspace.loadingOlder.value" :load-older="workspace.loadOlder" :sending="sending" :reaction-busy="workspace.reactionBusy.value" :send-message="sendMessage" @react="workspace.react" @member-menu="(message,event)=>openVolume({identity:message.authorId,name:message.name},event)"/>
         </div>
       </main>
       <main v-show="settingsOpen" class="settings-page" aria-labelledby="settings-title">
 
         <div class="settings-layout"><nav class="settings-nav" aria-label="Разделы настроек"><a v-for="item in sections" :key="item.id" :href="`#/settings/${item.id}`" :aria-current="section===item.id ? 'page' : undefined" :class="{selected:section===item.id}" @click.prevent="navigate(`/settings/${item.id}`)"><AppIcon :name="item.icon" :size="19"/>{{item.name}}</a></nav>
           <div class="settings-content">
-            <section v-show="section==='general'" class="general-settings"><label for="language">Язык</label><AppSelect id="language" label="Язык" model-value="ru" :options="[{value:'ru',label:'Русский'}]"/><StorageSettings v-if="section==='general'&&self?.role==='owner'" :request="workspace.mutate"/><AntivirusSettings v-if="section==='general'&&self?.role==='owner'" :request="workspace.request"/></section>
+            <section v-show="section==='general'" class="general-settings"><label for="language">Язык</label><AppSelect id="language" label="Язык" model-value="ru" :options="[{value:'ru',label:'Русский'}]"/><StorageSettings :key="activeServer" v-if="section==='general'&&self?.role==='owner'" :request="workspace.mutate"/><AntivirusSettings :key="activeServer" v-if="section==='general'&&self?.role==='owner'" :request="workspace.request"/></section>
             <section v-show="section==='audio'" aria-label="Звук"><label for="microphone">Микрофон</label><AppSelect id="microphone" label="Микрофон" :model-value="inputId" :options="inputOptions" :disabled="busy||joining" @update:model-value="devices.selectInput"/><label for="output">Наушники / динамики</label><AppSelect id="output" label="Наушники / динамики" :model-value="outputId" :options="outputOptions" :disabled="!supportsOutput||busy||joining" @update:model-value="devices.selectOutput"/><button class="text-button refresh-devices" :disabled="busy||joining" @click="devices.refresh(true)">{{busy?'Проверяем устройства…':'Обновить список устройств'}}</button><p v-if="note" class="field-help" role="status">{{note}}</p><p v-if="locked" class="field-help">Фактический источник: {{devices.actualInput.value}}</p><details class="audio-diagnostics"><summary>Диагностика устройств</summary><p class="field-help">Последние переключения в этой вкладке. Без записи звука и отправки на сервер.</p><button class="text-button" @click="downloadAudioDiagnostics">Скачать журнал</button></details><AudioLabPanel v-if="AudioLabPanel" :devices="devices" :disabled="busy||joining||!!pending"/><AudioTests :rnnoise="devices.lab.suppression.value&&devices.lab.engine.value==='rnnoise'" :capture-options="devices.captureOptions()" :input-id="inputId" :output-id="outputId" :active="page==='/settings/audio'" :in-call="locked"/></section>
             <section v-show="section==='video'" aria-label="Видео"><label for="camera-device">Камера</label><AppSelect id="camera-device" label="Камера" :model-value="cameraId" :options="cameraOptions" :disabled="busy||joining||!!pending||call.effects.busy.value" @update:model-value="call.selectCamera"/><h3 class="effects-title">Эффекты</h3><EffectPicker :strength="call.effects.strength.value" @strength="call.effects.setStrength" :enabled="call.effects.enabled.value" :busy="call.effects.busy.value||!!pending||joining" @select="value=>{if(value!==call.effects.enabled.value)call.effects.toggle()}"/><p v-if="call.effects.note.value" class="field-help" role="status">{{call.effects.note.value}}</p><p v-if="!supportsScreen" class="field-help">{{screenUnavailable}}</p></section>
             <HotkeySettings v-if="section==='hotkeys'" :bindings="hotkeys.bindings.value" :note="hotkeys.note.value" :set="hotkeys.set" :reset="hotkeys.reset"/>
             <div v-if="section==='workspace'" class="people-settings">
               <div class="people-settings-block"><h2>Управление ролями</h2><RoleEditor :roles="workspace.roles.value" :self="self" :members="members" :mutate="workspace.mutate"/></div>
-              <div v-if="workspace.can('manage_server')" id="invitations-settings" class="people-settings-block"><h2>Приглашения</h2><InvitationSettings :invitations="workspace.invitations.value" :request="workspace.mutate"/></div>
-              <div class="people-settings-block"><h2>Управление участниками</h2><WorkspaceSettings view="workspace" :roles="workspace.roles.value" :avatar="workspace.avatar.value" :sections="workspace.sections.value" :section-order="workspace.sectionOrder.value" :name="spaceName" :description="workspace.description.value" :channels="rooms" :members="members" :avatars="avatars" :self="self" :owner-exists="ownerExists" :mutate="workspace.mutate"/></div>
+              <div v-if="workspace.can('manage_server')" id="invitations-settings" class="people-settings-block"><h2>Приглашения</h2><InvitationSettings :key="activeServer" :invitations="workspace.invitations.value" :request="workspace.mutate"/></div>
+              <div class="people-settings-block"><h2>Управление участниками</h2><WorkspaceSettings :key="activeServer+section" view="workspace" :roles="workspace.roles.value" :avatar="workspace.avatar.value" :sections="workspace.sections.value" :section-order="workspace.sectionOrder.value" :name="spaceName" :description="workspace.description.value" :channels="rooms" :members="members" :avatars="avatars" :self="self" :owner-exists="ownerExists" :mutate="workspace.mutate"/></div>
             </div>
-            <WorkspaceSettings v-if="section==='channels'" view="channels" :roles="workspace.roles.value" :avatar="workspace.avatar.value" :sections="workspace.sections.value" :section-order="workspace.sectionOrder.value" :name="spaceName" :description="workspace.description.value" :channels="rooms" :members="members" :avatars="avatars" :self="self" :owner-exists="ownerExists" :mutate="workspace.mutate"/>
-            <FileSettings v-if="section==='channels'&&self?.role==='owner'" :channels="rooms" :request="workspace.request"/>
+            <WorkspaceSettings :key="activeServer+section" v-if="section==='channels'" view="channels" :roles="workspace.roles.value" :avatar="workspace.avatar.value" :sections="workspace.sections.value" :section-order="workspace.sectionOrder.value" :name="spaceName" :description="workspace.description.value" :channels="rooms" :members="members" :avatars="avatars" :self="self" :owner-exists="ownerExists" :mutate="workspace.mutate"/>
+            <FileSettings :key="activeServer" v-if="section==='channels'&&self?.role==='owner'" :channels="rooms" :request="workspace.request"/>
 
           </div>
         </div>
@@ -378,7 +423,7 @@ onBeforeUnmount(()=>{clearTimeout(restoreTimer);window.removeEventListener('onli
 
       <main v-if="page==='/profile'" class="settings-page profile-page" aria-labelledby="profile-title">
 
-        <div class="profile-content"><ProfilePanel :name="form.name" :avatar="profileAvatar" :servers="personal.servers" :current-role="self?.role" :save-servers="saveServers" :leave-server="leaveServer" :profiles="profileLibrary.entries.value" :active-profile-id="profileLibrary.activeId.value" :add-profile="addLocalProfile" :switch-profile="switchLocalProfile" :remove-profile="removeLocalProfile" :save="saveProfile" :export-file="exportProfile" @logout="signOut"/><p v-if="transferNote" class="field-help" role="status">{{transferNote}}</p></div>
+        <div class="profile-content"><ProfilePanel @open-server="switchServer" :name="form.name" :avatar="profileAvatar" :servers="personal.servers" :current-role="self?.role" :save-servers="saveServers" :leave-server="leaveServer" :profiles="profileLibrary.entries.value" :active-profile-id="profileLibrary.activeId.value" :add-profile="addLocalProfile" :switch-profile="switchLocalProfile" :remove-profile="removeLocalProfile" :save="saveProfile" :export-file="exportProfile" @logout="signOut"/><p v-if="transferNote" class="field-help" role="status">{{transferNote}}</p></div>
       </main>
       <!-- Audio is deliberately outside all page visibility containers. -->
       <div ref="audio"></div><div ref="videos" class="media-parking" hidden aria-hidden="true"></div>
@@ -406,4 +451,8 @@ onBeforeUnmount(()=>{clearTimeout(restoreTimer);window.removeEventListener('onli
 
 <style scoped>
 .people-settings-block{margin-bottom:36px}.people-settings-block>h2{font-size:14px;font-weight:500;letter-spacing:0;margin:0 0 16px}.people-settings :deep(section){min-height:0}.people-settings :deep(.role-editor>.field-help){margin-top:0}
+</style>
+
+<style scoped>
+.server-switch-status{position:fixed;z-index:1000;top:18px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:14px;max-width:calc(100vw - 32px);padding:10px 16px;border-radius:12px;background:#252525;color:#ddd;box-shadow:0 8px 28px #0005;font-size:12px}.server-switch-status button{font-size:12px;padding:4px}
 </style>

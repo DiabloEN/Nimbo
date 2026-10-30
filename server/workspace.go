@@ -357,7 +357,7 @@ func (s *workspaceStore) register(mux *http.ServeMux, c config, presence *presen
 	writeRate := &limiter{clients: map[string]attempt{}}
 	handle := func(pattern string, fn func(http.ResponseWriter, *http.Request, string)) {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-			if origin := r.Header.Get("Origin"); origin != "" && origin != c.Origin {
+			if !allowedAPIOrigin(c, r) {
 				reject(w, 403, "Недопустимый источник запроса")
 				return
 			}

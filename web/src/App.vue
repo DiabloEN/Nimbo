@@ -135,6 +135,7 @@ function readPath() {
  currentPath.value=path;
 }
 async function connectSavedServer(key:string){
+ if(authenticated.value&&profileKey.value===key){connectingProfile=false;navigate('/profile');return;}
  const previousKey=profileKey.value;
  try{
   const existing=profileLibrary.entries.value.find(p=>p.profile.servers.some(s=>s.url===location.origin&&s.profileKey===key));
@@ -191,6 +192,7 @@ async function leaveServer(url:string){
  localProfileOpen.value=true;navigate('/profile');transferNote.value='Вы покинули сервер. Ваш профиль удалён из списка участников.';
 }
 function saveServers(servers:ProfileFile['servers']){const next={...personal.value,servers};profileLibrary.save(next);personal.value=next;}
+function addLocalProfile(profile:ProfileFile){const id=profileLibrary.add(profile);if(id===profileLibrary.activeId.value)applyPersonal(profileLibrary.current()!);return id;}
 async function saveProfile(name:string,avatar:string){await workspace.mutate('/api/profile','PATCH',{name,avatar});form.name=name;profileAvatar.value=avatar;rememberProfile();}
 async function exportProfile(password:string){if(authenticated.value){personal.value.hotkeys={...hotkeys.bindings.value};rememberProfile();}await downloadEncryptedProfile(personal.value,password);}
 function applyPersonal(profile:ProfileFile){
@@ -220,7 +222,7 @@ async function removeLocalProfile(id:string){
  }else profileLibrary.remove(id);
 }
 async function loadProfile(e:Event){const input=e.target as HTMLInputElement,file=input.files?.[0];input.value='';if(!file)return;cancelImport();const run=importGeneration;importPreview.value=undefined;transferNote.value='';try{if(file.size>300000)throw new Error('Файл слишком большой.');const text=await file.text();if(run!==importGeneration)return;if(JSON.parse(text)?.format==='nimbo-encrypted-profile'){inspectEncryptedProfile(text);encryptedImport.value=text;}else{importPreview.value=parseProfile(text);await acceptImport();}}catch(e){if(run===importGeneration)transferNote.value=(e as Error).message;}}
-async function loginSavedProfile(){if(profileKey.value&&await access.signIn(form.name,'',true)){finishSignIn(true);navigate('/profile');}else{localProfileOpen.value=false;transferNote.value='Для первого подключения нужен код приглашения.';}}
+async function loginSavedProfile(){const entry=personal.value.servers.find(s=>s.url===location.origin);if(entry){await connectSavedServer(entry.profileKey);return;}localProfileOpen.value=false;transferNote.value='Для первого подключения нужен код приглашения.';}
 async function saveLocalProfile(name:string,avatar:string){const next=parseProfile(JSON.stringify({...personal.value,name,avatar}));profileLibrary.save(next);applyPersonal(next);}
 function selectLoginProfile(event:Event){const id=(event.target as HTMLSelectElement).value;try{profileLibrary.select(id);applyPersonal(profileLibrary.current()!);}catch(e){transferNote.value=(e as Error).message;}}
 async function acceptImport(){const imported=importPreview.value;if(!imported)return;try{const id=profileLibrary.add(imported);profileLibrary.select(id);applyPersonal(profileLibrary.current()!);importPreview.value=undefined;if(profileKey.value&&await access.signIn(form.name,'',true)){finishSignIn(true);navigate('/profile');}else{const reason=access.error.value;access.error.value='';localProfileOpen.value=true;navigate('/profile');transferNote.value=reason||'Это локальный профиль. Для первого подключения к этому серверу потребуется код приглашения.';}}catch(e){transferNote.value=(e as Error).message;}}
@@ -308,7 +310,7 @@ onBeforeUnmount(()=>{clearTimeout(restoreTimer);window.removeEventListener('onli
 <template>
   <EnrollmentPage v-if="enrollmentPage"/>
   <SessionRecovery v-else-if="!authenticated&&(restoring||restoreFailed)" :failed="restoreFailed" :busy="restoring" @retry="restoreSignIn"/>
-  <main v-else-if="!authenticated&&localProfileOpen" class="local-profile-home"><header><a class="brand" href="#/profile">nimbo.</a><button class="text-button" @click="loginSavedProfile" :disabled="authenticating">Войти на этот сервер</button></header><h1>Профиль</h1><ProfilePanel name-label="Имя профиля" :name="personal.name" :avatar="personal.avatar" :servers="personal.servers" :save-servers="saveServers" :leave-server="leaveServer" :profiles="profileLibrary.entries.value" :active-profile-id="profileLibrary.activeId.value" :add-profile="profileLibrary.add" :switch-profile="switchLocalProfile" :remove-profile="removeLocalProfile" :save="saveLocalProfile" :export-file="exportProfile" @logout="localProfileOpen=false"/><p v-if="transferNote" class="field-help" role="status">{{transferNote}}</p></main>
+  <main v-else-if="!authenticated&&localProfileOpen" class="local-profile-home"><header><a class="brand" href="#/profile">nimbo.</a><button class="text-button" @click="loginSavedProfile" :disabled="authenticating">Войти на этот сервер</button></header><h1>Профиль</h1><ProfilePanel name-label="Имя профиля" :name="personal.name" :avatar="personal.avatar" :servers="personal.servers" :save-servers="saveServers" :leave-server="leaveServer" :profiles="profileLibrary.entries.value" :active-profile-id="profileLibrary.activeId.value" :add-profile="addLocalProfile" :switch-profile="switchLocalProfile" :remove-profile="removeLocalProfile" :save="saveLocalProfile" :export-file="exportProfile" @logout="localProfileOpen=false"/><p v-if="transferNote" class="field-help" role="status">{{transferNote}}</p></main>
   <main v-else-if="!authenticated" class="auth-page">
     <div class="auth-brand"><span class="brand">nimbo<span>.</span></span></div><section class="auth-form" aria-labelledby="login-title">
       <div class="modal-symbol"><AppIcon name="sound" :size="26"/></div><h1 id="login-title">Войти в Nimbo</h1><p class="modal-intro">Войдите через свой файл .nimbo. Для первого подключения к серверу нужны имя и код приглашения.</p>
@@ -376,7 +378,7 @@ onBeforeUnmount(()=>{clearTimeout(restoreTimer);window.removeEventListener('onli
 
       <main v-if="page==='/profile'" class="settings-page profile-page" aria-labelledby="profile-title">
 
-        <div class="profile-content"><ProfilePanel :name="form.name" :avatar="profileAvatar" :servers="personal.servers" :current-role="self?.role" :save-servers="saveServers" :leave-server="leaveServer" :profiles="profileLibrary.entries.value" :active-profile-id="profileLibrary.activeId.value" :add-profile="profileLibrary.add" :switch-profile="switchLocalProfile" :remove-profile="removeLocalProfile" :save="saveProfile" :export-file="exportProfile" @logout="signOut"/><p v-if="transferNote" class="field-help" role="status">{{transferNote}}</p></div>
+        <div class="profile-content"><ProfilePanel :name="form.name" :avatar="profileAvatar" :servers="personal.servers" :current-role="self?.role" :save-servers="saveServers" :leave-server="leaveServer" :profiles="profileLibrary.entries.value" :active-profile-id="profileLibrary.activeId.value" :add-profile="addLocalProfile" :switch-profile="switchLocalProfile" :remove-profile="removeLocalProfile" :save="saveProfile" :export-file="exportProfile" @logout="signOut"/><p v-if="transferNote" class="field-help" role="status">{{transferNote}}</p></div>
       </main>
       <!-- Audio is deliberately outside all page visibility containers. -->
       <div ref="audio"></div><div ref="videos" class="media-parking" hidden aria-hidden="true"></div>

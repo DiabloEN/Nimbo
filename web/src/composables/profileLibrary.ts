@@ -1,5 +1,5 @@
 import {ref} from 'vue';
-import {blankProfile,parseProfile,readProfile,storeProfile,type ProfileFile} from './profileFile';
+import {blankProfile,parseProfile,readProfile,storeProfile,mergeProfileServers,type ProfileFile} from './profileFile';
 export type LocalProfile={id:string;profile:ProfileFile};
 const storageKey='nimbo-profile-library';
 export function useProfileLibrary(){
@@ -22,8 +22,8 @@ export function useProfileLibrary(){
  function add(profile:ProfileFile){
   const clean=parseProfile(JSON.stringify(profile));
   const existing=entries.value.find(p=>JSON.stringify(p.profile)===JSON.stringify(clean)||clean.servers.some(s=>p.profile.servers.some(old=>old.url===s.url&&old.profileKey===s.profileKey)));
-  // An imported backup never silently overwrites a saved profile.
-  if(existing)return existing.id;
+  // Keep local preferences and existing credentials; recover newly added servers.
+  if(existing){const merged=mergeProfileServers(existing.profile,clean);persist(entries.value.map(p=>p.id===existing.id?{...p,profile:merged}:p),activeId.value);return existing.id;}
   if(entries.value.length>=16)throw new Error('Можно хранить до 16 профилей. Удалите ненужный перед загрузкой нового.');
   const id=crypto.randomUUID();persist([...entries.value,{id,profile:clean}],activeId.value);return id;
  }

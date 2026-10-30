@@ -31,7 +31,7 @@ async function save(){
 }
 function pin(server:SavedServer){commit(props.servers.map(s=>s.url===server.url?{...s,pinned:!s.pinned}:s));}
 async function remove(url:string){if(leaving.value)return;leaving.value=true;note.value='';try{await props.leave(url);removing.value='';}catch(e){note.value=(e as Error).message;}finally{leaving.value=false;}}
-function role(server:SavedServer){return server.url===currentServer?props.currentRole:server.role;}
+function role(server:SavedServer){return server.url===currentServer?(props.currentRole??server.role):server.role;}
 </script>
 <template>
  <nav class="profile-servers" aria-labelledby="profile-servers-title">

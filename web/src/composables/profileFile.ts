@@ -34,4 +34,12 @@ export async function avatarFromFile(file:File){
 }
 export function downloadProfile(profile:ProfileFile){const url=URL.createObjectURL(new Blob([JSON.stringify(profile,null,2)],{type:'application/json'}));const link=document.createElement('a');link.href=url;link.download='profile.nimbo';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 
-export function serverProfileUrl(server:SavedServer){return server.url+(server.url===location.origin?'/#/profile':'/#/connect/'+encodeURIComponent(server.profileKey));}
+export function serverProfileUrl(server:SavedServer){return server.url+'/#/connect/'+encodeURIComponent(server.profileKey);}
+
+// A backup may add servers to the same identity, but must never replace a
+// different credential already saved for an address or roll back preferences.
+export function mergeProfileServers(current:ProfileFile,incoming:ProfileFile):ProfileFile{
+ const servers=[...current.servers];
+ for(const entry of incoming.servers)if(!servers.some(s=>s.url===entry.url))servers.push(entry);
+ return parseProfile(JSON.stringify({...current,servers}));
+}

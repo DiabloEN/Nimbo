@@ -144,7 +144,11 @@ def prepare_storage(root, gib):
     mount.mkdir(mode=0o700)
     run('fallocate', '-l', str(gib * 1024**3), str(image))
     image.chmod(0o600)
-    run('mkfs.ext4', '-q', '-m', '1', str(image))
+    # mkfs discards a regular backing file by default, punching holes through
+    # fallocate's reservation. Disable discard and verify allocated blocks.
+    run('mkfs.ext4', '-q', '-m', '1', '-E', 'nodiscard', str(image))
+    if image.stat().st_blocks * 512 < gib * 1024**3:
+        raise ValueError('Filesystem did not retain the disk reservation; refusing to mount an overcommitted image.')
     unit = run('systemd-escape', '--path', '--suffix=mount', str(mount), capture_output=True, text=True).stdout.strip()
     unit_path = Path('/etc/systemd/system') / unit
     with unit_path.open('x') as f:

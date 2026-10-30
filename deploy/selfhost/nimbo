@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import host
 
 ROOT = Path(__file__).resolve().parent
 
@@ -19,6 +20,9 @@ def compose(*args, capture=False):
 
 
 def ready():
+    settings = json.loads((ROOT / 'installation.json').read_text())
+    if settings.get('boundedStorage') and not os.path.ismount(ROOT / 'storage'):
+        raise ValueError('Том данных не смонтирован. Не запускаем сервер с пустым каталогом.')
     path = ROOT / 'data/workspace.json'
     if not path.is_file() or not json.loads(path.read_text()).get('invitationsReady'):
         raise ValueError('Workspace is not initialized. Run nimbo install first.')
@@ -38,6 +42,37 @@ def healthy():
     raise ValueError('API health check failed. Inspect nimbo logs; data is preserved.')
 
 
+def antivirus_ready():
+    settings = json.loads((ROOT / 'installation.json').read_text())
+    if not settings.get('antivirus'):
+        return
+    print('Ожидаем ClamAV и базы сигнатур (при первой установке — до 10 минут)…', flush=True)
+    for _ in range(120):
+        result = compose('ps', '--format', 'json', 'antivirus', capture=True).stdout.strip()
+        try:
+            # Compose v2 has used both a JSON array and newline-delimited objects.
+            rows = json.loads(result) if result.startswith('[') else [json.loads(line) for line in result.splitlines()]
+            if any(row.get('Health') == 'healthy' for row in rows):
+                print('ClamAV готов к проверке вложений.')
+                return
+        except (ValueError, TypeError):
+            pass
+        time.sleep(5)
+    raise ValueError('ClamAV не готов. Проверьте nimbo logs. Проверка НЕ отключена; непроверенные вложения блокируются.')
+
+
+def network_check():
+    settings = json.loads((ROOT / 'installation.json').read_text())
+    with urllib.request.urlopen(settings['origin'] + '/healthz', timeout=10) as response:
+        if response.status != 200 or json.load(response).get('status') != 'ok':
+            raise ValueError('Public HTTPS health check failed.')
+    print('HTTPS, сертификат и API проверены с этого VPS: ' + settings['origin'])
+    print('Это не внешняя проверка firewall: выполните с другого компьютера:')
+    print('  curl --fail --max-time 10 ' + settings['origin'] + '/healthz')
+    print('Публичные порты: ' + json.dumps(settings.get('publicPorts', {})))
+    print('UDP и TURN нужно проверить звонком между двумя разными сетями; TCP-проверка их не подтверждает.')
+
+
 def main():
     command = sys.argv[1] if len(sys.argv) == 2 else 'help'
     if command == 'help':
@@ -48,9 +83,11 @@ def main():
               '  start       запустить существующую установку\n'
               '  stop        остановить эту установку, сохранив данные\n'
               '  owner-code  новый одноразовый код владельца на 30 минут\n'
+              '  check       проверить HTTPS/API и показать порты для внешней проверки\n'
+              '  renew-certificates  продлить сертификат этой установки\n'
               '  help        эта справка')
         return
-    if command not in ('install', 'status', 'logs', 'start', 'stop', 'owner-code'):
+    if command not in ('install', 'status', 'logs', 'start', 'stop', 'owner-code', 'check', 'renew-certificates'):
         raise ValueError('Unknown command. Run nimbo help.')
     if os.geteuid() != 0:
         raise ValueError('Run with sudo.')
@@ -59,23 +96,49 @@ def main():
         if command == 'install':
             if (ROOT / 'data/workspace.json').exists():
                 raise ValueError('Workspace already exists. Use start; install never replaces data.')
+            settings = json.loads((ROOT / 'installation.json').read_text())
+            if settings.get('boundedStorage') and not os.path.ismount(ROOT / 'storage'):
+                if (ROOT / 'storage.ext4').exists():
+                    raise ValueError('Storage image exists but is not mounted. Restore its mount unit; it will not be reformatted.')
+                host.prepare_storage(ROOT, settings['storageGiB'])
+            if settings.get('managedCertificates'):
+                host.certificates(ROOT, settings)
             compose('config', '--quiet')
-            compose('build', 'nimbo')
+            compose('build')
             compose('pull', 'livekit', 'caddy')
             compose('run', '--rm', '--no-deps', 'caddy', 'validate', '--config', '/etc/caddy/caddy.json')
             compose('run', '--rm', '--no-deps', 'nimbo', 'init', '--offline')
             ready()
             compose('up', '-d')
             healthy()
+            antivirus_ready()
+            network_check()
+            if settings.get('managedCertificates'):
+                host.renewal_timer(ROOT, settings['project'])
             print('Enrollment is closed. When ready, run nimbo owner-code.')
         elif command == 'start':
             ready()
             compose('up', '-d')
             healthy()
+            antivirus_ready()
         elif command == 'stop':
             compose('stop')
         elif command == 'status':
             compose('ps', '-a')
+        elif command == 'check':
+            network_check()
+        elif command == 'renew-certificates':
+            settings = json.loads((ROOT / 'installation.json').read_text())
+            if not settings.get('managedCertificates'):
+                raise ValueError('Эта установка использует сертификаты администратора.')
+            changed = host.certificates(ROOT, settings, renew=True)
+            if changed:
+                # restart only running services; a stopped installation stays stopped.
+                running = compose('ps', '--status', 'running', '--services', capture=True).stdout.split()
+                services = [name for name in ('caddy', 'livekit') if name in running]
+                if services:
+                    compose('restart', *services)
+            print('Сертификаты проверены; обновление применено.' if changed else 'Сертификаты пока не требуют замены.')
         elif command == 'logs':
             compose('logs', '--tail', '100')
         elif command == 'owner-code':

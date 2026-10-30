@@ -13,6 +13,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import host
 
 LIVEKIT = 'livekit/livekit-server@sha256:89ca9ce0791e18d6e03bf6e2c49ceb27e1c754eae8bd50c989386c1a5963791a'
 CADDY = 'livekit/caddyl4@sha256:9dd090159a6042a907dbff0ce9dda27a21d2a559dc7b03b60a8e6b1b60b8348e'
@@ -38,25 +39,81 @@ def port(value):
 
 def arguments():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--directory', type=Path, default=Path('/opt/nimbo-selfhost'))
-    p.add_argument('--project', default='nimbo-selfhost')
+    p.add_argument('--directory', type=Path)
+    p.add_argument('--project')
     p.add_argument('--domain', type=domain, required=True)
     p.add_argument('--rtc-domain', type=domain, required=True)
     p.add_argument('--turn-domain', type=domain, required=True)
     p.add_argument('--public-ip', type=ipaddress.IPv4Address, required=True)
-    p.add_argument('--https-port', type=int, default=443)
-    p.add_argument('--api-port', type=port, default=8090)
-    p.add_argument('--signal-port', type=port, default=7880)
-    p.add_argument('--rtc-tcp-port', type=port, default=7881)
-    p.add_argument('--rtc-udp-port', type=port, default=7882)
-    p.add_argument('--turn-tls-port', type=port, default=5349)
-    p.add_argument('--turn-udp-port', type=port, default=3478)
+    p.add_argument('--https-port', type=int, help='Prompt in a terminal; required for unattended installs')
+    p.add_argument('--api-port', type=port)
+    p.add_argument('--signal-port', type=port)
+    p.add_argument('--rtc-tcp-port', type=port)
+    p.add_argument('--rtc-udp-port', type=port)
+    p.add_argument('--turn-tls-port', type=port)
+    p.add_argument('--turn-udp-port', type=port)
+    p.add_argument('--memory-mib', type=int, default=1536, help='Total API/media/proxy RAM cap; scanner adds 3072 MiB')
+    p.add_argument('--cpus', type=float, default=2.0, help='Total CPU ceiling including scanner')
+    p.add_argument('--storage-gib', type=int, default=10, help='Preallocated ext4 volume for messages, files and scanner database')
+    p.add_argument('--firewall', choices=('manual', 'ufw'), default='manual')
+    p.add_argument('--acme-webroot', type=Path, help='Existing HTTP-01 webroot served on port 80 for all three names')
     p.add_argument('--certificate-directory', type=Path,
                    help='Existing PEM pairs app.crt/app.key, rtc.crt/rtc.key, turn.crt/turn.key; copied, never modified')
     p.add_argument('--web-preview', action='store_true', help='Expose the development web client for acceptance testing')
     p.add_argument('--prepare-only', action='store_true', help='Write configuration, but do not build, initialize or start containers')
+    p.add_argument('--antivirus', choices=('auto', 'on', 'off'), default='auto',
+                   help='auto: install ClamAV by default; below 4 GiB RAM ask explicitly. Use on/off for unattended installs.')
     p.add_argument('--skip-dns-check', action='store_true', help='Only for preconfigured NAT/DNS environments')
     return p.parse_args()
+
+
+def memory_bytes():
+    """Use the smaller host/daemon capacity; never count swap as RAM."""
+    values = []
+    try:
+        for line in Path('/proc/meminfo').read_text().splitlines():
+            if line.startswith('MemTotal:'):
+                values.append(int(line.split()[1]) * 1024)
+    except (OSError, ValueError):
+        pass
+    try:
+        value = int(run('docker', 'info', '--format', '{{.MemTotal}}', capture_output=True).stdout)
+        if value > 0:
+            values.append(value)
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        pass
+    return min(values) if values else None
+
+
+def select_antivirus(mode, ram, interactive=None, ask=input):
+    small = ram is None or ram < 4 * 1024**3
+    print('Nimbo с ClamAV: ориентир от 4 ГБ ОЗУ и 2 vCPU; для запаса рекомендуем 6–8 ГБ ОЗУ.')
+    print('ClamAV использует значительную память; обновление баз и звонки тоже требуют ресурсов.')
+    if ram is not None:
+        print(f'Обнаружено ОЗУ: {ram / 1024**3:.2f} GiB (без swap).')
+    if mode == 'off':
+        print('ClamAV не устанавливается. Проверка вложений не будет доступна без отдельного сканера.')
+        return False
+    if mode == 'on':
+        if small:
+            print('Вы явно выбрали ClamAV при недостаточной или неизвестной памяти. Возможны остановки из-за нехватки ОЗУ.')
+        return True
+    if not small:
+        return True
+    print('Меньше 4 GiB ОЗУ или объём неизвестен: требуется выбрать установку антивируса.')
+    if interactive is None:
+        interactive = sys.stdin.isatty()
+    if not interactive:
+        raise ValueError('Повторите с --antivirus on или --antivirus off. Автоматического отключения защиты нет.')
+    while True:
+        try:
+            answer = ask('Установить ClamAV? [да/нет]: ').strip().lower()
+        except EOFError:
+            raise ValueError('Выбор не получен. Используйте --antivirus on или off.') from None
+        if answer in ('yes', 'y', 'да', 'д'):
+            return True
+        if answer in ('no', 'n', 'нет', 'н'):
+            return False
 
 
 def configuration(a):
@@ -97,17 +154,13 @@ def configuration(a):
         'routes': [proxy(a.domain, a.api_port, None if a.web_preview else ['/api/*', '/healthz']),
                    proxy(a.rtc_domain, a.signal_port),
                    {'handle': [{'handler': 'static_response', 'status_code': 404}]}]}
-    if a.certificate_directory:
-        http['automatic_https'] = {'disable': True}
-        # With a custom public port, terminate TURN TLS in LiveKit itself.
-        # external_tls advertises 443 and is only appropriate for the shared-443 proxy.
-        http.pop('listener_wrappers')
-        livekit['turn'].update({'external_tls': False, 'proxy_protocol': False,
-                               'cert_file': '/certificates/turn.crt', 'key_file': '/certificates/turn.key'})
-        certificates = {'load_files': [{'certificate': f'/certificates/{name}.crt',
-            'key': f'/certificates/{name}.key'} for name in ('app', 'rtc', 'turn')]}
-    else:
-        certificates = {'automate': [a.domain, a.rtc_domain, a.turn_domain]}
+    # Each instance owns TLS on its chosen ports; ACME runs separately.
+    http['automatic_https'] = {'disable': True}
+    http.pop('listener_wrappers')
+    livekit['turn'].update({'external_tls': False, 'proxy_protocol': False,
+                           'cert_file': '/certificates/turn.crt', 'key_file': '/certificates/turn.key'})
+    certificates = {'load_files': [{'certificate': f'/certificates/{name}.crt',
+        'key': f'/certificates/{name}.key'} for name in ('app', 'rtc', 'turn')]}
     caddy = {'admin': {'disabled': True}, 'apps': {'tls': {'certificates': certificates},
              'http': {'servers': {'nimbo': http}}}}
     common = {'network_mode': 'host', 'restart': 'unless-stopped', 'read_only': True,
@@ -130,6 +183,32 @@ def configuration(a):
             'tmpfs': ['/tmp:size=32m,mode=1777'], 'cap_add': ['NET_BIND_SERVICE'],
             'pids_limit': 256, 'mem_limit': '256m', 'stop_grace_period': '20s'}},
         'volumes': {'caddy_data': {}, 'caddy_config': {}}}
+    compose['services']['nimbo']['volumes'] = [host.bind('./storage/data', '/var/lib/nimbo')]
+    compose['services']['livekit']['volumes'] = ['./private/livekit.yaml:/etc/livekit.yaml:ro', './private/certificates:/certificates:ro']
+    compose['services']['caddy']['volumes'] = ['./caddy.json:/etc/caddy/caddy.json:ro', 'caddy_data:/data', 'caddy_config:/config', './private/certificates:/certificates:ro']
+    proxy_ram = a.memory_mib // 6
+    for name, ram in (('nimbo', proxy_ram), ('caddy', proxy_ram), ('livekit', a.memory_mib - 2 * proxy_ram)):
+        compose['services'][name]['mem_limit'] = f'{ram}m'
+        compose['services'][name]['memswap_limit'] = f'{ram}m'
+    # Fractions sum to the chosen per-installation CPU budget, not per-service.
+    shares = {'nimbo': .125, 'caddy': .125, 'livekit': .5 if a.antivirus_enabled else .75}
+    for name, fraction in shares.items():
+        compose['services'][name]['cpus'] = round(a.cpus * fraction, 4)
+    if a.antivirus_enabled:
+        env += ('NIMBO_CLAMD_ADDRESS=unix:/run/nimbo-antivirus/clamd.sock\n'
+                'NIMBO_ANTIVIRUS_MANAGER_SOCKET=/run/nimbo-antivirus/control.sock\n')
+        compose['services']['nimbo']['volumes'].append('./antivirus/run:/run/nimbo-antivirus:ro')
+        # Separate network, no published ports, no access to chat data or API secrets.
+        compose['services']['antivirus'] = {
+            'build': {'context': './antivirus', 'dockerfile': 'Dockerfile'},
+            'image': f'{a.project}-antivirus:local', 'user': '65532:65532',
+            'init': True, 'restart': 'unless-stopped', 'read_only': True,
+            'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'],
+            'volumes': [host.bind('./storage/antivirus-db', '/var/lib/clamav'), './antivirus/run:/run/nimbo-antivirus'],
+            'tmpfs': ['/tmp:size=128m,mode=1777'], 'mem_limit': '3g', 'memswap_limit': '3g', 'cpus': round(a.cpus * .25, 4),
+            'pids_limit': 64, 'stop_grace_period': '30s', 'logging': common['logging'],
+            'healthcheck': {'test': ['CMD', 'python3', '/opt/antivirus/healthcheck.py'],
+                            'interval': '15s', 'timeout': '5s', 'retries': 4, 'start_period': '300s'}}
     return env, livekit, caddy, compose, origin
 
 
@@ -138,14 +217,14 @@ def preflight(a, bundle):
         raise ValueError('This bundle requires Linux amd64 and root (sudo).')
     if not re.fullmatch(r'[a-z][a-z0-9-]{2,39}', a.project):
         raise ValueError('Use a unique lowercase project name (3–40 letters/digits/hyphens).')
-    if not a.directory.is_absolute() or a.directory.exists():
+    if not a.directory.is_absolute() or a.directory.exists() or not re.fullmatch(r'/[a-zA-Z0-9_./-]+', str(a.directory)) or '..' in a.directory.parts:
         raise ValueError('Choose a new absolute installation directory; existing installations are never overwritten.')
     if len({a.domain, a.rtc_domain, a.turn_domain}) != 3:
         raise ValueError('API, signalling and TURN require three different DNS names.')
-    if not 1 <= a.https_port <= 65535 or (a.https_port != 443 and not a.certificate_directory):
-        raise ValueError('Automatic certificates require port 443; a custom HTTPS port requires supplied certificates.')
+    if not (a.https_port == 443 or 1024 <= a.https_port <= 65535):
+        raise ValueError('HTTPS port must be 443 or 1024–65535.')
     tcp = [a.api_port, a.signal_port, a.rtc_tcp_port, a.turn_tls_port, a.https_port]
-    if not a.certificate_directory:
+    if not a.certificate_directory and not a.acme_webroot:
         tcp.append(80)
     if len(tcp) != len(set(tcp)) or a.rtc_udp_port == a.turn_udp_port:
         raise ValueError('Ports of the same transport must be different.')
@@ -166,7 +245,14 @@ def preflight(a, bundle):
             pub_key = run('openssl', 'pkey', '-in', str(key), '-pubout', capture_output=True).stdout
             if pub_cert != pub_key:
                 raise ValueError(f'Certificate/key mismatch: {name}')
-    for filename in ('nimbo-server', 'nimbo', 'Dockerfile.binary', 'SHA256SUMS'):
+    elif not shutil.which('certbot'):
+        raise ValueError('Для автоматических сертификатов установите Certbot: sudo apt-get install certbot')
+    if a.acme_webroot and (not a.acme_webroot.is_absolute() or not a.acme_webroot.is_dir()):
+        raise ValueError('--acme-webroot must be an existing absolute directory served over HTTP.')
+    for command in ('fallocate', 'mkfs.ext4', 'systemctl', 'systemd-escape'):
+        if not shutil.which(command):
+            raise ValueError(f'Missing host prerequisite: {command}')
+    for filename in ('nimbo-server', 'nimbo', 'host.py', 'Dockerfile.binary', 'SHA256SUMS'):
         if not (bundle / filename).is_file():
             raise ValueError(f'Missing release file: {filename}')
     expected = (bundle / 'SHA256SUMS').read_text().split()[0]
@@ -188,18 +274,46 @@ def write(path, text):
 
 def main():
     a = arguments()
+    if platform.system() != 'Linux' or os.geteuid() != 0:
+        raise ValueError('Run on Linux with sudo.')
+    os.umask(0o077)
+    with host.registry_lock() as records:
+        a.https_port = host.select_port(a.https_port, records)
+        a.project = a.project or f'nimbo-{a.https_port}'
+        a.directory = a.directory or Path('/opt') / a.project
+        host.allocate_ports(a, records)
+        install(a, records)
+
+
+def install(a, records):
     bundle = Path(__file__).resolve().parent
     preflight(a, bundle)
+    ram = memory_bytes()
+    a.antivirus_enabled = select_antivirus(a.antivirus, ram)
+    host.resource_preflight(a, records, ram)
+    if a.antivirus_enabled:
+        for name in ('Dockerfile', 'manager.py', 'clamd.conf', 'freshclam.conf', 'healthcheck.py'):
+            if not (bundle / 'antivirus' / name).is_file():
+                raise ValueError(f'Missing antivirus release file: {name}')
     os.umask(0o077)
     root = a.directory
     root.mkdir(mode=0o700, parents=True, exist_ok=False)
+    # Failed installations keep reservations and files for inspection, never
+    # silently hand their ports to a different instance.
+    host.reserve(a, records)
     (root / 'private').mkdir(mode=0o700)
-    (root / 'data').mkdir(mode=0o700)
-    os.chown(root / 'data', 65532, 65532)
-    for filename in ('nimbo-server', 'nimbo', 'Dockerfile.binary', 'SHA256SUMS'):
+    for filename in ('nimbo-server', 'nimbo', 'host.py', 'Dockerfile.binary', 'SHA256SUMS'):
         shutil.copyfile(bundle / filename, root / filename)
     (root / 'nimbo').chmod(0o700)
     (root / 'nimbo-server').chmod(0o755)
+    if a.antivirus_enabled:
+        scanner = root / 'antivirus'
+        scanner.mkdir(mode=0o700)
+        for name in ('Dockerfile', 'manager.py', 'clamd.conf', 'freshclam.conf', 'healthcheck.py'):
+            shutil.copyfile(bundle / 'antivirus' / name, scanner / name)
+        for name in ('run',):
+            (scanner / name).mkdir(mode=0o700)
+            os.chown(scanner / name, 65532, 65532)
     if a.certificate_directory:
         dest = root / 'private/certificates'
         dest.mkdir(mode=0o700)
@@ -212,11 +326,17 @@ def main():
         write(root / path, json.dumps(value, indent=2) + '\n')
     write(root / 'installation.json', json.dumps({'project': a.project, 'origin': origin,
           'apiPort': a.api_port, 'suppliedCertificates': bool(a.certificate_directory),
-          'webPreview': a.web_preview}, indent=2) + '\n')
+          'domains': [a.domain, a.rtc_domain, a.turn_domain], 'managedCertificates': not bool(a.certificate_directory),
+          'acmeWebroot': str(a.acme_webroot) if a.acme_webroot else None,
+          'storageGiB': a.storage_gib, 'boundedStorage': True, 'publicPorts': host.public_ports(a),
+          'webPreview': a.web_preview, 'antivirus': a.antivirus_enabled}, indent=2) + '\n')
     print(f'Prepared {root}. Public ports: TCP {a.https_port}, {a.rtc_tcp_port}; UDP {a.rtc_udp_port}, {a.turn_udp_port}.')
-    print('Firewall rules and existing installations were not changed.')
+    if not a.prepare_only:
+        host.firewall(a)
+    else:
+        print('Prepare-only: ports/resources reserved; no volume, certificates, firewall rules or containers created.')
     if not a.certificate_directory:
-        print('TCP 80 is also required for automatic HTTPS. Check A and AAAA DNS records.')
+        print('TCP 80 is required for HTTP-01 certificate issuance/renewal. Check A and AAAA records.')
     else:
         print(f'TURN TLS also requires TCP {a.turn_tls_port}.')
         print('Supplied certificates are copies; arrange renewal before they expire.')

@@ -3,6 +3,7 @@ import {resolve, dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
+import {checkUIAssets} from './check-ui-assets.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const web = join(root, 'web');
@@ -18,8 +19,10 @@ function run(command, args, cwd, extra = {}) {
   if (result.error) throw result.error;
   if (result.status !== 0) throw Error(`${command} failed: ${result.status}`);
 }
+checkUIAssets(root);
 run(process.execPath, [join(web, 'node_modules/vue-tsc/bin/vue-tsc.js'), '--noEmit'], web);
 run(process.execPath, [join(web, 'node_modules/vite/bin/vite.js'), 'build'], web);
+checkUIAssets(root, true);
 for (const name of readdirSync(join(root, 'server'))) {
   if (name === 'go.mod' || name === 'go.sum' || name.endsWith('.go')) cpSync(join(root, 'server', name), join(source, name));
 }

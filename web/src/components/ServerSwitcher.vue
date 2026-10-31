@@ -6,7 +6,12 @@ const props=defineProps<{servers:SavedServer[]}>();
 const open=ref(false),root=ref<HTMLElement>(),trigger=ref<HTMLButtonElement>(),list=ref<HTMLElement>();
 const scrollTop=ref(0),moreBelow=ref(false);
 const origin=activeServer;
-const emit=defineEmits<{open:[server:SavedServer];refresh:[]}>();const sorted=computed(()=>[...props.servers].sort((a,b)=>Number(!!b.pinned)-Number(!!a.pinned)));
+const emit=defineEmits<{open:[server:SavedServer];refresh:[]}>();
+const sorted = computed(() => {
+  const current = origin.value;
+  const priority = (server: SavedServer) => server.url === current ? 2 : Number(!!server.pinned);
+  return [...props.servers].sort((a, b) => priority(b) - priority(a));
+});
 function measure(){const el=list.value;if(el){scrollTop.value=el.scrollTop;moreBelow.value=el.scrollTop+el.clientHeight<el.scrollHeight-2;}}
 watch(open,value=>{if(value)emit('refresh');});
 watch([open,()=>props.servers.length],async()=>{await nextTick();measure();});

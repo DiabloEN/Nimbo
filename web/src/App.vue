@@ -89,14 +89,19 @@ async function moderateMedia(person:{identity:string},action:string){if(mediaMod
 const inputOptions=computed(()=>inputs.value.map(d=>({value:d.deviceId,label:d.label})));
 const outputOptions=computed(()=>outputs.value.map(d=>({value:d.deviceId,label:d.label})));
 const cameraOptions=computed(()=>cameras.value.map(d=>({value:d.deviceId,label:d.label})));
-const form = reactive({ name: '', password: '', room: '', withMic: true });
+const form = reactive({ name: '', password: '', withMic: true });
 const firstChannel=computed(()=>firstSidebarChannel(rooms.value,workspace.sectionOrder.value,workspace.sections.value));
 const selectedId=ref('');
 const selectedChannel=computed(()=>rooms.value.find(r=>r.id===selectedId.value));
 const voiceRooms=computed(()=>rooms.value.filter(r=>r.kind==='voice'));
 const textRooms=computed(()=>rooms.value.filter(r=>r.kind==='text'));
 const isText=computed(()=>selectedChannel.value?.kind==='text');
-const connectedTitle=computed(()=>rooms.value.find(r=>r.id===form.room)?.name||'Комната');
+type VoiceLocation = { origin: string; room: string; title: string; server: string; member: string; session: string };
+const voice = ref<VoiceLocation>();
+const localVoiceRoom = computed(() => voice.value?.origin === activeServer.value ? voice.value.room : '');
+const foreignVoice = computed(() => !!voice.value && voice.value.origin !== activeServer.value);
+const viewingCall = computed(() => !!localVoiceRoom.value && selectedId.value === localVoiceRoom.value);
+const compactDock = computed(() => page.value === '/room' && (isText.value || foreignVoice.value));
 const roomTitle=computed(()=>selectedChannel.value?.name||'Пространство');
 const invite = ref<HTMLDialogElement | null>(null), copied = ref('');
 const currentPath = ref(window.location.hash.slice(1) || '/profile');
@@ -163,10 +168,15 @@ async function switchServer(server:SavedServer){
  try{
   const prepared=await prepareServer(server,AbortSignal.any([serverSwitchAbort.signal,AbortSignal.timeout(15000)]));
   if(authenticated.value){personal.value.hotkeys={...hotkeys.bindings.value};rememberProfile();}
-  clearResume();reportVoice('left');await call.leave();workspace.stop();configController.abort();
+  if (voice.value && localVoiceRoom.value && voice.value.member === workspace.selfId.value) {
+   voice.value.session = access.session.value;
+   voice.value.server = spaceName.value;
+   voice.value.title = rooms.value.find(room => room.id === localVoiceRoom.value)?.name || voice.value.title;
+  }
+  workspace.stop();configController.abort();
   selectServerOrigin(server.url);access.reset();try{localStorage.removeItem('nimbo-signed-out:'+server.url);}catch{}
   profileKey.value=server.profileKey;access.session.value=prepared.access.session;access.member.value=prepared.access.member;authenticated.value=true;
-  form.name=prepared.access.member.name;form.password='';form.room='';selectedId.value='';volumePerson.value=null;invite.value?.close();
+  form.name=prepared.access.member.name;form.password='';selectedId.value='';volumePerson.value=null;invite.value?.close();
   profileAvatar.value=prepared.access.member.avatar||personal.value.avatar;localProfileOpen.value=false;
   workspace.start(prepared.workspace);navigate('/room');await nextTick();rememberProfile();void syncProfileAvatar();
  }catch(e){switchError.value=e instanceof Error&&e.name!=='TypeError'?e.message:'Не удалось подключиться. Проверьте доступность и версию сервера.';}
@@ -274,41 +284,73 @@ function openVolume(person:{identity:string;name:string;local?:boolean},event?:M
 watch(()=>page.value,()=>volumePerson.value=null);
 function avatarFor(person:{identity:string;local?:boolean}){const id=person.identity.split('.')[0]!;return (person.local||id===self.value?.id)?profileAvatar.value||avatars.value[id]:avatars.value[id];}
 function displayPerson(person:{identity:string;name:string;local:boolean;speaking:boolean;mic:boolean;reconnecting?:boolean}){const member=members.value.find(m=>m.id===person.identity.split('.')[0]);return {...person,name:member?.name||person.name,avatar:avatarFor(person),canModerateMedia:!!member&&editableMember(self.value,member)&&workspace.can('kick_members')};}
-const stagePeople=computed(()=>peopleIn(form.room).map(displayPerson));
+const stagePeople=computed(()=>localVoiceRoom.value ? peopleIn(localVoiceRoom.value).map(displayPerson) : []);
 const waitingPeople=computed(()=>peopleIn(selectedId.value).filter(p=>!p.local).map(displayPerson));
-type ResumeRoom={room:string;identity:string;member:string;mic:boolean;at:number};let resumeRoom:ResumeRoom|undefined,pageLeaving=false;
+type ResumeRoom={origin?:string;room:string;identity:string;member:string;mic:boolean;at:number};let resumeRoom:ResumeRoom|undefined,pageLeaving=false;
 try{const saved=JSON.parse(sessionStorage.getItem('nimbo-resume-room')||'null');if(saved&&typeof saved.room==='string'&&typeof saved.identity==='string'&&typeof saved.member==='string'&&typeof saved.mic==='boolean'&&Date.now()-saved.at<12*60*60*1000&&Date.now()>=saved.at)resumeRoom=saved;}catch{/* optional recovery */}
 function clearResume(){resumeRoom=undefined;try{sessionStorage.removeItem('nimbo-resume-room');}catch{}}
 function rememberRoom(){
- const person=participants.value.find(p=>p.local);if(!connected.value||!person?.identity||!workspace.selfId.value||!form.room)return;
- try{sessionStorage.setItem('nimbo-resume-room',JSON.stringify({room:form.room,identity:person.identity,member:workspace.selfId.value,mic:mic.value,at:Date.now()}));}catch{}
+ const location = voice.value;
+ const person = participants.value.find(p => p.local);
+ if (!connected.value || !person || !location) return;
+ const saved: ResumeRoom = { origin: location.origin, room: location.room, identity: person.identity, member: location.member, mic: mic.value, at: Date.now() };
+ try { sessionStorage.setItem('nimbo-resume-room', JSON.stringify(saved)); } catch {}
 }
-watch([connected,mic,()=>participants.value.find(p=>p.local)?.identity,workspace.selfId],()=>{if(!pageLeaving)rememberRoom();});
-watch(hasRoom,(present,previous)=>{if(previous&&!present&&!pageLeaving&&!changingRoom)clearResume();});
-function reportVoice(state:'reconnecting'|'left',identity=participants.value.find(p=>p.local)?.identity,roomId=form.room){if(!identity||!access.session.value)return;void apiFetch('/api/voice-state',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+access.session.value},body:JSON.stringify({identity,room:roomId,state}),keepalive:true}).catch(()=>{});}
-watch(workspace.ready,async ready=>{if(!ready||!resumeRoom)return;const saved=resumeRoom;resumeRoom=undefined;if(saved.member!==workspace.selfId.value||!rooms.value.some(r=>r.id===saved.room&&r.kind==='voice')){clearResume();return;}form.withMic=saved.mic;await chooseRoom(saved.room);form.withMic=true;if(!hasRoom.value)clearResume();reportVoice('left',saved.identity,saved.room);});
+watch([connected, mic, () => participants.value.find(p => p.local)?.identity], () => { if (!pageLeaving) rememberRoom(); });
+watch(hasRoom, (present, previous) => {
+ if (previous && !present && !pageLeaving && !changingRoom) { clearResume(); voice.value = undefined; }
+});
+function reportVoice(state: 'reconnecting' | 'left', identity = participants.value.find(p => p.local)?.identity, location = voice.value) {
+ if (!identity || !location) return;
+ const session = location.origin === activeServer.value && location.member === workspace.selfId.value ? access.session.value : location.session;
+ void serverFetch(location.origin, '/api/voice-state', {
+  method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + session },
+  body: JSON.stringify({identity, room: location.room, state}), keepalive: true
+ }).catch(() => {});
+}
+watch(workspace.ready,async ready=>{if(!ready||!resumeRoom)return;const saved=resumeRoom;resumeRoom=undefined;if((saved.origin && saved.origin!==activeServer.value)||saved.member!==workspace.selfId.value||!rooms.value.some(r=>r.id===saved.room&&r.kind==='voice')){clearResume();return;}form.withMic=saved.mic;await chooseRoom(saved.room);form.withMic=true;if(!hasRoom.value)clearResume();if(voice.value?.room===saved.room)reportVoice('left',saved.identity,voice.value);});
 let changingRoom=false;const pendingRoom=ref('');
-function leaveRoom(){clearResume();reportVoice('left');pendingRoom.value='';void call.leave();}
+function leaveRoom(){clearResume();reportVoice('left');pendingRoom.value='';voice.value=undefined;void call.leave();}
+async function returnToCall() {
+ const original = voice.value;
+ const server = personal.value.servers.find(s => s.url === original?.origin);
+ if (!original || !server) return;
+ await switchServer(server);
+ if (voice.value === original && locked.value && localVoiceRoom.value === original.room) {
+  selectedId.value = original.room;
+  navigate('/room');
+  void workspace.selectText('');
+ }
+}
 async function chooseRoom(id:string) {
   const ch=rooms.value.find(r=>r.id===id);if(!ch)return;
   selectedId.value=id;navigate('/room');
   if(ch.kind==='text'){void workspace.selectText(id);return;}
   void workspace.selectText('');
-  if(joining.value||changingRoom||(id===form.room&&hasRoom.value))return;
+  if(joining.value||changingRoom||(id===localVoiceRoom.value&&hasRoom.value))return;
   clearResume();
   changingRoom=true;pendingRoom.value=id;
-  try{if(hasRoom.value){reportVoice('left');await call.leave();}form.room=id;if(authenticated.value)await call.join({...form,session:access.session.value});}
-  finally{changingRoom=false;pendingRoom.value='';}
+  const target = {origin: activeServer.value, room: id, title: ch.name, server: spaceName.value, member: workspace.selfId.value, session: access.session.value};
+  try {
+    if (hasRoom.value) { reportVoice('left'); await call.leave(); }
+    if (!authenticated.value || activeServer.value !== target.origin) return;
+    voice.value = target;
+    await call.join({...form, room: id, session: target.session});
+  } finally {
+    changingRoom = false;
+    pendingRoom.value = '';
+    if (!hasRoom.value) voice.value = undefined;
+  }
 }
 function peopleIn(id:string) {
-  if(!pendingRoom.value&&connected.value&&id===form.room)return participants.value.map(p=>({...p,pending:false,reconnecting:false}));
+  if(!pendingRoom.value&&connected.value&&id===localVoiceRoom.value)return participants.value.map(p=>({...p,pending:false,reconnecting:false}));
   const others=(presenceAvailable.value?presence.value[id]?.people||[]:[]).filter(p=>p.identity.split('.')[0]!==self.value?.id).map(p=>({...p,local:false,speaking:false,mic:false,micKnown:false,camera:false,screen:false,pending:false}));
-  if(pendingRoom.value&&pendingRoom.value===id)others.push({identity:(self.value?.id||'local')+'.pending',name:form.name,joinedAt:Date.now(),local:true,speaking:false,mic:false,micKnown:false,camera:false,screen:false,pending:true});
+  if(localVoiceRoom.value===id&&pendingRoom.value===id)others.push({identity:(self.value?.id||'local')+'.pending',name:form.name,joinedAt:Date.now(),local:true,speaking:false,mic:false,micKnown:false,camera:false,screen:false,pending:true});
   return others;
 }
 watch(rooms,()=>{
   if(!workspace.ready.value)return;
-  if(hasRoom.value&&!rooms.value.some(r=>r.id===form.room)){clearResume();void call.leave('Комната удалена администратором.');}
+  if(hasRoom.value&&localVoiceRoom.value&&!rooms.value.some(r=>r.id===localVoiceRoom.value)){clearResume();void call.leave('Комната удалена администратором.');}
   if(!rooms.value.some(r=>r.id===selectedId.value)){const requested=new URLSearchParams(window.location.search).get('room');selectedId.value=rooms.value.find(r=>r.id===requested)?.id||firstChannel.value?.id||'';}
   void workspace.selectText(rooms.value.find(r=>r.id===selectedId.value)?.kind==='text'?selectedId.value:'');
 });
@@ -375,7 +417,7 @@ onBeforeUnmount(()=>{serverSwitchAbort?.abort();clearTimeout(restoreTimer);windo
       <div class="sidebar-brand-row"><a class="brand" href="#/room" @click.prevent="openHome">nimbo<span>.</span></a><ServerSwitcher :servers="personal.servers" @open="switchServer" @refresh="refreshServerNames"/></div>
       <a class="workspace" href="#/room" @click.prevent="openHome" :aria-label="spaceName+': открыть первый чат'"><div class="workspace-icon"><img v-if="workspace.avatar.value" :src="workspace.avatar.value" alt="Аватар сервера"><template v-else>{{Array.from(spaceName.trim())[0]?.toUpperCase()||'N'}}<b aria-hidden="true">.</b></template></div><div><div class="server-heading"><strong>{{spaceName}}</strong><span v-if="workspace.latency.value&&workspace.latency.value>700&&!workspace.networkError.value" class="network-latency">{{workspace.latency.value}} мс</span><span class="network-dot" :class="networkIndicator.color" :title="networkIndicator.label" :aria-label="networkIndicator.label" role="status"></span></div><span >{{workspace.description.value||'Место для своих'}}</span><span v-if="workspace.networkError.value||call.linkQuality.value==='lost'||call.linkQuality.value==='poor'" class="network-warning" role="status">{{networkIndicator.label}}</span></div></a>
       <div class="channel-scroll"><div class="channel-section" v-for="group in workspace.sectionOrder.value.map(id=>workspace.sections.value.find(s=>s.id===id)!).filter(Boolean)" :key="group.id"><template v-if="group.kind==='voice'"><div class="channel-label"><span class="section-kind-icon" role="img" aria-label="Голосовые комнаты" title="Голосовые комнаты"><AppIcon name="sound" :size="12"/></span><span>{{group.name}}</span></div>
-      <nav class="channels" aria-label="Голосовые комнаты"><div v-for="room in voiceRooms.filter(c=>(c.section||c.kind)===group.id)" :key="room.id" class="channel-item"><div class="voice-channel-row" :class="{selected:selectedId===room.id}"><button class="voice-channel-open" :disabled="joining" :aria-label="(connected && form.room===room.id ? 'Открыть ' : 'Подключиться: ') + room.name" @click="chooseRoom(room.id)"><AppIcon :name="room.icon||'sound'" :size="18"/><span>{{room.name}}</span></button><span v-if="peopleIn(room.id).length&&workspace.duration(room.id)" class="activity-time" title="Время активности комнаты">{{workspace.duration(room.id)}}</span><button v-if="locked&&form.room===room.id" class="voice-channel-exit" :aria-label="'Выйти из комнаты: '+room.name" title="Выйти из комнаты" @click="leaveRoom"><AppIcon name="exit" :size="18"/></button></div><ul v-if="peopleIn(room.id).length" class="channel-people"><li v-for="person in peopleIn(room.id)" :key="person.identity" :class="{speaking:person.speaking,pending:person.pending,reconnecting:person.reconnecting}" @contextmenu.prevent="openVolume(person,$event)"><span class="avatar tiny"><img v-if="avatarFor(person)" :src="avatarFor(person)" alt=""><template v-else>{{initials(person.name)}}</template></span><span>{{person.name}}{{person.local?' · вы':''}}<small v-if="person.pending">Подключение…</small><small v-else-if="person.reconnecting">Переподключается…</small></span><span class="person-media-hints"><AppIcon v-if="person.micKnown&&!person.mic" name="mic-off" :size="12"/><AppIcon v-if="person.camera" name="camera" :size="12"/><AppIcon v-if="person.screen" name="screen" :size="12"/></span></li></ul></div></nav>
+      <nav class="channels" aria-label="Голосовые комнаты"><div v-for="room in voiceRooms.filter(c=>(c.section||c.kind)===group.id)" :key="room.id" class="channel-item"><div class="voice-channel-row" :class="{selected:selectedId===room.id}"><button class="voice-channel-open" :disabled="joining" :aria-label="(connected && localVoiceRoom===room.id ? 'Открыть ' : 'Подключиться: ') + room.name" @click="chooseRoom(room.id)"><AppIcon :name="room.icon||'sound'" :size="18"/><span>{{room.name}}</span></button><span v-if="peopleIn(room.id).length&&workspace.duration(room.id)" class="activity-time" title="Время активности комнаты">{{workspace.duration(room.id)}}</span><button v-if="locked&&localVoiceRoom===room.id" class="voice-channel-exit" :aria-label="'Выйти из комнаты: '+room.name" title="Выйти из комнаты" @click="leaveRoom"><AppIcon name="exit" :size="18"/></button></div><ul v-if="peopleIn(room.id).length" class="channel-people"><li v-for="person in peopleIn(room.id)" :key="person.identity" :class="{speaking:person.speaking,pending:person.pending,reconnecting:person.reconnecting}" @contextmenu.prevent="openVolume(person,$event)"><span class="avatar tiny"><img v-if="avatarFor(person)" :src="avatarFor(person)" alt=""><template v-else>{{initials(person.name)}}</template></span><span>{{person.name}}{{person.local?' · вы':''}}<small v-if="person.pending">Подключение…</small><small v-else-if="person.reconnecting">Переподключается…</small></span><span class="person-media-hints"><AppIcon v-if="person.micKnown&&!person.mic" name="mic-off" :size="12"/><AppIcon v-if="person.camera" name="camera" :size="12"/><AppIcon v-if="person.screen" name="screen" :size="12"/></span></li></ul></div></nav>
       </template><template v-else><div class="channel-label text-channels-label"><span class="section-kind-icon" role="img" aria-label="Текстовые каналы" title="Текстовые каналы"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m9 4-2 16M17 4l-2 16M4 9h16M3 15h16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></span><span>{{group.name}}</span></div><nav class="channels" aria-label="Текстовые комнаты"><button v-for="room in textRooms.filter(c=>(c.section||c.kind)===group.id)" :key="room.id" :class="{selected:selectedId===room.id}" @click="chooseRoom(room.id)"><AppIcon :name="room.icon||'hash'" :size="18"/><span>{{room.name}}</span><small v-if="workspace.notifications.value.some(n=>n.channel===room.id)" class="channel-mention" aria-label="Есть непрочитанные упоминания или ответы"></small></button></nav></template></div><p v-if="!rooms.length" class="field-help">Комнат пока нет.</p></div>
       <div class="sidebar-space"></div>
       <div class="profile-area">
@@ -384,16 +426,16 @@ onBeforeUnmount(()=>{serverSwitchAbort?.abort();clearTimeout(restoreTimer);windo
       </div>
     </aside>
 
-    <div class="main-column" :class="{'room-view':page==='/room','chat-view':page==='/room'&&isText}"><header class="topbar"><div v-if="page==='/room'" class="compact-room-title"><AppIcon :name="selectedChannel?.icon||(isText?'hash':'sound')" :size="21"/><h1 class="chat-title-label">{{roomTitle}}<span v-if="isText&&workspace.notifications.value.some(n=>n.channel===selectedId)" class="chat-title-dot" role="status" aria-label="Есть непрочитанные упоминания или ответы"></span></h1><ChatNotificationToggle v-if="isText" :enabled="chatAlerts.subscriptions.value.includes(selectedId)" @toggle="chatAlerts.toggle(selectedId)"/><span v-if="!isText" class="room-member-count">{{peopleIn(selectedId).length}}</span></div><h1 v-else-if="settingsOpen" id="settings-title" class="settings-heading">Настройки <span>·</span> {{sections.find(s=>s.id===section)?.name}}<template v-if="section==='workspace'"><span>·</span><small>{{members.length}}</small></template></h1><h1 v-else id="profile-title" class="settings-heading">Профиль</h1><div id="chat-call-controls" v-show="page==='/room'&&isText" class="chat-call-controls"></div><div class="topbar-actions"><button v-if="settingsOpen||page==='/profile'" class="text-button" @click="navigate('/room')"><AppIcon name="back" :size="17"/>К комнате</button></div></header>
+    <div class="main-column" :class="{'room-view':page==='/room','chat-view':page==='/room'&&isText}"><header class="topbar"><div v-if="page==='/room'" class="compact-room-title"><AppIcon :name="selectedChannel?.icon||(isText?'hash':'sound')" :size="21"/><h1 class="chat-title-label">{{roomTitle}}<span v-if="isText&&workspace.notifications.value.some(n=>n.channel===selectedId)" class="chat-title-dot" role="status" aria-label="Есть непрочитанные упоминания или ответы"></span></h1><ChatNotificationToggle v-if="isText" :enabled="chatAlerts.subscriptions.value.includes(selectedId)" @toggle="chatAlerts.toggle(selectedId)"/><span v-if="!isText" class="room-member-count">{{peopleIn(selectedId).length}}</span></div><h1 v-else-if="settingsOpen" id="settings-title" class="settings-heading">Настройки <span>·</span> {{sections.find(s=>s.id===section)?.name}}<template v-if="section==='workspace'"><span>·</span><small>{{members.length}}</small></template></h1><h1 v-else id="profile-title" class="settings-heading">Профиль</h1><div id="chat-call-controls" v-show="compactDock" class="chat-call-controls"></div><div class="topbar-actions"><button v-if="settingsOpen||page==='/profile'" class="text-button" @click="navigate('/room')"><AppIcon name="back" :size="17"/>К комнате</button></div></header>
       <main v-show="page==='/room'" class="room-stage">
 
         <div class="room-page">
           <p v-if="workspaceError" class="form-error" role="alert">{{workspaceError}}</p><p v-if="storageNote" class="form-error" role="alert">{{storageNote}}</p><div v-show="!isText" class="room-body">
             <section class="stage-content" aria-label="Участники голосовой комнаты">
 
-              <div v-if="(!connected||selectedId!==form.room)&&waitingPeople.length" class="waiting-grid"><article v-for="person in waitingPeople" :key="person.identity" class="person-card"><div class="avatar"><img v-if="person.avatar" :src="person.avatar" alt=""><template v-else>{{initials(person.name)}}</template></div><strong>{{person.name}}</strong><small v-if="person.reconnecting">Восстанавливает связь</small></article><button class="join-person" :disabled="joining" @click="chooseRoom(selectedId)"><span class="avatar"><AppIcon name="plus" :size="24"/></span><span>{{joining?'Подключение…':'Присоединиться'}}</span></button></div>
-              <button v-else-if="!connected||selectedId!==form.room" type="button" class="empty-room join-room-area" :disabled="joining||!selectedChannel||isText" :aria-label="'Подключиться к комнате '+roomTitle" @click="chooseRoom(selectedId)"><strong>{{joining ? 'Подключаемся к разговору…' : 'Присоединяйтесь к разговору.'}}</strong></button>
-              <div v-show="connected&&selectedId===form.room"><CallStage @leave="leaveRoom" :screen-audio="call.screenAudio.value" :screen-audio-available="call.screenAudioAvailable.value" :screen-audio-busy="!!call.pending.value" @toggle-screen-audio="call.toggleScreenAudio" :people="stagePeople" @person-menu="openVolume" @moderate-media="moderateMedia" :moderation-busy="mediaModerationBusy" :tiles="videoTiles" :visible="connected&&page==='/room'&&!isText&&selectedId===form.room" :bind-video-host="call.bindVideoHost" :refresh-video-layout="call.refreshVideoLayout"/></div><p v-if="call.screenAudioNote.value" class="field-help" role="status">{{call.screenAudioNote.value}}</p><p v-if="mediaModerationError" class="field-help" role="alert">{{mediaModerationError}}</p>
+              <div v-if="(!connected||!viewingCall)&&waitingPeople.length" class="waiting-grid"><article v-for="person in waitingPeople" :key="person.identity" class="person-card"><div class="avatar"><img v-if="person.avatar" :src="person.avatar" alt=""><template v-else>{{initials(person.name)}}</template></div><strong>{{person.name}}</strong><small v-if="person.reconnecting">Восстанавливает связь</small></article><button class="join-person" :disabled="joining" @click="chooseRoom(selectedId)"><span class="avatar"><AppIcon name="plus" :size="24"/></span><span>{{joining?'Подключение…':'Присоединиться'}}</span></button></div>
+              <button v-else-if="!connected||!viewingCall" type="button" class="empty-room join-room-area" :disabled="joining||!selectedChannel||isText" :aria-label="'Подключиться к комнате '+roomTitle" @click="chooseRoom(selectedId)"><strong>{{joining ? 'Подключаемся к разговору…' : 'Присоединяйтесь к разговору.'}}</strong></button>
+              <div v-show="connected&&viewingCall"><CallStage :follow-remote-screen="foreignVoice" @leave="leaveRoom" :screen-audio="call.screenAudio.value" :screen-audio-available="call.screenAudioAvailable.value" :screen-audio-busy="!!call.pending.value" @toggle-screen-audio="call.toggleScreenAudio" :people="stagePeople" @person-menu="openVolume" @moderate-media="moderateMedia" :moderation-busy="mediaModerationBusy" :tiles="videoTiles" :visible="connected&&page==='/room'&&!isText&&viewingCall" :bind-video-host="call.bindVideoHost" :refresh-video-layout="call.refreshVideoLayout"/></div><p v-if="call.screenAudioNote.value" class="field-help" role="status">{{call.screenAudioNote.value}}</p><p v-if="mediaModerationError" class="field-help" role="alert">{{mediaModerationError}}</p>
               <p v-if="!locked&&status&&!/^(Выберите комнату|Вы вышли из комнаты)/.test(status)" class="room-status" role="alert">{{status}}</p>
             </section>
 
@@ -427,7 +469,7 @@ onBeforeUnmount(()=>{serverSwitchAbort?.abort();clearTimeout(restoreTimer);windo
       </main>
       <!-- Audio is deliberately outside all page visibility containers. -->
       <div ref="audio"></div><div ref="videos" class="media-parking" hidden aria-hidden="true"></div>
-      <Teleport defer to="#chat-call-controls" :disabled="page!=='/room'||!isText"><footer v-show="locked" class="call-dock" :class="{'call-dock-compact':page==='/room'&&isText}"><div class="controls-row"><div class="control-group icon-controls">
+      <Teleport defer to="#chat-call-controls" :disabled="!compactDock"><footer v-show="locked" class="call-dock" :class="{'call-dock-compact':compactDock}"><div class="controls-row"><button v-if="foreignVoice && voice" class="call-origin" :title="'Вернуться в звонок · '+voice.server+' · '+voice.title" @click="returnToCall"><small>{{voice.server}}</small><strong>{{voice.title}}</strong></button><div class="control-group icon-controls">
         <button :disabled="!connected || !!pending" :aria-label="mic ? 'Выключить микрофон' : 'Включить микрофон'" :title="mic ? 'Выключить микрофон' : 'Включить микрофон'" :aria-pressed="mic" :class="{active:mic}" @click="call.toggle('mic')"><AppIcon :name="mic ? 'mic' : 'mic-off'" :size="22"/></button>
         <button :disabled="!connected || !!pending" :aria-label="camera ? 'Выключить камеру' : 'Включить камеру'" :title="camera ? 'Выключить камеру' : 'Включить камеру'" :aria-pressed="camera" :class="{active:camera}" @click="call.toggle('camera')"><AppIcon :name="camera ? 'camera' : 'camera-off'" :size="22"/></button>
         <button :disabled="!connected || !!pending || !supportsScreen" :aria-label="screen ? 'Остановить показ экрана' : 'Показать экран'" :title="screen ? 'Остановить показ экрана' : supportsScreen ? 'Показать экран' : 'Показ экрана недоступен в этом браузере'" :aria-pressed="screen" :class="{active:screen}" @click="call.toggle('screen')"><AppIcon name="screen" :size="22"/></button>
@@ -439,7 +481,7 @@ onBeforeUnmount(()=>{serverSwitchAbort?.abort();clearTimeout(restoreTimer);windo
     <aside v-if="page==='/room'" id="server-members" class="members-sidebar" aria-label="Участники сервера"><div class="members-panel" :class="{expanded:membersExpanded}"><button class="members-toggle" :aria-expanded="membersExpanded" aria-controls="server-members-list" @click="toggleMembers"><span>Участники <span class="members-count">{{members.length}}</span></span><AppIcon name="chevronDown" class="members-arrow" :class="{rotated:membersExpanded}" :size="16"/></button><div class="members-content" :inert="!membersExpanded" :aria-hidden="!membersExpanded"><ul id="server-members-list"><li v-for="person in members" :key="person.id" tabindex="0" @contextmenu.prevent="openVolume({identity:person.id,name:person.name},$event)" @keydown.shift.f10.prevent="openVolume({identity:person.id,name:person.name})"><span class="avatar small"><img v-if="avatars[person.id]" :src="avatars[person.id]" alt=""><template v-else>{{initials(person.name)}}</template></span><div><strong>{{person.name}}{{person.id===self?.id?' · вы':''}}</strong><span>{{person.blocked?'Доступ заблокирован':roleLabel(person,workspace.roles.value)}}</span></div></li></ul></div></div></aside>
   </div>
 
-  <MemberMenu v-if="volumePerson" :key="volumePerson.identity+volumePerson.x+volumePerson.y" :person="volumePerson" :member="menuMember" :self="self" :x="volumePerson.x" :y="volumePerson.y" :voice="menuVoice" :volume="call.volumeFor(volumePerson.identity)" :set-volume="value=>call.setParticipantVolume(volumePerson!.identity,value)" :moderate="(action,seconds)=>moderatePerson(volumePerson!.identity,action,seconds)" @close="volumePerson=null"/>
+  <MemberMenu v-if="volumePerson" :key="volumePerson.identity+volumePerson.x+volumePerson.y" :person="volumePerson" :member="menuMember" :self="self" :x="volumePerson.x" :y="volumePerson.y" :voice="menuVoice" :show-volume="!foreignVoice" :volume="call.volumeFor(volumePerson.identity)" :set-volume="value=>call.setParticipantVolume(volumePerson!.identity,value)" :moderate="(action,seconds)=>moderatePerson(volumePerson!.identity,action,seconds)" @close="volumePerson=null"/>
   <dialog ref="invite" class="modal invite-modal" aria-labelledby="invite-title"><button class="modal-close icon-button" aria-label="Закрыть приглашение" @click="invite?.close()"><AppIcon name="close"/></button><div class="modal-symbol"><AppIcon name="users" :size="25"/></div><span class="eyebrow">{{roomTitle}}</span><h2 id="invite-title">Позовите своих.</h2><p class="modal-intro">Приглашения создаются в настройках «Участники и роли».</p><label>Ссылка на комнату<input readonly :value="invitationUrl" @focus="($event.target as HTMLInputElement).select()"></label><button class="primary wide" @click="copyInvite"><AppIcon name="copy" :size="18"/>Скопировать ссылку</button><p class="field-help" role="status">{{copied || 'Для нового участника используйте активное приглашение из настроек сервера.'}}</p></dialog>
 </template>
 
@@ -455,4 +497,8 @@ onBeforeUnmount(()=>{serverSwitchAbort?.abort();clearTimeout(restoreTimer);windo
 
 <style scoped>
 .server-switch-status{position:fixed;z-index:1000;top:18px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:14px;max-width:calc(100vw - 32px);padding:10px 16px;border-radius:12px;background:#252525;color:#ddd;box-shadow:0 8px 28px #0005;font-size:12px}.server-switch-status button{font-size:12px;padding:4px}
+</style>
+
+<style scoped>
+.call-origin{display:grid;align-content:center;max-width:clamp(72px,12vw,160px);text-align:left;padding:4px 8px;background:transparent;color:inherit}.call-origin small,.call-origin strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.call-origin small{color:var(--muted);font-size:10px}.call-origin strong{font-size:12px}
 </style>

@@ -7,6 +7,8 @@ import {useCameraEffects} from './useCameraEffects';
 
 import {audioDiagnostic} from './audioDiagnostics';
 import {createSpeakingMeter} from './speakingMeter';
+import joinSound from '../assets/sounds/voice-join.wav';
+import leaveSound from '../assets/sounds/voice-leave.wav';
 
 export type VideoTile = { id:string; participantId:string; name:string; source:'camera'|'screen'; local:boolean; aspectRatio?:number;streamId?:string;displaySurface?:string };
 type MediaTrack = Track;
@@ -227,18 +229,34 @@ export function useCall(devices: Devices, media: () => { videos: HTMLElement | n
           participant === active.localParticipant ? undefined : publication as RemoteTrackPublication);
         sync();
       });
-      for (const event of [RoomEvent.ParticipantConnected, RoomEvent.ParticipantDisconnected, RoomEvent.ActiveSpeakersChanged]) {
-        active.on(event, () => { if (room === active) sync(); });
+      let peers: Set<string> | undefined;
+      const seedPeers = () => { peers = new Set(active.remoteParticipants.keys()); };
+      async function peerChanged(peer: Participant, arrived: boolean) {
+        if (room !== active) return;
+        sync();
+        if (!peers || active.state !== 'connected' || peers.has(peer.identity) === arrived) return;
+        if (arrived) peers.add(peer.identity);
+        else peers.delete(peer.identity);
+        try {
+          const cue = new Audio(arrived ? joinSound : leaveSound);
+          const output = devices.outputId.value;
+          if (output && output !== 'default' && cue.setSinkId) await cue.setSinkId(output);
+          if (room === active && active.state === 'connected') await cue.play();
+        } catch { /* A blocked cue must not interrupt the call. */ }
       }
+      active.on(RoomEvent.ParticipantConnected, peer => { void peerChanged(peer, true); });
+      active.on(RoomEvent.ParticipantDisconnected, peer => { void peerChanged(peer, false); });
+      active.on(RoomEvent.ActiveSpeakersChanged, () => { if (room === active) sync(); });
       active.on(RoomEvent.ConnectionQualityChanged,(quality,participant)=>{if(room===active&&participant===active.localParticipant)linkQuality.value=quality;});
-      active.on(RoomEvent.Reconnecting, () => { if (room === active) { sync(); status.value = 'Соединение потеряно. Пробуем восстановить…'; } });
-      active.on(RoomEvent.Reconnected, () => { if (room === active) { sync(); status.value = 'Связь восстановлена.'; } });
+      active.on(RoomEvent.Reconnecting, () => { if (room === active) { peers = undefined; sync(); status.value = 'Соединение потеряно. Пробуем восстановить…'; } });
+      active.on(RoomEvent.Reconnected, () => { if (room === active) { seedPeers(); sync(); status.value = 'Связь восстановлена.'; } });
       active.on(RoomEvent.Disconnected, () => { if (room === active) void leave(joining.value
         ? 'Вход подтверждён, но медиасоединение не установлено. Проверьте доступность медиасервера.'
         : 'Связь завершена. Можно войти снова.'); });
       active.on(RoomEvent.AudioPlaybackStatusChanged, () => { if (room === active) needsAudio.value = !active.canPlaybackAudio; });
       await active.connect(invitation.url, invitation.token, { autoSubscribe: true, peerConnectionTimeout: 15000, websocketTimeout: 10000 });
       if (current !== generation) { await active.disconnect(true); return; }
+      seedPeers();
       speakingMeter.start();
       qualityTimer = setInterval(() => {
         if (room !== active) return;

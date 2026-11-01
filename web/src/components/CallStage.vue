@@ -6,7 +6,7 @@ import type { VideoTile } from '../composables/useCall';
 
 type Person={identity:string;name:string;local:boolean;speaking:boolean;mic:boolean;avatar?:string;reconnecting?:boolean;canModerateMedia?:boolean};
 const emit=defineEmits<{leave:[];'toggle-screen-audio':[];'person-menu':[Person,MouseEvent?];'moderate-media':[Person,string];}>();
-const props=defineProps<{ people:Person[]; tiles:VideoTile[]; visible:boolean;moderationBusy?:boolean;screenAudio?:boolean;screenAudioAvailable?:boolean;screenAudioBusy?:boolean;
+const props=defineProps<{ people:Person[]; tiles:VideoTile[]; visible:boolean;followRemoteScreen?:boolean;moderationBusy?:boolean;screenAudio?:boolean;screenAudioAvailable?:boolean;screenAudioBusy?:boolean;
   bindVideoHost:(id:string,host:HTMLElement|null)=>void; refreshVideoLayout:()=>void }>();
 const floating=ref<HTMLElement|null>(null), enlargedHost=ref<HTMLElement|null>(null), expandedId=ref(''), minimized=ref(false);
 const hosts=new Map<string,HTMLElement>();
@@ -42,6 +42,10 @@ watch(()=>props.visible,(visible,previous)=>{
   }else if(visible&&minimized.value)close();
 });
 watch(()=>props.tiles.map(t=>t.id).join(','),()=>{if(expandedId.value&&!expanded.value)close();});
+watch(() => props.followRemoteScreen ? props.tiles.find(t => t.source === 'screen' && !t.local)?.id : undefined, id => {
+  const screen = id && props.tiles.find(t => t.id === id);
+  if (screen && !expandedId.value) { enlarge(screen, false); minimize(); }
+});
 onBeforeUnmount(()=>{close();for(const id of hosts.keys())props.bindVideoHost(id,null);});
 </script>
 

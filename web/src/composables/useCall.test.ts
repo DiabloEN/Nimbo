@@ -99,6 +99,35 @@ describe('useCall lifecycle and audio devices', () => {
     expect(devices.selectOutput).toHaveBeenCalledWith('headphones');
   });
 
+  it('plays distinct peer arrival and departure cues on the call output, ignoring duplicates, reconnects and old rooms', async () => {
+    const played: string[] = [];
+    const sinks: string[] = [];
+    vi.stubGlobal('Audio', class {
+      constructor(private src: string) {}
+      async setSinkId(id: string) { sinks.push(id); }
+      async play() { played.push(this.src); }
+    });
+    const { call, devices } = create();
+    await call.join(form);
+    devices.outputId.value = 'headphones';
+    const room = sdk.MockRoom.instances[0]!;
+    const peer = {identity: 'friend'};
+    room.emit('ParticipantConnected', peer);
+    room.emit('ParticipantConnected', peer);
+    room.emit('ParticipantDisconnected', peer);
+    room.emit('Reconnecting');
+    room.remoteParticipants.set(peer.identity, peer);
+    room.emit('ParticipantConnected', peer);
+    room.emit('Reconnected');
+    room.emit('ParticipantConnected', peer);
+    await Promise.resolve();
+    await call.leave();
+    room.emit('ParticipantDisconnected', peer);
+    expect(played).toHaveLength(2);
+    expect(played[0]).not.toEqual(played[1]);
+    expect(sinks).toEqual(['headphones', 'headphones']);
+  });
+
   it('aborts token loading and ignores a response that arrives after leave', async () => {
     const response = deferred<typeof invitation>();
     const fetchMock = vi.fn().mockReturnValue(response.promise);

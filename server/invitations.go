@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/hmac"
 	"net/http"
 	"slices"
 	"time"
@@ -12,6 +13,16 @@ type invitation struct {
 	CreatedAt int64  `json:"createdAt"`
 	ExpiresAt int64  `json:"expiresAt,omitempty"`
 	SingleUse bool   `json:"singleUse"`
+}
+
+func invitationForCode(d *workspaceData, code string) int {
+	now := time.Now().UnixMilli()
+	for i, item := range d.Invitations {
+		if (item.ExpiresAt == 0 || item.ExpiresAt > now) && hmac.Equal([]byte(item.Code), []byte(code)) {
+			return i
+		}
+	}
+	return -1
 }
 
 func activeInvitations(d *workspaceData) []invitation {

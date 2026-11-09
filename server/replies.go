@@ -17,16 +17,18 @@ func withReply(m chatMessage, messages []chatMessage) chatMessage {
 	m.Reply = &messageQuote{ID: m.ReplyTo, Deleted: true}
 	for _, original := range messages {
 		if original.ID == m.ReplyTo {
-			m.Reply = &messageQuote{ID: original.ID, Name: original.Name, Deleted: original.Deleted}
-			if !original.Deleted {
-				r := []rune(original.Text)
-				if len(r) > 180 {
-					r = r[:180]
-				}
-				m.Reply.Text = string(r)
-			}
+			m.Reply = quoteOf(original)
 			break
 		}
 	}
 	return m
+}
+
+func quoteOf(original chatMessage) *messageQuote {
+	q := &messageQuote{ID: original.ID, Name: original.Name, Deleted: original.Deleted}
+	if !original.Deleted {
+		text := []rune(original.Text)
+		q.Text = string(text[:min(len(text), 180)])
+	}
+	return q
 }

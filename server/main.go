@@ -131,14 +131,9 @@ func newWorkspaceHandler(c config, store *workspaceStore, presence *presenceServ
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { jsonReply(w, 200, map[string]string{"status": "ok"}) })
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
 		store.mu.Lock()
-		defer store.mu.Unlock()
-		rooms := []channel{}
-		for _, ch := range store.data.Channels {
-			if !ch.Archived {
-				rooms = append(rooms, ch)
-			}
-		}
-		jsonReply(w, 200, map[string]any{"rooms": rooms, "serverName": store.data.Name})
+		name := store.data.Name
+		store.mu.Unlock()
+		jsonReply(w, 200, map[string]string{"serverName": name})
 	})
 	accessHandler := func(w http.ResponseWriter, r *http.Request) {
 		// Native clients omit Origin; portable browsers use key/token authentication.
@@ -197,11 +192,12 @@ func newWorkspaceHandler(c config, store *workspaceStore, presence *presenceServ
 				reject(w, 401, "В файле нет действующего доступа к этому серверу. Для первого входа нужен код приглашения.")
 				return
 			}
-			if err := store.remember(w, r, c, current.ID); err != nil {
+			token, err := store.remember(w, r, c, current.ID)
+			if err != nil {
 				report(w, err)
 				return
 			}
-			jsonReply(w, 200, map[string]any{"member": current, "profileKey": request.ProfileKey, "session": appToken(c, current.ID, time.Now().Add(24*time.Hour).Unix())})
+			jsonReply(w, 200, map[string]any{"member": current, "profileKey": request.ProfileKey, "session": token})
 			return
 		}
 		// This endpoint uses the same strict Origin check as authentication.
@@ -226,10 +222,14 @@ func newWorkspaceHandler(c config, store *workspaceStore, presence *presenceServ
 		given := sha256.Sum256([]byte(request.Password))
 		adminHash := sha256.Sum256([]byte(adminPassword))
 		adminLogin := r.URL.Path == "/api/auth" && len(adminPassword) >= 24 && validKey(adminKey) && subtle.ConstantTimeCompare(given[:], adminHash[:]) == 1
-		id := sessionID(c, r)
+		id := store.sessionMember(c, r)
 		store.mu.Lock()
 		authMember := findMember(&store.data, id)
 		validSession := authMember != nil && !isBlocked(authMember)
+		var authName string
+		if validSession {
+			authName = authMember.Name
+		}
 		store.mu.Unlock()
 		if r.URL.Path == "/api/join" && !validSession {
 			reject(w, 401, "Сначала войдите по приглашению")
@@ -268,11 +268,12 @@ func newWorkspaceHandler(c config, store *workspaceStore, presence *presenceServ
 				report(w, err)
 				return
 			}
-			if err := store.remember(w, r, c, m.ID); err != nil {
+			token, err := store.remember(w, r, c, m.ID)
+			if err != nil {
 				report(w, err)
 				return
 			}
-			jsonReply(w, 200, map[string]any{"name": m.Name, "member": m, "profileKey": key, "session": appToken(c, m.ID, time.Now().Add(24*time.Hour).Unix())})
+			jsonReply(w, 200, map[string]any{"name": m.Name, "member": m, "profileKey": key, "session": token})
 			return
 		}
 		if !store.voiceAllowed(request.Room) {
@@ -284,21 +285,8 @@ func newWorkspaceHandler(c config, store *workspaceStore, presence *presenceServ
 			reject(w, 500, "Не удалось создать сессию")
 			return
 		}
-		identity := "guest-" + base64.RawURLEncoding.EncodeToString(nonce)
-		if id := sessionID(c, r); id != "" {
-			store.mu.Lock()
-			m := findMember(&store.data, id)
-			if m != nil && isBlocked(m) {
-				store.mu.Unlock()
-				reject(w, 403, "Доступ этого профиля заблокирован владельцем.")
-				return
-			}
-			if m != nil {
-				identity = m.ID + "." + base64.RawURLEncoding.EncodeToString(nonce)
-				request.Name = m.Name
-			}
-			store.mu.Unlock()
-		}
+		identity := id + "." + base64.RawURLEncoding.EncodeToString(nonce)
+		request.Name = authName
 		token, err := makeToken(c, identity, request.Name, request.Room, time.Now())
 		if err != nil {
 			reject(w, 500, "Не удалось создать сессию")

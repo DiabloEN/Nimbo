@@ -28,10 +28,14 @@ export function useAccess() {
   }
   function renew(){if(!renewal){const pending=restore(true).finally(()=>{if(renewal===pending)renewal=undefined;});renewal=pending;}return renewal;}
   async function signOut() {
-    if(remoteServer()){try{localStorage.setItem('nimbo-signed-out:'+activeServer.value,'1');}catch{}reset();return true;}
+    const origin=activeServer.value, remote=remoteServer();
+    ++generation;controller?.abort();
     try {
-      const response=await apiFetch('/api/session',{method:'DELETE',signal:AbortSignal.timeout(10000)});
-      if(!response.ok)throw new Error();reset();return true;
+      const response=await apiFetch(remote?'/api/access-session':'/api/session',{method:'DELETE',headers:{Authorization:'Bearer '+session.value},signal:AbortSignal.timeout(10000)});
+      if(!response.ok)throw new Error();
+      if(remote){try{localStorage.setItem('nimbo-signed-out:'+origin,'1');}catch{}}
+      if(origin!==activeServer.value)return true;
+      reset();return true;
     } catch {error.value='Не удалось выйти на сервере. Проверьте соединение и повторите выход.';return false;}
   }
   async function signIn(name: string, password: string, fromProfile=false) {

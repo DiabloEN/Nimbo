@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"strings"
@@ -31,11 +32,15 @@ func sessionCookie(c config, value string, maxAge int) *http.Cookie {
 	return &http.Cookie{Name: rememberCookieName(), Value: value, Path: "/api/session", MaxAge: maxAge,
 		HttpOnly: true, Secure: strings.HasPrefix(c.Origin, "https://"), SameSite: http.SameSiteStrictMode}
 }
-func (s *workspaceStore) remember(w http.ResponseWriter, r *http.Request, c config, id string) error {
-	if portableClient(r) {
-		return nil
-	}
+func (s *workspaceStore) remember(w http.ResponseWriter, r *http.Request, c config, id string) (string, error) {
 	key := randomKey()
+	hash := keyHash(key)
+	lifetime := rememberDays
+	remote := portableClient(r)
+	if remote {
+		hash = "portable:" + hash
+		lifetime = 24 * time.Hour
+	}
 	err := s.update(func(d *workspaceData) error {
 		if d.Sessions == nil {
 			d.Sessions = map[string]rememberedSession{}
@@ -55,7 +60,7 @@ func (s *workspaceStore) remember(w http.ResponseWriter, r *http.Request, c conf
 			oldest := ""
 			var expiry int64
 			for hash, entry := range d.Sessions {
-				if entry.MemberID == id {
+				if entry.MemberID == id && strings.HasPrefix(hash, "portable:") == remote {
 					count++
 					if oldest == "" || entry.Expires < expiry {
 						oldest = hash
@@ -68,13 +73,42 @@ func (s *workspaceStore) remember(w http.ResponseWriter, r *http.Request, c conf
 			}
 			delete(d.Sessions, oldest)
 		}
-		d.Sessions[keyHash(key)] = rememberedSession{id, time.Now().Add(rememberDays).Unix()}
+		d.Sessions[hash] = rememberedSession{id, time.Now().Add(lifetime).Unix()}
 		return nil
 	})
-	if err == nil {
+	if err == nil && !remote {
 		http.SetCookie(w, sessionCookie(c, key, int(rememberDays.Seconds())))
 	}
-	return err
+	return appToken(c, hash, time.Now().Add(24*time.Hour).Unix()), err
+}
+func (s *workspaceStore) sessionMember(c config, r *http.Request) string {
+	hash := signedSessionKey(c, r)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry := s.data.Sessions[hash]
+	if entry.Expires <= time.Now().Unix() {
+		return ""
+	}
+	return entry.MemberID
+}
+func (s *workspaceStore) revokeSessions(keys ...string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, key := range keys {
+		if _, ok := s.data.Sessions[key]; ok {
+			next := s.data
+			next.Sessions = maps.Clone(s.data.Sessions)
+			for _, k := range keys {
+				delete(next.Sessions, k)
+			}
+			if err := s.persist(next); err != nil {
+				return err
+			}
+			s.data.Sessions = next.Sessions
+			return nil
+		}
+	}
+	return nil
 }
 func (s *workspaceStore) registerSessions(mux *http.ServeMux, c config) {
 	handler := func(w http.ResponseWriter, r *http.Request) {
@@ -93,11 +127,9 @@ func (s *workspaceStore) registerSessions(mux *http.ServeMux, c config) {
 			hash = keyHash(cookie.Value)
 		}
 		if r.Method == "DELETE" {
-			if hash != "" {
-				if err := s.update(func(d *workspaceData) error { delete(d.Sessions, hash); return nil }); err != nil {
-					report(w, err)
-					return
-				}
+			if err := s.revokeSessions(hash, signedSessionKey(c, r)); err != nil {
+				report(w, err)
+				return
 			}
 			http.SetCookie(w, sessionCookie(c, "", -1))
 			jsonReply(w, 200, map[string]bool{"ok": true})
@@ -118,8 +150,19 @@ func (s *workspaceStore) registerSessions(mux *http.ServeMux, c config) {
 			reject(w, 401, "Войдите в Nimbo")
 			return
 		}
-		jsonReply(w, 200, map[string]any{"member": current, "session": appToken(c, current.ID, time.Now().Add(24*time.Hour).Unix())})
+		jsonReply(w, 200, map[string]any{"member": current, "session": appToken(c, hash, time.Now().Add(24*time.Hour).Unix())})
 	}
+	mux.HandleFunc("DELETE /api/access-session", func(w http.ResponseWriter, r *http.Request) {
+		if !allowedAPIOrigin(c, r) {
+			reject(w, 403, "Недопустимый источник запроса")
+			return
+		}
+		if err := s.revokeSessions(signedSessionKey(c, r)); err != nil {
+			report(w, err)
+			return
+		}
+		jsonReply(w, 200, map[string]bool{"ok": true})
+	})
 	mux.HandleFunc("GET /api/session", handler)
 	mux.HandleFunc("DELETE /api/session", handler)
 }

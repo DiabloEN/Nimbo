@@ -33,3 +33,18 @@ it('does not trust an expired session or a restore response arriving after reset
  vi.stubGlobal('fetch',vi.fn().mockResolvedValue({status:401,ok:false}));const expired=useAccess();expect(await expired.restore()).toBe(false);expect(expired.authenticated.value).toBe(false);
  let resolve!:(value:unknown)=>void;vi.stubGlobal('fetch',vi.fn(()=>new Promise(done=>{resolve=done;})));const access=useAccess(),pending=access.restore();access.reset();resolve({ok:true,json:async()=>({session:'late',member:{name:'Late'}})});expect(await pending).toBe(false);expect(access.authenticated.value).toBe(false);
 });
+
+it('revokes a remote device with its bearer before clearing local access',async()=>{
+ const {activeServer}=await import('./serverConnection');
+ const original=activeServer.value;
+ try{
+   activeServer.value='https://remote.example';
+   const fetcher=vi.fn().mockResolvedValueOnce({ok:false}).mockResolvedValueOnce({ok:true});
+   vi.stubGlobal('fetch',fetcher);
+   const access=useAccess();access.authenticated.value=true;access.session.value='device-token';
+   expect(await access.signOut()).toBe(false);expect(access.session.value).toBe('device-token');
+   expect(await access.signOut()).toBe(true);
+   expect(fetcher).toHaveBeenCalledWith('https://remote.example/api/access-session',expect.objectContaining({method:'DELETE',credentials:'omit',headers:expect.objectContaining({Authorization:'Bearer device-token'})}));
+   expect(access.session.value).toBe('');
+ }finally{activeServer.value=original;}
+});

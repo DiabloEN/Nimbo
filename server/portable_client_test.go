@@ -35,8 +35,8 @@ func TestPortableClientUsesExplicitKeysNotCookies(t *testing.T) {
 	origin := "https://client.example:7443"
 	w := request("POST", "/api/profile-session", "", `{"profileKey":"`+access.ProfileKey+`"}`, origin, true)
 	mustStatus(t, w, 200)
-	if len(w.Result().Cookies()) != 0 || len(s.data.Sessions) != before {
-		t.Fatal("remote client changed cookie sessions")
+	if len(w.Result().Cookies()) != 0 || len(s.data.Sessions) != before+1 {
+		t.Fatal("expected a separate portable session without a cookie")
 	}
 	if w.Header().Get("Access-Control-Allow-Origin") != origin || w.Header().Get("Access-Control-Allow-Credentials") != "" {
 		t.Fatal("unsafe CORS")

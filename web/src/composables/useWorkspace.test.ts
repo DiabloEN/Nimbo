@@ -86,3 +86,17 @@ it('shows failed uploads in the outbox and retries their original identity after
  await ws.send('another');await ws.retryPending(pending);
  expect(attempts[0]!.get('clientId')).toBe(attempts[1]!.get('clientId'));expect(ws.pendingMessages.value).toHaveLength(0);ws.stop();
 });
+
+it('loads every continuation when opening an old mention',async()=>{
+ const ids=Array.from({length:350},(_,i)=>({id:String(i)}));
+ const mock=vi.fn(async(path:string)=>{
+   const from=new URL(path,'https://client.example').searchParams.get('from');
+   const start=from===null?250:Number(from),end=Math.min(start+100,ids.length);
+   return ok({messages:ids.slice(start,end),nextFrom:end<ids.length?String(end):'',hasMore:start>0});
+ });
+ vi.stubGlobal('fetch',mock);const ws=writer();
+ await ws.revealMessage('general','0');
+ expect(ws.messages.value.map(m=>m.id)).toEqual(ids.map(m=>m.id));
+ expect(ws.hasMore.value).toBe(false);
+ ws.stop();
+});

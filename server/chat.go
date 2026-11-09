@@ -10,48 +10,78 @@ import (
 const reactionPalette = "😀 😃 😄 😁 😆 😅 😂 🤣 🙂 😉 😊 😍 🥰 😘 😎 🤔 😮 😢 😭 😡 🤯 🥳 😴 🤝 👍 👎 👏 🙌 🙏 💪 👀 ❤️ 💔 🔥 ✨ 🎉 💯 ✅ ❌ 🚀 ☕ 🎮 🐈 🐕 🌈 🎵"
 
 func (s *workspaceStore) chatHistory(w http.ResponseWriter, r *http.Request, id string) {
+	q := r.URL.Query()
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	ch := findChannel(&s.data, r.URL.Query().Get("channel"))
+	ch := findChannel(&s.data, q.Get("channel"))
 	if ch == nil || ch.Kind != "text" {
+		s.mu.Unlock()
 		reject(w, 404, "Текстовая комната недоступна")
 		return
 	}
+	// updateLocked deep-copies before each mutation; this slice and its
+	// nested reactions and attachments belong to an immutable committed version.
 	all := s.data.Messages[ch.ID]
-	end := len(all)
-	q := r.URL.Query()
-	if before := q.Get("before"); before != "" {
-		found := false
+	s.mu.Unlock()
+	const pageSize = 100
+	indexOf := func(id string) int {
 		for i, m := range all {
-			if m.ID == before {
-				end = i
-				found = true
-				break
+			if m.ID == id {
+				return i
 			}
 		}
-		if !found {
+		return -1
+	}
+	end := len(all)
+	if before := q.Get("before"); before != "" {
+		end = indexOf(before)
+		if end < 0 {
 			reject(w, 400, "Страница истории устарела")
 			return
 		}
 	}
-	start := max(0, end-100)
+	start := max(0, end-pageSize)
+	next := ""
 	if from := q.Get("from"); from != "" && q.Get("before") == "" {
-		for i, m := range all {
-			if m.ID == from {
-				start = i
-				break
+		start = indexOf(from)
+		if start < 0 {
+			if q.Get("continuation") == "1" {
+				reject(w, 409, "Страница истории устарела")
+				return
+			}
+			start = 0 // The first visible message may have been deleted during polling.
+		}
+		end = min(start+pageSize, len(all))
+		if end < len(all) {
+			next = all[end].ID
+		}
+	}
+	quotes := make(map[string]*messageQuote)
+	for _, m := range all[start:end] {
+		if m.ReplyTo != "" {
+			quotes[m.ReplyTo] = nil
+		}
+	}
+	if len(quotes) > 0 {
+		for _, original := range all {
+			if _, wanted := quotes[original.ID]; wanted {
+				quotes[original.ID] = quoteOf(original)
 			}
 		}
 	}
 	page := make([]chatMessage, 0, end-start)
 	for _, m := range all[start:end] {
-		page = append(page, withReply(m, all))
-	}
-	if page == nil {
-		page = []chatMessage{}
+		m.MentionUnread = nil
+		m.Reply = nil
+		if !m.Deleted && m.ReplyTo != "" {
+			m.Reply = quotes[m.ReplyTo]
+			if m.Reply == nil {
+				m.Reply = &messageQuote{ID: m.ReplyTo, Deleted: true}
+			}
+		}
+		page = append(page, m)
 	}
 	if q.Get("paged") == "1" {
-		jsonReply(w, 200, map[string]any{"messages": page, "hasMore": start > 0})
+		jsonReply(w, 200, map[string]any{"messages": page, "hasMore": start > 0, "nextFrom": next})
 	} else {
 		jsonReply(w, 200, page)
 	}

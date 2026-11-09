@@ -65,11 +65,26 @@ export function useWorkspace(session: { value: string },renewSession?:()=>Promis
     ownerExists.value=data.ownerExists;presence.value=data.presence;presenceAvailable.value=data.presenceAvailable;
     offset=data.serverTime-Date.now();now.value=Date.now()+offset;ready.value=true;error.value='';
   }
+  async function historyFrom(channel:string,from:string|undefined,sequence:number) {
+    const signal=controller?.signal,base='/api/messages?paged=1&channel='+encodeURIComponent(channel);
+    let data=await request(base+(from?'&from='+encodeURIComponent(from):''),'GET',undefined,signal);
+    const page:Message[]=Array.isArray(data)?data:[...data.messages];
+    const more=!!data.hasMore;
+    const cursors=new Set<string>();
+    while(data.nextFrom && sequence===messageSequence && channel===textChannel.value && !signal?.aborted){
+      const cursor=String(data.nextFrom);
+      if(cursors.has(cursor))throw new Error('Страница истории устарела.');
+      cursors.add(cursor);
+      data=await request(base+'&from='+encodeURIComponent(cursor)+'&continuation=1','GET',undefined,signal);
+      page.push(...data.messages);
+    }
+    return {messages:page,hasMore:more};
+  }
   async function refreshMessages() {
     const channel=textChannel.value, current=generation, sequence=++messageSequence; if(!channel||!session.value) return;
     const from=messages.value[0]?.id;
-    const data=await request(`/api/messages?paged=1&channel=${encodeURIComponent(channel)}${from?'&from='+encodeURIComponent(from):''}`,'GET',undefined,controller?.signal);
-    if(current===generation&&channel===textChannel.value&&sequence===messageSequence) {messages.value=Array.isArray(data)?data:data.messages;hasMore.value=!!data.hasMore;pendingMessages.value=pendingMessages.value.filter(p=>p.channel!==channel||!messages.value.some(m=>m.clientId===p.id));}
+    const data=await historyFrom(channel,from,sequence);
+    if(current===generation&&channel===textChannel.value&&sequence===messageSequence) {messages.value=data.messages;hasMore.value=!!data.hasMore;pendingMessages.value=pendingMessages.value.filter(p=>p.channel!==channel||!messages.value.some(m=>m.clientId===p.id));}
   }
   async function tick(current:number) {
     if(current!==generation) return;
@@ -164,7 +179,7 @@ export function useWorkspace(session: { value: string },renewSession?:()=>Promis
     await selectText(channel);
     if(textChannel.value!==channel||messages.value.some(m=>m.id===id))return;
     const current=generation,sequence=++messageSequence;
-    try{const data=await request('/api/messages?paged=1&channel='+encodeURIComponent(channel)+'&from='+encodeURIComponent(id));if(current===generation&&channel===textChannel.value&&sequence===messageSequence){messages.value=data.messages;hasMore.value=!!data.hasMore;}}
+    try{const data=await historyFrom(channel,id,sequence);if(current===generation&&channel===textChannel.value&&sequence===messageSequence){messages.value=data.messages;hasMore.value=!!data.hasMore;}}
     catch(e){if(current===generation)error.value=(e as Error).message;}
   }
   function duration(id:string) {

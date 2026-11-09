@@ -384,8 +384,7 @@ onMounted(()=>{
   void devices.refresh();window.addEventListener('beforeunload',beforeUnload);window.addEventListener('pagehide',pageHide);window.addEventListener('pageshow',pageShow);window.addEventListener('hashchange',readPath);
   const timeout=setTimeout(()=>configController.abort(),10000);
   void apiFetch('/api/config',{signal:configController.signal}).then(async response=>{
-    if(!response.ok)throw new Error();const config=await response.json();
-    if(!workspace.ready.value)rooms.value=config.rooms as Channel[];
+    if(!response.ok)throw new Error();
     const requested=new URLSearchParams(window.location.search).get('room');
     if(!selectedId.value&&workspace.ready.value)selectedId.value=rooms.value.find(room=>room.id===requested)?.id||firstChannel.value?.id||'';
   }).catch(()=>{status.value='Сервис пока недоступен. Попробуйте обновить страницу.';}).finally(()=>clearTimeout(timeout));

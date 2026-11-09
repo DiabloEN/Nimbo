@@ -172,6 +172,10 @@ func (s *workspaceStore) persist(data workspaceData) error {
 func (s *workspaceStore) update(fn func(*workspaceData) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.updateLocked(fn)
+}
+
+func (s *workspaceStore) updateLocked(fn func(*workspaceData) error) error {
 	b, _ := json.Marshal(s.data)
 	var next workspaceData
 	if err := json.Unmarshal(b, &next); err != nil {
@@ -223,8 +227,31 @@ func (s *workspaceStore) loginWithRecovery(name, key string, recoverExisting boo
 	if !validKey(key) {
 		return member{}, "", fail(400, "Некорректный ключ профиля")
 	}
+	hash := keyHash(key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(codes) > 0 {
+		bootstrap := s.data.OwnerBootstrap
+		ownerCode := bootstrap != nil && codes[0] != "" && hmac.Equal([]byte(bootstrap.Hash), []byte(keyHash(codes[0])))
+		if !ownerCode {
+			if recoverExisting {
+				for _, m := range s.data.Members {
+					if hmac.Equal([]byte(m.KeyHash), []byte(hash)) {
+						if isBlocked(&m) {
+							return member{}, "", fail(403, "Доступ этого профиля заблокирован владельцем.")
+						}
+						m.KeyHash = ""
+						return m, key, nil
+					}
+				}
+			}
+			if invitationForCode(&s.data, codes[0]) < 0 {
+				return member{}, "", fail(401, "Приглашение недействительно или срок его действия истёк")
+			}
+		}
+	}
 	var result member
-	err := s.update(func(data *workspaceData) error {
+	err := s.updateLocked(func(data *workspaceData) error {
 		if len(codes) > 0 {
 			claimed, matched, err := claimBootstrap(data, name, key, codes[0])
 			if matched {
@@ -232,32 +259,13 @@ func (s *workspaceStore) loginWithRecovery(name, key string, recoverExisting boo
 				return err
 			}
 		}
-		// Retry of enrollment proves the same identity, without changing it.
-		if recoverExisting {
-			for _, m := range data.Members {
-				if hmac.Equal([]byte(m.KeyHash), []byte(keyHash(key))) {
-					if isBlocked(&m) {
-						return fail(403, "Доступ этого профиля заблокирован владельцем.")
-					}
-					result = m
-					return nil
-				}
-			}
-		}
 		invitationIndex := -1
 		if len(codes) > 0 {
-			data.Invitations = activeInvitations(data)
-			for i, item := range data.Invitations {
-				if hmac.Equal([]byte(item.Code), []byte(codes[0])) {
-					invitationIndex = i
-					break
-				}
-			}
+			invitationIndex = invitationForCode(data, codes[0])
 			if invitationIndex < 0 {
 				return fail(401, "Приглашение недействительно или срок его действия истёк")
 			}
 		}
-		hash := keyHash(key)
 		for i := range data.Members {
 			if hmac.Equal([]byte(data.Members[i].KeyHash), []byte(hash)) {
 				if isBlocked(&data.Members[i]) {
@@ -284,17 +292,17 @@ func (s *workspaceStore) loginWithRecovery(name, key string, recoverExisting boo
 
 // App credentials have a separate signing domain from LiveKit JWTs. Roles are
 // never trusted from the credential: each mutation checks the current store.
-func appToken(c config, id string, expires int64) string {
+func appToken(c config, sessionKey string, expires int64) string {
 	payload, _ := json.Marshal(struct {
 		ID  string
 		Exp int64
-	}{id, expires})
+	}{sessionKey, expires})
 	p := base64.RawURLEncoding.EncodeToString(payload)
-	mac := hmac.New(sha256.New, []byte("nimbo-app-session-v1:"+c.APISecret))
+	mac := hmac.New(sha256.New, []byte("nimbo-app-session-v2:"+c.APISecret))
 	mac.Write([]byte(p))
 	return p + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
-func sessionID(c config, r *http.Request) string {
+func signedSessionKey(c config, r *http.Request) string {
 	header := r.Header.Get("Authorization")
 	if !strings.HasPrefix(header, "Bearer ") || len(header) > 1024 {
 		return ""
@@ -307,7 +315,7 @@ func sessionID(c config, r *http.Request) string {
 	if err != nil {
 		return ""
 	}
-	mac := hmac.New(sha256.New, []byte("nimbo-app-session-v1:"+c.APISecret))
+	mac := hmac.New(sha256.New, []byte("nimbo-app-session-v2:"+c.APISecret))
 	mac.Write([]byte(parts[0]))
 	if !hmac.Equal(sig, mac.Sum(nil)) {
 		return ""
@@ -361,7 +369,7 @@ func (s *workspaceStore) register(mux *http.ServeMux, c config, presence *presen
 				reject(w, 403, "Недопустимый источник запроса")
 				return
 			}
-			id := sessionID(c, r)
+			id := s.sessionMember(c, r)
 			s.mu.Lock()
 			m := findMember(&s.data, id)
 			exists := m != nil && !isBlocked(m)

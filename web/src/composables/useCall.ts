@@ -10,6 +10,16 @@ import {createSpeakingMeter} from './speakingMeter';
 import joinSound from '../assets/sounds/voice-join.wav';
 import leaveSound from '../assets/sounds/voice-leave.wav';
 
+import muteSound from '../assets/sounds/voice-mute.wav';
+import unmuteSound from '../assets/sounds/voice-unmute.wav';
+import videoOnSound from '../assets/sounds/voice-video-on.wav';
+import videoOffSound from '../assets/sounds/voice-video-off.wav';
+
+type MediaKind = 'mic' | 'camera' | 'screen';
+function mediaState(peer: Participant) {
+  return {mic: !!peer.isMicrophoneEnabled, camera: !!peer.isCameraEnabled, screen: !!peer.isScreenShareEnabled};
+}
+
 export type VideoTile = { id:string; participantId:string; name:string; source:'camera'|'screen'; local:boolean; aspectRatio?:number;streamId?:string;displaySurface?:string };
 type MediaTrack = Track;
 const screenUnavailable = 'Этот браузер не поддерживает показ своего экрана. Вы можете смотреть экран собеседника, а для своей демонстрации подключиться с компьютера.';
@@ -31,6 +41,20 @@ export function useCall(devices: Devices, media: () => { videos: HTMLElement | n
   const serialInput=<T>(op:()=>Promise<T>)=>devices.runInput?devices.runInput(op):op();
   const micOptions=()=>({deviceId:devices.inputId.value==='default'?'default':{exact:devices.inputId.value},...(devices.captureOptions?.()||{echoCancellation:true,noiseSuppression:true,autoGainControl:true})});
   let room: Room | null = null;
+  async function playCue(active: Room, url: string) {
+    try {
+      if (room !== active || active.state !== 'connected') return;
+      const cue = new Audio(url);
+      const output = devices.outputId.value;
+      if (output && output !== 'default' && cue.setSinkId) await cue.setSinkId(output);
+      if (room === active && active.state === 'connected') await cue.play();
+    } catch { /* Optional feedback must not interrupt the call. */ }
+  }
+  function mediaCue(active: Room, kind: MediaKind, enabled: boolean) {
+    const sound = kind === 'mic' ? (enabled ? unmuteSound : muteSound)
+      : (enabled ? videoOnSound : videoOffSound);
+    void playCue(active, sound);
+  }
   const effects=useCameraEffects(()=>room?.localParticipant.getTrackPublication(Track.Source.Camera)?.track as LocalVideoTrack|undefined);
   const volumes=ref<Record<string,number>>({});
   try{const saved=JSON.parse(localStorage.getItem('nimbo-participant-volumes')||'{}');for(const [key,value]of Object.entries(saved)){if(typeof value==='number'&&Number.isFinite(value))volumes.value[key]=Math.max(0,Math.min(200,value));}}catch{/* optional local preferences */}
@@ -203,19 +227,38 @@ export function useCall(devices: Devices, media: () => { videos: HTMLElement | n
       active.on(RoomEvent.TrackUnsubscribed, removeTrack);
       active.on(RoomEvent.LocalTrackPublished, (publication, participant) => {
         if (room !== active) return;
+        trackMedia(participant, publication.source, !publication.isMuted);
         if (publication.track) attachTrack(publication.track, participant, true); sync();
         void applySend(active).catch(() => { if (room === active) qualityNote.value = 'Не удалось применить ограничение отправки. Выберите режим ещё раз.'; });
       });
       active.on(RoomEvent.LocalTrackUnpublished, publication => {
+        trackMedia(active.localParticipant, publication.source, false);
         if (publication.track) removeTrack(publication.track); if (room === active) sync();
         if (publication.source === Track.Source.ScreenShare) {
           const audio = active.localParticipant.getTrackPublication(Track.Source.ScreenShareAudio)?.track;
           if (audio) void active.localParticipant.unpublishTrack(audio).catch(() => audio.stop());
         }
       });
+      const peerMedia = new Map<string, ReturnType<typeof mediaState>>();
+      function trackMedia(peer: Participant, source: Track.Source, enabled: boolean) {
+        if (room !== active || active.state !== 'connected' || !peers) return;
+        if (peer === active.localParticipant) {
+          // Local microphone feedback follows the user's toggle, including hotkeys.
+          if (source === Track.Source.Microphone) return;
+        } else if (active.remoteParticipants.get(peer.identity) !== peer) return;
+        const state = peerMedia.get(peer.identity);
+        const kind = source === Track.Source.Microphone ? 'mic' : source === Track.Source.Camera ? 'camera'
+          : source === Track.Source.ScreenShare ? 'screen' : undefined;
+        if (!state || !kind || state[kind] === enabled) return;
+        state[kind] = enabled;
+        mediaCue(active, kind, enabled);
+      }
+      active.on(RoomEvent.TrackPublished, (pub, peer) => trackMedia(peer, pub.source, !pub.isMuted));
+      active.on(RoomEvent.TrackUnpublished, (pub, peer) => trackMedia(peer, pub.source, false));
       // Camera disable mutes a publication; it need not unpublish/unsubscribe it.
-      active.on(RoomEvent.TrackMuted, publication => {
+      active.on(RoomEvent.TrackMuted, (publication, participant) => {
         if (room !== active) return;
+        if (participant) trackMedia(participant, publication.source, false);
         if (publication.track?.kind === 'video') removeTrack(publication.track);
         if (publication === active.localParticipant.getTrackPublication(Track.Source.ScreenShare)) {
           const audio = active.localParticipant.getTrackPublication(Track.Source.ScreenShareAudio);
@@ -225,24 +268,30 @@ export function useCall(devices: Devices, media: () => { videos: HTMLElement | n
       });
       active.on(RoomEvent.TrackUnmuted, (publication, participant) => {
         if (room !== active) return;
+        trackMedia(participant, publication.source, true);
         if (publication.track?.kind === 'video') attachTrack(publication.track, participant, participant === active.localParticipant,
           participant === active.localParticipant ? undefined : publication as RemoteTrackPublication);
         sync();
       });
       let peers: Set<string> | undefined;
-      const seedPeers = () => { peers = new Set(active.remoteParticipants.keys()); };
+      const seedPeers = () => {
+        peers = new Set(active.remoteParticipants.keys());
+        peerMedia.clear();
+        peerMedia.set(active.localParticipant.identity, mediaState(active.localParticipant));
+        for (const [id, peer] of active.remoteParticipants) peerMedia.set(id, mediaState(peer));
+      };
       async function peerChanged(peer: Participant, arrived: boolean) {
         if (room !== active) return;
         sync();
         if (!peers || active.state !== 'connected' || peers.has(peer.identity) === arrived) return;
-        if (arrived) peers.add(peer.identity);
-        else peers.delete(peer.identity);
-        try {
-          const cue = new Audio(arrived ? joinSound : leaveSound);
-          const output = devices.outputId.value;
-          if (output && output !== 'default' && cue.setSinkId) await cue.setSinkId(output);
-          if (room === active && active.state === 'connected') await cue.play();
-        } catch { /* A blocked cue must not interrupt the call. */ }
+        if (arrived) {
+          peers.add(peer.identity);
+          peerMedia.set(peer.identity, mediaState(peer));
+        } else {
+          peers.delete(peer.identity);
+          peerMedia.delete(peer.identity);
+        }
+        await playCue(active, arrived ? joinSound : leaveSound);
       }
       active.on(RoomEvent.ParticipantConnected, peer => { void peerChanged(peer, true); });
       active.on(RoomEvent.ParticipantDisconnected, peer => { void peerChanged(peer, false); });
@@ -302,6 +351,7 @@ export function useCall(devices: Devices, media: () => { videos: HTMLElement | n
     }
     pending.value = kind;
     const participant: LocalParticipant = current.localParticipant;
+    const wasEnabled = mediaState(participant)[kind];
     try {
       let publication: LocalTrackPublication | undefined;
       if (kind === 'mic') publication = await serialInput(async()=>{if(room!==current)return;const result=await participant.setMicrophoneEnabled(!participant.isMicrophoneEnabled,micOptions());if(room===current){await devices.applyCaptureOptions?.();await devices.auditInput?.('toggle-microphone');}return result;});
@@ -315,6 +365,8 @@ export function useCall(devices: Devices, media: () => { videos: HTMLElement | n
         publication?.track?.stop();
         if (kind === 'screen') await participant.setScreenShareEnabled(false);
       }
+      const enabled = mediaState(participant)[kind];
+      if (room === current && kind === 'mic' && enabled !== wasEnabled) mediaCue(current, kind, enabled);
       if(room===current&&kind==='camera'&&participant.isCameraEnabled)await effects.apply();
       if (room === current && kind !== 'mic') await applySend(current).catch(() => { if (room === current) qualityNote.value = 'Камера работает, но браузер не применил ограничение отправки. Повторите выбор режима.'; });
       if (room === current && (kind === 'mic'||kind==='camera')) void devices.refresh();

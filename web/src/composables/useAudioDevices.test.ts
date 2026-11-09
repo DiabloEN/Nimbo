@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Room } from 'livekit-client';
 import { useAudioDevices } from './useAudioDevices';
+import { audioLabEnabled } from './audioLab';
 
 function device(kind: MediaDeviceKind, deviceId: string, label: string): MediaDeviceInfo {
   return { kind, deviceId, label, groupId: '', toJSON() { return {}; } };
@@ -169,11 +170,43 @@ describe('useAudioDevices', () => {
   });
   it('accepts the default alias resolving to a concrete microphone id',async()=>{
     const state=create();state.inputId.value='old';
-    const track={isMuted:false,constraints:{noiseSuppression:true,autoGainControl:true},getDeviceId:vi.fn(async()=> 'physical-default-id')};
+    state.lab.engine.value='browser';
+    const track={isMuted:false,constraints:{noiseSuppression:true,autoGainControl:true},getProcessor:()=>undefined,getDeviceId:vi.fn(async()=> 'physical-default-id')};
     const room={on:vi.fn(),off:vi.fn(),localParticipant:{getTrackPublication:()=>({track})},switchActiveDevice:vi.fn(async()=>false)};
     state.bindRoom(room as unknown as Room);
     expect(await state.selectInput('default')).toBe(true);
     expect(state.inputId.value).toBe('default');
+  });
+  it.runIf(audioLabEnabled)('uses GTCRN by default on the microphone and releases it when switching to off', async () => {
+    vi.stubGlobal('localStorage', {getItem: () => null, setItem: vi.fn()});
+    const state = create();
+    let processor: {name: string} | undefined;
+    const track = {
+      isMuted: false, constraints: state.captureOptions(), getProcessor: () => processor,
+      setProcessor: vi.fn(async (next: {name: string}) => { processor = next; }),
+      stopProcessor: vi.fn(async () => { processor = undefined; }),
+    };
+    vi.stubGlobal('AudioWorkletNode', class {});
+    state.bindRoom({on: vi.fn(), off: vi.fn(), localParticipant: {getTrackPublication: () => ({track})}} as unknown as Room);
+    await state.updateProcessing();
+    expect(processor?.name).toBe('nimbo-gtcrn');
+    expect(track.constraints.noiseSuppression).toBe(false);
+    state.lab.suppression.value = false;
+    await state.updateProcessing();
+    expect(track.stopProcessor).toHaveBeenCalledOnce();
+    expect(processor).toBeUndefined();
+  });
+  it.runIf(audioLabEnabled)('restores a saved mode, including disabled suppression, on reopening', () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal('localStorage', {getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value)});
+    const first = create().lab;
+    first.engine.value = 'rnnoise';
+    first.save();
+    expect(create().lab.engine.value).toBe('rnnoise');
+    first.suppression.value = false;
+    first.save();
+    expect(create().lab.suppression.value).toBe(false);
   });
   it('stops a late permission probe after disposal without updating state', async () => {
     const permission = deferred<MediaStream>();

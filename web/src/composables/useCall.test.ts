@@ -41,7 +41,7 @@ vi.mock('livekit-client', () => ({
   VideoPresets: { h360: {}, h720: {} },
   VideoQuality: { LOW: 0, MEDIUM: 1, HIGH: 2 },
   RoomEvent: Object.fromEntries([
-    'TrackSubscribed', 'TrackUnsubscribed', 'LocalTrackPublished', 'LocalTrackUnpublished',
+    'TrackPublished', 'TrackUnpublished', 'TrackSubscribed', 'TrackUnsubscribed', 'LocalTrackPublished', 'LocalTrackUnpublished',
     'ParticipantConnected', 'ParticipantDisconnected', 'ActiveSpeakersChanged', 'TrackMuted',
     'TrackUnmuted', 'Reconnecting', 'Reconnected', 'Disconnected', 'AudioPlaybackStatusChanged',
   ].map((name) => [name, name])),
@@ -126,6 +126,73 @@ describe('useCall lifecycle and audio devices', () => {
     expect(played).toHaveLength(2);
     expect(played[0]).not.toEqual(played[1]);
     expect(sinks).toEqual(['headphones', 'headphones']);
+  });
+
+  it('sounds remote media transitions once and stays quiet during resync and teardown', async () => {
+    const played: string[] = [];
+    vi.stubGlobal('Audio', class {
+      constructor(private src: string) {}
+      async play() { played.push(this.src); }
+    });
+    const {call} = create();
+    await call.join(form);
+    const room = sdk.MockRoom.instances[0]!;
+    const peer = {identity: 'friend', isMicrophoneEnabled: true};
+    room.remoteParticipants.set(peer.identity, peer);
+    room.emit('Reconnecting');
+    room.emit('Reconnected');
+    for (const [event, source] of [
+      ['TrackMuted', 'microphone'], ['TrackMuted', 'microphone'], ['TrackUnmuted', 'microphone'],
+      ['TrackPublished', 'camera'], ['TrackUnmuted', 'camera'], ['TrackPublished', 'screen'],
+      ['TrackPublished', 'screen_audio'], ['TrackUnpublished', 'screen'], ['TrackMuted', 'camera'],
+      ['TrackUnpublished', 'camera'],
+    ] as const) room.emit(event, {source}, peer);
+    room.remoteParticipants.delete(peer.identity);
+    room.emit('TrackUnpublished', {source:'microphone'}, peer);
+    expect(played).toHaveLength(6);
+    expect(new Set(played).size).toBe(4);
+    expect(played[2]).toBe(played[3]);
+    expect(played[4]).toBe(played[5]);
+    expect(played[2]).not.toBe(played[4]);
+  });
+
+  it('uses the same local on/off pair for camera and screen, including a browser stop', async () => {
+    const played: string[] = [];
+    vi.stubGlobal('Audio', class {
+      constructor(private src: string) {}
+      async play() { played.push(this.src); }
+    });
+    const {call} = create();
+    await call.join(form);
+    const room = sdk.MockRoom.instances[0]!;
+    const me = room.localParticipant;
+    room.emit('LocalTrackPublished', {source:'camera'}, me);
+    room.emit('TrackMuted', {source:'camera'}, me);
+    room.emit('LocalTrackPublished', {source:'screen'}, me);
+    room.emit('LocalTrackPublished', {source:'screen_audio'}, me);
+    room.emit('LocalTrackUnpublished', {source:'screen'});
+    room.emit('LocalTrackUnpublished', {source:'screen_audio'});
+    expect(played).toHaveLength(4);
+    expect(played.slice(2)).toEqual(played.slice(0, 2));
+    expect(played[0]).not.toBe(played[1]);
+  });
+
+  it('confirms local microphone changes and stays quiet for a cancelled share', async () => {
+    const played: string[] = [];
+    vi.stubGlobal('Audio', class {
+      constructor(private src: string) {}
+      async play() { played.push(this.src); }
+    });
+    const {call} = create();
+    await call.join(form);
+    const me = sdk.MockRoom.instances[0]!.localParticipant;
+    me.setMicrophoneEnabled.mockImplementation(async enabled => { me.isMicrophoneEnabled = enabled; });
+    me.setScreenShareEnabled.mockRejectedValue(new Error('Cancelled'));
+    await call.toggle('mic');
+    await call.toggle('screen');
+    await call.toggle('mic');
+    expect(played).toHaveLength(2);
+    expect(played[0]).not.toEqual(played[1]);
   });
 
   it('aborts token loading and ignores a response that arrives after leave', async () => {

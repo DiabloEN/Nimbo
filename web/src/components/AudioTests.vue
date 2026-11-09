@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {ref,watch,onBeforeUnmount} from 'vue';
-const props=defineProps<{rnnoise?:boolean;captureOptions?:{echoCancellation:boolean;noiseSuppression:boolean;autoGainControl:boolean};inputId:string;outputId:string;active:boolean;inCall:boolean}>();
+import type {LocalNoiseEngine} from '../composables/audioLab';
+const props=defineProps<{noiseEngine?:LocalNoiseEngine;captureOptions?:{echoCancellation:boolean;noiseSuppression:boolean;autoGainControl:boolean};inputId:string;outputId:string;active:boolean;inCall:boolean}>();
 let noiseNode:{disconnect:()=>void;destroy:()=>void}|undefined;
 const mode=ref(''),note=ref(''),level=ref(0);let context:AudioContext|undefined,stream:MediaStream|undefined,player:HTMLAudioElement|undefined,timer:ReturnType<typeof setTimeout>|undefined,frame=0,generation=0;
 function stop(){generation++;noiseNode?.disconnect();noiseNode?.destroy();noiseNode=undefined;clearTimeout(timer);cancelAnimationFrame(frame);stream?.getTracks().forEach(t=>t.stop());stream=undefined;player?.pause();if(player)player.srcObject=null;player=undefined;void context?.close();context=undefined;mode.value='';level.value=0;}
@@ -16,7 +17,7 @@ async function start(kind:'mic'|'sound'){
    const capture=await navigator.mediaDevices.getUserMedia({audio:{deviceId:props.inputId==='default'?'default':{exact:props.inputId},...(props.captureOptions||{echoCancellation:true,noiseSuppression:true,autoGainControl:true})}});
    if(run!==generation){capture.getTracks().forEach(t=>t.stop());return;}stream=capture;
    const source=ctx.createMediaStreamSource(capture),analyser=ctx.createAnalyser();analyser.fftSize=256;let processed:AudioNode=source;
-   if(import.meta.env.VITE_AUDIO_LAB==='1'&&props.rnnoise){const {createNoiseNode}=await import('../composables/rnnoiseProcessor');const node=await createNoiseNode(ctx);if(run!==generation){node.destroy();node.disconnect();return;}noiseNode=node;source.connect(node);processed=node;}
+   if(import.meta.env.VITE_AUDIO_LAB==='1'&&props.noiseEngine){const {createNoiseNode}=await import('../composables/rnnoiseProcessor');const node=await createNoiseNode(ctx, props.noiseEngine);if(run!==generation){node.destroy();node.disconnect();return;}noiseNode=node;source.connect(node);processed=node;}
    processed.connect(analyser);processed.connect(destination);
    const data=new Uint8Array(analyser.fftSize);const draw=()=>{if(run!==generation)return;analyser.getByteTimeDomainData(data);level.value=Math.min(100,Math.sqrt(data.reduce((sum,x)=>sum+(x-128)**2,0)/data.length)*3);frame=requestAnimationFrame(draw);};draw();
    note.value='Вы слышите себя. Проверка остановится через 10 секунд.';
@@ -28,6 +29,6 @@ async function start(kind:'mic'|'sound'){
   await audio.play();if(run!==generation)return;timer=setTimeout(stop,kind==='mic'?10000:3000);
  }catch{if(run===generation){stop();note.value='Не удалось запустить проверку. Проверьте разрешения и выбранные устройства.';}}
 }
-watch(()=>[props.active,props.inputId,props.outputId,props.inCall,props.rnnoise,props.captureOptions?.noiseSuppression,props.captureOptions?.autoGainControl],stop);onBeforeUnmount(stop);
+watch(()=>[props.active,props.inputId,props.outputId,props.inCall,props.noiseEngine,props.captureOptions?.noiseSuppression,props.captureOptions?.autoGainControl],stop);onBeforeUnmount(stop);
 </script>
 <template><div class="audio-tests"><div class="button-row"><button type="button" class="soft-button" :disabled="inCall||mode==='sound'" @click="start('mic')">{{mode==='mic'?'Остановить проверку':'Проверить микрофон'}}</button><button type="button" class="soft-button" :disabled="mode==='mic'" @click="start('sound')">{{mode==='sound'?'Остановить звук':'Проверить звук'}}</button></div><progress v-if="mode==='mic'" :value="level" max="100" aria-label="Уровень микрофона"></progress><p v-if="inCall" class="field-help">Для прослушивания своего микрофона выйдите из голосовой комнаты.</p><p v-else class="field-help">Микрофон лучше проверять в наушниках.</p><p v-if="note" class="field-help" role="status">{{note}}</p></div></template>

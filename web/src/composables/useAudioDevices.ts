@@ -1,6 +1,6 @@
 import { ref } from 'vue';
 import {Track, type LocalAudioTrack, type Room, type RoomEvent} from 'livekit-client';
-import {useAudioLab} from './audioLab';
+import {isLocalNoiseEngine, useAudioLab} from './audioLab';
 import {audioDiagnostic} from './audioDiagnostics';
 
 export interface AudioDeviceOption { deviceId: string; label: string }
@@ -97,14 +97,28 @@ export function useAudioDevices() {
       if(current!==room){track.stop();return;}
     }
     if(import.meta.env.VITE_AUDIO_LAB==='1'){
-      const wants=lab.suppression.value&&lab.engine.value==='rnnoise';
-      if(wants&&track.getProcessor()?.name!=='nimbo-rnnoise'){
+      const engine = lab.engine.value;
+      const wants = lab.suppression.value && engine !== 'browser';
+      if(wants && track.getProcessor()?.name !== 'nimbo-' + engine){
         const {NimboNoiseProcessor}=await import('./rnnoiseProcessor');
         if(current!==room)return;
-        const processor=new NimboNoiseProcessor();
-        try{await track.setProcessor(processor);}catch(e){await processor.destroy();await track.restartTrack({...options,noiseSuppression:true});throw e;}
+        const processor=new NimboNoiseProcessor(engine);
+        try {
+          await track.setProcessor(processor);
+        } catch (error) {
+          await processor.destroy();
+          configured.delete(track);
+          if (current === room) {
+            await track.restartTrack({...options, noiseSuppression: true,
+              deviceId: inputId.value === 'default' ? 'default' : {exact: inputId.value}});
+          }
+          throw error;
+        }
         if(current!==room){await track.stopProcessor();return;}
-      }else if(!wants&&track.getProcessor()?.name==='nimbo-rnnoise')await track.stopProcessor();
+      }else if(!wants){
+        const name = track.getProcessor()?.name;
+        if(name?.startsWith('nimbo-') && isLocalNoiseEngine(name.slice(6)))await track.stopProcessor();
+      }
     }
     configured.set(track,key);await auditInput('processing-applied');
   }

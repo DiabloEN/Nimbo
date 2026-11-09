@@ -1,26 +1,55 @@
-import {RnnoiseWorkletNode,loadRnnoise} from '@sapphi-red/web-noise-suppressor';
+import {GtcrnWorkletNode, RnnoiseWorkletNode, SpeexWorkletNode, loadGtcrn, loadRnnoise, loadSpeex} from '@sapphi-red/web-noise-suppressor';
+import gtcrnWorklet from '@sapphi-red/web-noise-suppressor/gtcrnWorklet.js?url';
+import gtcrnWasm from '@sapphi-red/web-noise-suppressor/gtcrn.wasm?url';
 import workletUrl from '@sapphi-red/web-noise-suppressor/rnnoiseWorklet.js?url';
 import wasmUrl from '@sapphi-red/web-noise-suppressor/rnnoise.wasm?url';
 import simdUrl from '@sapphi-red/web-noise-suppressor/rnnoise_simd.wasm?url';
 import type {AudioProcessorOptions,TrackProcessor,Track} from 'livekit-client';
-let binary:Promise<ArrayBuffer>|undefined;
-const modules=new WeakMap<AudioContext,Promise<void>>();
-export async function createNoiseNode(context:AudioContext){
- if(context.sampleRate!==48000)throw new Error('RNNoise requires 48 kHz');
- binary??=loadRnnoise({url:wasmUrl,simdUrl}).catch(e=>{binary=undefined;throw e;});
- if(!modules.has(context))modules.set(context,context.audioWorklet.addModule(workletUrl).catch(e=>{modules.delete(context);throw e;}));
- const [wasmBinary]=await Promise.all([binary,modules.get(context)]);
- return new RnnoiseWorkletNode(context,{wasmBinary,maxChannels:1});
+import speexWorklet from '@sapphi-red/web-noise-suppressor/speexWorklet.js?url';
+import speexWasm from '@sapphi-red/web-noise-suppressor/speex.wasm?url';
+import type {LocalNoiseEngine} from './audioLab';
+const engines = {
+  rnnoise: {worklet: workletUrl, Node: RnnoiseWorkletNode, load: () => loadRnnoise({url: wasmUrl, simdUrl})},
+  speex: {worklet: speexWorklet, Node: SpeexWorkletNode, load: () => loadSpeex({url: speexWasm})},
+  gtcrn: {worklet: gtcrnWorklet, Node: GtcrnWorkletNode, load: () => loadGtcrn({url: gtcrnWasm})},
+};
+const binaries = new Map<LocalNoiseEngine, Promise<ArrayBuffer>>();
+const modules = new WeakMap<AudioContext, Map<LocalNoiseEngine, Promise<void>>>();
+
+export async function createNoiseNode(context: AudioContext, engine: LocalNoiseEngine) {
+  if (context.sampleRate !== 48000) throw new Error('Expected 48 kHz microphone graph');
+  const spec = engines[engine];
+  let registered = modules.get(context);
+  if (!registered) {
+    registered = new Map();
+    modules.set(context, registered);
+  }
+  if (!registered.has(engine)) {
+    registered.set(engine, context.audioWorklet.addModule(spec.worklet)
+      .catch(error => { registered.delete(engine); throw error; }));
+  }
+  if (!binaries.has(engine)) {
+    binaries.set(engine, spec.load().then(binary => {
+      // The worklet constructs the WASM instance asynchronously. Surface an unsupported
+      // SIMD build or an invalid asset before publishing a silent microphone track.
+      if (!WebAssembly.validate(binary)) throw new Error('Unsupported noise suppression module');
+      return binary;
+    }).catch(error => { binaries.delete(engine); throw error; }));
+  }
+  const [wasmBinary] = await Promise.all([binaries.get(engine)!, registered.get(engine)]);
+  return new spec.Node(context, {wasmBinary, maxChannels: 1});
 }
 /** A separate 48 kHz graph handles devices running at any native sample rate. */
 export class NimboNoiseProcessor implements TrackProcessor<Track.Kind.Audio,AudioProcessorOptions>{
- name='nimbo-rnnoise';processedTrack?:MediaStreamTrack;
- private context?:AudioContext;private source?:MediaStreamAudioSourceNode;private node?:RnnoiseWorkletNode;private destination?:MediaStreamAudioDestinationNode;private generation=0;
+ constructor(private readonly engine: LocalNoiseEngine) {}
+ get name() { return 'nimbo-' + this.engine; }
+ processedTrack?:MediaStreamTrack;
+ private context?:AudioContext;private source?:MediaStreamAudioSourceNode;private node?:Awaited<ReturnType<typeof createNoiseNode>>;private destination?:MediaStreamAudioDestinationNode;private generation=0;
  async init({track}:AudioProcessorOptions){
   await this.destroy();const generation=this.generation;
   const context=new AudioContext({sampleRate:48000});this.context=context;
   try{
-   await context.resume();const node=await createNoiseNode(context);
+   await context.resume();const node=await createNoiseNode(context, this.engine);
    if(generation!==this.generation){node.destroy();node.disconnect();return;}
    this.node=node;this.source=context.createMediaStreamSource(new MediaStream([track]));
    this.destination=context.createMediaStreamDestination();

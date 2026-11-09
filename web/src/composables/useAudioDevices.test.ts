@@ -171,7 +171,7 @@ describe('useAudioDevices', () => {
   it('accepts the default alias resolving to a concrete microphone id',async()=>{
     const state=create();state.inputId.value='old';
     state.lab.engine.value='browser';
-    const track={isMuted:false,constraints:{noiseSuppression:true,autoGainControl:true},getProcessor:()=>undefined,getDeviceId:vi.fn(async()=> 'physical-default-id')};
+    const track={isMuted:false,constraints:{noiseSuppression:true,autoGainControl:false},getProcessor:()=>undefined,getDeviceId:vi.fn(async()=> 'physical-default-id')};
     const room={on:vi.fn(),off:vi.fn(),localParticipant:{getTrackPublication:()=>({track})},switchActiveDevice:vi.fn(async()=>false)};
     state.bindRoom(room as unknown as Room);
     expect(await state.selectInput('default')).toBe(true);
@@ -207,6 +207,19 @@ describe('useAudioDevices', () => {
     first.suppression.value = false;
     first.save();
     expect(create().lab.suppression.value).toBe(false);
+  });
+  it.each([true, false])('ignores legacy gain and falls back from a removed engine (suppression=%s)', suppression => {
+    const saved = {engine: 'speex', gain: true, suppression};
+    const setItem = vi.fn();
+    vi.stubGlobal('localStorage', {getItem: () => JSON.stringify(saved), setItem});
+    const lab = create().lab;
+    expect(lab.captureOptions().autoGainControl).toBe(false);
+    if (audioLabEnabled) {
+      expect(lab.engine.value).toBe('gtcrn');
+      expect(lab.suppression.value).toBe(suppression);
+      lab.save();
+      expect(JSON.parse(setItem.mock.calls[0]![1])).toEqual({engine: 'gtcrn', suppression});
+    }
   });
   it('stops a late permission probe after disposal without updating state', async () => {
     const permission = deferred<MediaStream>();

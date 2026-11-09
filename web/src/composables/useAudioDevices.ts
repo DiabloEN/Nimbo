@@ -96,7 +96,7 @@ export function useAudioDevices() {
       await track.restartTrack({...options,deviceId:inputId.value==='default'?'default':{exact:inputId.value}});
       if(current!==room){track.stop();return;}
     }
-    if(import.meta.env.VITE_AUDIO_LAB==='1'){
+    if(import.meta.env.VITE_AUDIO_LAB!=='0'){
       const engine = lab.engine.value;
       const wants = lab.suppression.value && engine !== 'browser';
       if(wants && track.getProcessor()?.name !== 'nimbo-' + engine){
@@ -191,7 +191,7 @@ export function useAudioDevices() {
       }
       if (requestPermission && !room?.localParticipant?.isMicrophoneEnabled) {
         try {
-          stream = await media.getUserMedia({ audio: true, video: false });
+          stream = await media.getUserMedia({ audio: {autoGainControl: false}, video: false });
           permissionGranted = true;
         } catch (error) {
           permissionError = permissionMessage(error);

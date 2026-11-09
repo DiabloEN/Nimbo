@@ -14,10 +14,10 @@ async function start(kind:'mic'|'sound'){
   if('setSinkId' in audio)await (audio as HTMLAudioElement&{setSinkId:(id:string)=>Promise<void>}).setSinkId(props.outputId);
   if(run!==generation){destination.stream.getTracks().forEach(t=>t.stop());return;}
   if(kind==='mic'){
-   const capture=await navigator.mediaDevices.getUserMedia({audio:{deviceId:props.inputId==='default'?'default':{exact:props.inputId},...(props.captureOptions||{echoCancellation:true,noiseSuppression:true,autoGainControl:true})}});
+   const capture=await navigator.mediaDevices.getUserMedia({audio:{deviceId:props.inputId==='default'?'default':{exact:props.inputId},...(props.captureOptions||{echoCancellation:true,noiseSuppression:true,autoGainControl:false})}});
    if(run!==generation){capture.getTracks().forEach(t=>t.stop());return;}stream=capture;
    const source=ctx.createMediaStreamSource(capture),analyser=ctx.createAnalyser();analyser.fftSize=256;let processed:AudioNode=source;
-   if(import.meta.env.VITE_AUDIO_LAB==='1'&&props.noiseEngine){const {createNoiseNode}=await import('../composables/rnnoiseProcessor');const node=await createNoiseNode(ctx, props.noiseEngine);if(run!==generation){node.destroy();node.disconnect();return;}noiseNode=node;source.connect(node);processed=node;}
+   if(import.meta.env.VITE_AUDIO_LAB!=='0'&&props.noiseEngine){const {createNoiseNode}=await import('../composables/rnnoiseProcessor');const node=await createNoiseNode(ctx, props.noiseEngine);if(run!==generation){node.destroy();node.disconnect();return;}noiseNode=node;source.connect(node);processed=node;}
    processed.connect(analyser);processed.connect(destination);
    const data=new Uint8Array(analyser.fftSize);const draw=()=>{if(run!==generation)return;analyser.getByteTimeDomainData(data);level.value=Math.min(100,Math.sqrt(data.reduce((sum,x)=>sum+(x-128)**2,0)/data.length)*3);frame=requestAnimationFrame(draw);};draw();
    note.value='Вы слышите себя. Проверка остановится через 10 секунд.';

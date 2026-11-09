@@ -39,7 +39,7 @@ type Devices = {
 export function useCall(devices: Devices, media: () => { videos: HTMLElement | null; audio: HTMLElement | null }) {
   setLogLevel('warn');
   const serialInput=<T>(op:()=>Promise<T>)=>devices.runInput?devices.runInput(op):op();
-  const micOptions=()=>({deviceId:devices.inputId.value==='default'?'default':{exact:devices.inputId.value},...(devices.captureOptions?.()||{echoCancellation:true,noiseSuppression:true,autoGainControl:true})});
+  const micOptions=()=>({deviceId:devices.inputId.value==='default'?'default':{exact:devices.inputId.value},...(devices.captureOptions?.()||{echoCancellation:true,noiseSuppression:true,autoGainControl:false})});
   let room: Room | null = null;
   async function playCue(active: Room, url: string) {
     try {

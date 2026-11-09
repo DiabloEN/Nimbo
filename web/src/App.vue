@@ -25,7 +25,7 @@ import type {Mention} from './composables/mentions';
 import WorkspaceSettings from './components/WorkspaceSettings.vue';
 import CallStage from './components/CallStage.vue';
 import AppSelect from './components/AppSelect.vue';
-const AudioLabPanel=import.meta.env.VITE_AUDIO_LAB==='1'?defineAsyncComponent(()=>import('./components/AudioLabPanel.vue')):null;
+const AudioLabPanel=import.meta.env.VITE_AUDIO_LAB!=='0'?defineAsyncComponent(()=>import('./components/AudioLabPanel.vue')):null;
 import {downloadAudioDiagnostics} from './composables/audioDiagnostics';
 import AudioTests from './components/AudioTests.vue';
 import ProfilePanel from './components/ProfilePanel.vue';

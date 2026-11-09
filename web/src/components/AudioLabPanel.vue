@@ -8,11 +8,10 @@ const props = defineProps<{devices: ReturnType<typeof useAudioDevices>; disabled
 const lab = props.devices.lab;
 const mode = computed(() => lab.suppression.value ? lab.engine.value : 'off');
 const options = [
-  {value: 'off', label: 'Выключено'},
-  {value: 'browser', label: 'Встроенное в браузер'},
-  {value: 'rnnoise', label: 'RNNoise'},
-  {value: 'speex', label: 'Speex'},
   {value: 'gtcrn', label: 'GTCRN'},
+  {value: 'rnnoise', label: 'RNNoise'},
+  {value: 'browser', label: 'Встроенное в браузер'},
+  {value: 'off', label: 'Выключено'},
 ];
 async function select(value: string) {
   if (value === mode.value) return;
@@ -28,7 +27,5 @@ async function select(value: string) {
     <label for="noise-engine">Шумоподавление</label>
     <AppSelect id="noise-engine" label="Шумоподавление" :model-value="mode" :options="options" :disabled="disabled" @update:model-value="select"/>
     <p class="field-help">Сравните режимы через «Проверить микрофон». Обработка выполняется на вашем устройстве.</p>
-    <label><input v-model="lab.gain.value" type="checkbox" :disabled="disabled" @change="devices.updateProcessing"> Автоматически выравнивать громкость микрофона</label>
-    <p class="field-help">Выравнивание может усиливать тихие шорохи. Эхоподавление остаётся включённым.</p>
   </fieldset>
 </template>

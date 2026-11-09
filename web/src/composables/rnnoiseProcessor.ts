@@ -1,16 +1,13 @@
-import {GtcrnWorkletNode, RnnoiseWorkletNode, SpeexWorkletNode, loadGtcrn, loadRnnoise, loadSpeex} from '@sapphi-red/web-noise-suppressor';
+import {GtcrnWorkletNode, RnnoiseWorkletNode, loadGtcrn, loadRnnoise} from '@sapphi-red/web-noise-suppressor';
 import gtcrnWorklet from '@sapphi-red/web-noise-suppressor/gtcrnWorklet.js?url';
 import gtcrnWasm from '@sapphi-red/web-noise-suppressor/gtcrn.wasm?url';
 import workletUrl from '@sapphi-red/web-noise-suppressor/rnnoiseWorklet.js?url';
 import wasmUrl from '@sapphi-red/web-noise-suppressor/rnnoise.wasm?url';
 import simdUrl from '@sapphi-red/web-noise-suppressor/rnnoise_simd.wasm?url';
 import type {AudioProcessorOptions,TrackProcessor,Track} from 'livekit-client';
-import speexWorklet from '@sapphi-red/web-noise-suppressor/speexWorklet.js?url';
-import speexWasm from '@sapphi-red/web-noise-suppressor/speex.wasm?url';
 import type {LocalNoiseEngine} from './audioLab';
 const engines = {
   rnnoise: {worklet: workletUrl, Node: RnnoiseWorkletNode, load: () => loadRnnoise({url: wasmUrl, simdUrl})},
-  speex: {worklet: speexWorklet, Node: SpeexWorkletNode, load: () => loadSpeex({url: speexWasm})},
   gtcrn: {worklet: gtcrnWorklet, Node: GtcrnWorkletNode, load: () => loadGtcrn({url: gtcrnWasm})},
 };
 const binaries = new Map<LocalNoiseEngine, Promise<ArrayBuffer>>();

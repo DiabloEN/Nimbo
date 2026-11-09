@@ -4,11 +4,21 @@ import { useAudioDevices } from './useAudioDevices';
 import { audioLabEnabled } from './audioLab';
 
 function device(kind: MediaDeviceKind, deviceId: string, label: string): MediaDeviceInfo {
-  return { kind, deviceId, label, groupId: '', toJSON() { return {}; } };
+  return {
+    kind,
+    deviceId,
+    label,
+    groupId: '',
+    toJSON() {
+      return {};
+    },
+  };
 }
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
   return { promise, resolve };
 }
 
@@ -20,14 +30,25 @@ describe('useAudioDevices', () => {
     removeEventListener: ReturnType<typeof vi.fn>;
   };
   const instances: ReturnType<typeof useAudioDevices>[] = [];
-  function create() { const state = useAudioDevices(); instances.push(state); return state; }
+  function create() {
+    const state = useAudioDevices();
+    instances.push(state);
+    return state;
+  }
   beforeEach(() => {
     media = {
-      enumerateDevices: vi.fn().mockResolvedValue([]), getUserMedia: vi.fn(),
-      addEventListener: vi.fn(), removeEventListener: vi.fn(),
+      enumerateDevices: vi.fn().mockResolvedValue([]),
+      getUserMedia: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
     };
     vi.stubGlobal('navigator', { mediaDevices: media });
-    vi.stubGlobal('HTMLMediaElement', class { setSinkId() {} });
+    vi.stubGlobal(
+      'HTMLMediaElement',
+      class {
+        setSinkId() {}
+      },
+    );
   });
   afterEach(() => {
     instances.splice(0).forEach((instance) => instance.dispose());
@@ -48,11 +69,14 @@ describe('useAudioDevices', () => {
       device('audioinput', 'default', 'По умолчанию - USB Mic'),
       device('audiooutput', 'default', 'Default - Headphones'),
     ]);
-    const state = create(); await state.refresh();
+    const state = create();
+    await state.refresh();
     expect(state.inputs.value[0]!.label).toBe('По умолчанию (USB Mic)');
     expect(state.outputs.value[0]!.label).toBe('По умолчанию (Headphones)');
     expect(state.inputId.value).toBe('default');
-    media.enumerateDevices.mockResolvedValue([device('audioinput', 'default', 'Default - New Mic')]);
+    media.enumerateDevices.mockResolvedValue([
+      device('audioinput', 'default', 'Default - New Mic'),
+    ]);
     await state.refresh();
     expect(state.inputs.value[0]!.label).toBe('По умолчанию (New Mic)');
   });
@@ -63,7 +87,8 @@ describe('useAudioDevices', () => {
       { ...device('audioinput', 'physical', 'USB Mic'), groupId: 'usb' },
       device('audiooutput', 'first', 'Speakers'),
     ]);
-    const state = create(); await state.refresh();
+    const state = create();
+    await state.refresh();
     expect(state.inputs.value[0]!.label).toBe('По умолчанию (USB Mic)');
     expect(state.outputs.value[0]!.label).toBe('По умолчанию (название недоступно)');
   });
@@ -91,7 +116,8 @@ describe('useAudioDevices', () => {
 
   it('ignores an earlier enumeration that finishes after a newer refresh', async () => {
     const first = deferred<MediaDeviceInfo[]>();
-    media.enumerateDevices.mockReturnValueOnce(first.promise)
+    media.enumerateDevices
+      .mockReturnValueOnce(first.promise)
       .mockResolvedValueOnce([device('audioinput', 'new', 'New microphone')]);
     const state = create();
     const earlier = state.refresh();
@@ -101,25 +127,39 @@ describe('useAudioDevices', () => {
     expect(state.inputs.value.map((item) => item.deviceId)).toEqual(['default', 'new']);
   });
 
-  it.each([false, new Error('device rejected')])('keeps the prior selection after a failed switch (%s)', async (result) => {
-    const state = create();
-    await state.selectInput('old');
-    const switchActiveDevice = result instanceof Error
-      ? vi.fn().mockRejectedValue(result) : vi.fn().mockResolvedValue(result);
-    const disconnect = vi.fn();
-    const room = { on: vi.fn(), off: vi.fn(), getActiveDevice: vi.fn(), switchActiveDevice, disconnect };
-    state.bindRoom(room as unknown as Room);
-    expect(await state.selectInput('new')).toBe(false);
-    expect(state.inputId.value).toBe('old');
-    expect(state.note.value).toContain('Проверьте активный микрофон');
-    expect(disconnect).not.toHaveBeenCalled();
-  });
+  it.each([false, new Error('device rejected')])(
+    'keeps the prior selection after a failed switch (%s)',
+    async (result) => {
+      const state = create();
+      await state.selectInput('old');
+      const switchActiveDevice =
+        result instanceof Error
+          ? vi.fn().mockRejectedValue(result)
+          : vi.fn().mockResolvedValue(result);
+      const disconnect = vi.fn();
+      const room = {
+        on: vi.fn(),
+        off: vi.fn(),
+        getActiveDevice: vi.fn(),
+        switchActiveDevice,
+        disconnect,
+      };
+      state.bindRoom(room as unknown as Room);
+      expect(await state.selectInput('new')).toBe(false);
+      expect(state.inputId.value).toBe('old');
+      expect(state.note.value).toContain('Проверьте активный микрофон');
+      expect(disconnect).not.toHaveBeenCalled();
+    },
+  );
 
   it('keeps output failures recoverable and never disconnects the room', async () => {
     const state = create();
     const room = {
-      on: vi.fn(), off: vi.fn(), getActiveDevice: vi.fn(),
-      switchActiveDevice: vi.fn().mockRejectedValue(new Error('denied')), disconnect: vi.fn(),
+      on: vi.fn(),
+      off: vi.fn(),
+      getActiveDevice: vi.fn(),
+      switchActiveDevice: vi.fn().mockRejectedValue(new Error('denied')),
+      disconnect: vi.fn(),
     };
     state.bindRoom(room as unknown as Room);
     expect(await state.selectOutput('headphones')).toBe(false);
@@ -133,94 +173,166 @@ describe('useAudioDevices', () => {
     await state.selectInput('unplugged');
     let actual = 'unplugged';
     const room = {
-      on: vi.fn(), off: vi.fn(),
-      getActiveDevice: vi.fn((kind: string) => kind === 'audioinput' ? actual : undefined),
-      switchActiveDevice: vi.fn(async (_kind: string, id: string) => { actual = id; return true; }),
+      on: vi.fn(),
+      off: vi.fn(),
+      getActiveDevice: vi.fn((kind: string) => (kind === 'audioinput' ? actual : undefined)),
+      switchActiveDevice: vi.fn(async (_kind: string, id: string) => {
+        actual = id;
+        return true;
+      }),
     };
     state.bindRoom(room as unknown as Room);
-    media.enumerateDevices.mockResolvedValue([device('audioinput', 'built-in', 'Built-in microphone')]);
+    media.enumerateDevices.mockResolvedValue([
+      device('audioinput', 'built-in', 'Built-in microphone'),
+    ]);
     await state.refresh();
     expect(room.switchActiveDevice).toHaveBeenCalledWith('audioinput', 'default');
     expect(state.inputId.value).toBe('default');
   });
 
-
   it('serializes microphone publication behind a hardware switch', async () => {
-    const state=create(),wait=deferred<boolean>();let actual='old';
-    const room={on:vi.fn(),off:vi.fn(),getActiveDevice:vi.fn(()=>actual),switchActiveDevice:vi.fn(async()=>{await wait.promise;actual='new';return true;})};
+    const state = create(),
+      wait = deferred<boolean>();
+    let actual = 'old';
+    const room = {
+      on: vi.fn(),
+      off: vi.fn(),
+      getActiveDevice: vi.fn(() => actual),
+      switchActiveDevice: vi.fn(async () => {
+        await wait.promise;
+        actual = 'new';
+        return true;
+      }),
+    };
     state.bindRoom(room as unknown as Room);
-    const switching=state.selectInput('new');const enable=vi.fn(async()=>state.inputId.value);
-    const enabling=state.runInput(enable);await Promise.resolve();expect(enable).not.toHaveBeenCalled();
-    wait.resolve(true);await switching;expect(await enabling).toBe('new');expect(state.busy.value).toBe(false);
+    const switching = state.selectInput('new');
+    const enable = vi.fn(async () => state.inputId.value);
+    const enabling = state.runInput(enable);
+    await Promise.resolve();
+    expect(enable).not.toHaveBeenCalled();
+    wait.resolve(true);
+    await switching;
+    expect(await enabling).toBe('new');
+    expect(state.busy.value).toBe(false);
   });
   it('ignores a late switch result from the room already left', async () => {
-    const state=create(),wait=deferred<boolean>();state.inputId.value='old';
-    const room={on:vi.fn(),off:vi.fn(),getActiveDevice:vi.fn(()=> 'new'),switchActiveDevice:vi.fn(()=>wait.promise)};
-    state.bindRoom(room as unknown as Room);const switching=state.selectInput('new');await Promise.resolve();state.bindRoom(null);wait.resolve(true);
-    expect(await switching).toBe(false);expect(state.inputId.value).toBe('old');
+    const state = create(),
+      wait = deferred<boolean>();
+    state.inputId.value = 'old';
+    const room = {
+      on: vi.fn(),
+      off: vi.fn(),
+      getActiveDevice: vi.fn(() => 'new'),
+      switchActiveDevice: vi.fn(() => wait.promise),
+    };
+    state.bindRoom(room as unknown as Room);
+    const switching = state.selectInput('new');
+    await Promise.resolve();
+    state.bindRoom(null);
+    wait.resolve(true);
+    expect(await switching).toBe(false);
+    expect(state.inputId.value).toBe('old');
   });
-  it('rejects an acknowledged switch when the captured microphone is still different',async()=>{
-    const state=create();state.inputId.value='old';
-    const track={isMuted:false,getDeviceId:vi.fn(async()=> 'old')};
-    const room={on:vi.fn(),off:vi.fn(),localParticipant:{getTrackPublication:()=>({track})},switchActiveDevice:vi.fn(async()=>true)};
+  it('rejects an acknowledged switch when the captured microphone is still different', async () => {
+    const state = create();
+    state.inputId.value = 'old';
+    const track = { isMuted: false, getDeviceId: vi.fn(async () => 'old') };
+    const room = {
+      on: vi.fn(),
+      off: vi.fn(),
+      localParticipant: { getTrackPublication: () => ({ track }) },
+      switchActiveDevice: vi.fn(async () => true),
+    };
     state.bindRoom(room as unknown as Room);
     expect(await state.selectInput('new')).toBe(false);
     expect(state.inputId.value).toBe('old');
-    expect(room.switchActiveDevice).toHaveBeenLastCalledWith('audioinput','old');
+    expect(room.switchActiveDevice).toHaveBeenLastCalledWith('audioinput', 'old');
   });
-  it('accepts the default alias resolving to a concrete microphone id',async()=>{
-    const state=create();state.inputId.value='old';
-    state.lab.engine.value='browser';
-    const track={isMuted:false,constraints:{noiseSuppression:true,autoGainControl:false},getProcessor:()=>undefined,getDeviceId:vi.fn(async()=> 'physical-default-id')};
-    const room={on:vi.fn(),off:vi.fn(),localParticipant:{getTrackPublication:()=>({track})},switchActiveDevice:vi.fn(async()=>false)};
+  it('accepts the default alias resolving to a concrete microphone id', async () => {
+    const state = create();
+    state.inputId.value = 'old';
+    state.lab.engine.value = 'browser';
+    const track = {
+      isMuted: false,
+      constraints: { noiseSuppression: true, autoGainControl: false },
+      getProcessor: () => undefined,
+      getDeviceId: vi.fn(async () => 'physical-default-id'),
+    };
+    const room = {
+      on: vi.fn(),
+      off: vi.fn(),
+      localParticipant: { getTrackPublication: () => ({ track }) },
+      switchActiveDevice: vi.fn(async () => false),
+    };
     state.bindRoom(room as unknown as Room);
     expect(await state.selectInput('default')).toBe(true);
     expect(state.inputId.value).toBe('default');
   });
-  it.runIf(audioLabEnabled)('uses GTCRN by default on the microphone and releases it when switching to off', async () => {
-    vi.stubGlobal('localStorage', {getItem: () => null, setItem: vi.fn()});
-    const state = create();
-    let processor: {name: string} | undefined;
-    const track = {
-      isMuted: false, constraints: state.captureOptions(), getProcessor: () => processor,
-      setProcessor: vi.fn(async (next: {name: string}) => { processor = next; }),
-      stopProcessor: vi.fn(async () => { processor = undefined; }),
-    };
-    vi.stubGlobal('AudioWorkletNode', class {});
-    state.bindRoom({on: vi.fn(), off: vi.fn(), localParticipant: {getTrackPublication: () => ({track})}} as unknown as Room);
-    await state.updateProcessing();
-    expect(processor?.name).toBe('nimbo-gtcrn');
-    expect(track.constraints.noiseSuppression).toBe(false);
-    state.lab.suppression.value = false;
-    await state.updateProcessing();
-    expect(track.stopProcessor).toHaveBeenCalledOnce();
-    expect(processor).toBeUndefined();
-  });
-  it.runIf(audioLabEnabled)('restores a saved mode, including disabled suppression, on reopening', () => {
-    const storage = new Map<string, string>();
-    vi.stubGlobal('localStorage', {getItem: (key: string) => storage.get(key) ?? null,
-      setItem: (key: string, value: string) => storage.set(key, value)});
-    const first = create().lab;
-    first.engine.value = 'rnnoise';
-    first.save();
-    expect(create().lab.engine.value).toBe('rnnoise');
-    first.suppression.value = false;
-    first.save();
-    expect(create().lab.suppression.value).toBe(false);
-  });
-  it.each([true, false])('ignores legacy gain and falls back from a removed engine (suppression=%s)', suppression => {
-    const saved = {engine: 'speex', gain: true, suppression};
-    const setItem = vi.fn();
-    vi.stubGlobal('localStorage', {getItem: () => JSON.stringify(saved), setItem});
-    const lab = create().lab;
-    expect(lab.captureOptions().autoGainControl).toBe(false);
-    if (audioLabEnabled) {
-      expect(lab.engine.value).toBe('gtcrn');
-      expect(lab.suppression.value).toBe(suppression);
-      lab.save();
-      expect(JSON.parse(setItem.mock.calls[0]![1])).toEqual({engine: 'gtcrn', suppression});
-    }
-  });
+  it.runIf(audioLabEnabled)(
+    'uses GTCRN by default on the microphone and releases it when switching to off',
+    async () => {
+      vi.stubGlobal('localStorage', { getItem: () => null, setItem: vi.fn() });
+      const state = create();
+      let processor: { name: string } | undefined;
+      const track = {
+        isMuted: false,
+        constraints: state.captureOptions(),
+        getProcessor: () => processor,
+        setProcessor: vi.fn(async (next: { name: string }) => {
+          processor = next;
+        }),
+        stopProcessor: vi.fn(async () => {
+          processor = undefined;
+        }),
+      };
+      vi.stubGlobal('AudioWorkletNode', class {});
+      state.bindRoom({
+        on: vi.fn(),
+        off: vi.fn(),
+        localParticipant: { getTrackPublication: () => ({ track }) },
+      } as unknown as Room);
+      await state.updateProcessing();
+      expect(processor?.name).toBe('nimbo-gtcrn');
+      expect(track.constraints.noiseSuppression).toBe(false);
+      state.lab.suppression.value = false;
+      await state.updateProcessing();
+      expect(track.stopProcessor).toHaveBeenCalledOnce();
+      expect(processor).toBeUndefined();
+    },
+  );
+  it.runIf(audioLabEnabled)(
+    'restores a saved mode, including disabled suppression, on reopening',
+    () => {
+      const storage = new Map<string, string>();
+      vi.stubGlobal('localStorage', {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => storage.set(key, value),
+      });
+      const first = create().lab;
+      first.engine.value = 'rnnoise';
+      first.save();
+      expect(create().lab.engine.value).toBe('rnnoise');
+      first.suppression.value = false;
+      first.save();
+      expect(create().lab.suppression.value).toBe(false);
+    },
+  );
+  it.each([true, false])(
+    'ignores legacy gain and falls back from a removed engine (suppression=%s)',
+    (suppression) => {
+      const saved = { engine: 'speex', gain: true, suppression };
+      const setItem = vi.fn();
+      vi.stubGlobal('localStorage', { getItem: () => JSON.stringify(saved), setItem });
+      const lab = create().lab;
+      expect(lab.captureOptions().autoGainControl).toBe(false);
+      if (audioLabEnabled) {
+        expect(lab.engine.value).toBe('gtcrn');
+        expect(lab.suppression.value).toBe(suppression);
+        lab.save();
+        expect(JSON.parse(setItem.mock.calls[0]![1])).toEqual({ engine: 'gtcrn', suppression });
+      }
+    },
+  );
   it('stops a late permission probe after disposal without updating state', async () => {
     const permission = deferred<MediaStream>();
     const stop = vi.fn();

@@ -1,10 +1,10 @@
-import {ref} from 'vue';
-export const audioLabEnabled=import.meta.env.VITE_AUDIO_LAB!=='0';
+import { ref } from 'vue';
+export const audioLabEnabled = import.meta.env.VITE_AUDIO_LAB !== '0';
 const localNoiseEngines = ['gtcrn', 'rnnoise'] as const;
-export type LocalNoiseEngine = typeof localNoiseEngines[number];
+export type LocalNoiseEngine = (typeof localNoiseEngines)[number];
 const defaultEngine: LocalNoiseEngine = 'gtcrn';
 export function isLocalNoiseEngine(value: unknown): value is LocalNoiseEngine {
-  return localNoiseEngines.some(engine => engine === value);
+  return localNoiseEngines.some((engine) => engine === value);
 }
 export function useAudioLab() {
   const suppression = ref(true);
@@ -13,8 +13,11 @@ export function useAudioLab() {
     try {
       const saved = JSON.parse(localStorage.getItem('nimbo-audio-lab') || '{}');
       suppression.value = saved.suppression !== false;
-      if (saved.engine === 'browser' || isLocalNoiseEngine(saved.engine)) engine.value = saved.engine;
-    } catch { /* Settings may be unavailable in this browser. */ }
+      if (saved.engine === 'browser' || isLocalNoiseEngine(saved.engine))
+        engine.value = saved.engine;
+    } catch {
+      /* Settings may be unavailable in this browser. */
+    }
   }
   const captureOptions = () => ({
     echoCancellation: true,
@@ -24,9 +27,14 @@ export function useAudioLab() {
   function save() {
     if (audioLabEnabled) {
       try {
-        localStorage.setItem('nimbo-audio-lab', JSON.stringify({suppression: suppression.value, engine: engine.value}));
-      } catch { /* Keep the choice for this session when storage is unavailable. */ }
+        localStorage.setItem(
+          'nimbo-audio-lab',
+          JSON.stringify({ suppression: suppression.value, engine: engine.value }),
+        );
+      } catch {
+        /* Keep the choice for this session when storage is unavailable. */
+      }
     }
   }
-  return {suppression, engine, captureOptions, save};
+  return { suppression, engine, captureOptions, save };
 }

@@ -1,9 +1,91 @@
-import {expect,it} from 'vitest';
-import {readBinding,readMouseBinding,sameBinding,bindingLabel,defaults,hotkeyInput} from './useHotkeys';
-const event=(code:string,ctrl=false,alt=false,shift=false,meta=false)=>({code,ctrlKey:ctrl,altKey:alt,shiftKey:shift,metaKey:meta,getModifierState:()=>false});
-it('accepts single letters and digits and standalone modifiers but ignores AltGr',()=>{expect(readBinding(event('KeyM'))?.code).toBe('KeyM');expect(readBinding(event('Digit3'))?.code).toBe('Digit3');expect(readBinding(event('Numpad3'))?.code).toBe('Numpad3');expect(readBinding(event('ControlLeft',true))).toEqual({code:'ControlLeft',ctrl:false,alt:false,shift:false,meta:false});expect(readBinding({...event('KeyM',true,true),getModifierState:()=>true})).toBeUndefined();});
-it('uses physical key codes across keyboard layouts and exact modifiers',()=>{const binding=readBinding(event('KeyM',true,true));expect(sameBinding(binding,defaults.mic)).toBe(true);expect(sameBinding(readBinding(event('KeyM',true,true,true)),defaults.mic)).toBe(false);expect(bindingLabel(binding)).toBe('Ctrl + Alt + M');});
-it('accepts side mouse buttons without capturing normal clicks or wheel clicks',()=>{for(const button of [0,1,2])expect(readMouseBinding({...event(''),button})).toBeUndefined();expect(bindingLabel(readMouseBinding({...event(''),button:3}))).toBe('Мышь 4');expect(bindingLabel(readMouseBinding({...event('',true),button:4}))).toBe('Ctrl + Мышь 5');expect(sameBinding(readMouseBinding({...event(''),button:3}),readMouseBinding({...event(''),button:4}))).toBe(false);});
-it('protects editable fields and key-capture controls',()=>{for(const tag of ['input','textarea','select','[contenteditable]','[role="textbox"]','[data-hotkey-capture]']){expect(hotkeyInput({closest:(selector:string)=>selector.includes(tag)?{}:null} as unknown as EventTarget)).toBe(true);}expect(hotkeyInput(null)).toBe(false);expect(hotkeyInput({closest:()=>null} as unknown as EventTarget)).toBe(false);});
+import { expect, it } from 'vitest';
+import {
+  readBinding,
+  readMouseBinding,
+  sameBinding,
+  bindingLabel,
+  defaults,
+  hotkeyInput,
+} from './useHotkeys';
+const event = (code: string, ctrl = false, alt = false, shift = false, meta = false) => ({
+  code,
+  ctrlKey: ctrl,
+  altKey: alt,
+  shiftKey: shift,
+  metaKey: meta,
+  getModifierState: () => false,
+});
+it('accepts single letters and digits and standalone modifiers but ignores AltGr', () => {
+  expect(readBinding(event('KeyM'))?.code).toBe('KeyM');
+  expect(readBinding(event('Digit3'))?.code).toBe('Digit3');
+  expect(readBinding(event('Numpad3'))?.code).toBe('Numpad3');
+  expect(readBinding(event('ControlLeft', true))).toEqual({
+    code: 'ControlLeft',
+    ctrl: false,
+    alt: false,
+    shift: false,
+    meta: false,
+  });
+  expect(
+    readBinding({ ...event('KeyM', true, true), getModifierState: () => true }),
+  ).toBeUndefined();
+});
+it('uses physical key codes across keyboard layouts and exact modifiers', () => {
+  const binding = readBinding(event('KeyM', true, true));
+  expect(sameBinding(binding, defaults.mic)).toBe(true);
+  expect(sameBinding(readBinding(event('KeyM', true, true, true)), defaults.mic)).toBe(false);
+  expect(bindingLabel(binding)).toBe('Ctrl + Alt + M');
+});
+it('accepts side mouse buttons without capturing normal clicks or wheel clicks', () => {
+  for (const button of [0, 1, 2])
+    expect(readMouseBinding({ ...event(''), button })).toBeUndefined();
+  expect(bindingLabel(readMouseBinding({ ...event(''), button: 3 }))).toBe('Мышь 4');
+  expect(bindingLabel(readMouseBinding({ ...event('', true), button: 4 }))).toBe('Ctrl + Мышь 5');
+  expect(
+    sameBinding(
+      readMouseBinding({ ...event(''), button: 3 }),
+      readMouseBinding({ ...event(''), button: 4 }),
+    ),
+  ).toBe(false);
+});
+it('protects editable fields and key-capture controls', () => {
+  for (const tag of [
+    'input',
+    'textarea',
+    'select',
+    '[contenteditable]',
+    '[role="textbox"]',
+    '[data-hotkey-capture]',
+  ]) {
+    expect(
+      hotkeyInput({
+        closest: (selector: string) => (selector.includes(tag) ? {} : null),
+      } as unknown as EventTarget),
+    ).toBe(true);
+  }
+  expect(hotkeyInput(null)).toBe(false);
+  expect(hotkeyInput({ closest: () => null } as unknown as EventTarget)).toBe(false);
+});
 
-it('accepts navigation, punctuation, editing, function and media keys',()=>{for(const code of ['Home','End','Slash','Backslash','Escape','Backspace','Delete','Enter','Tab','Space','ArrowLeft','F12','NumpadAdd','AudioVolumeMute'])expect(readBinding(event(code))?.code).toBe(code);expect(bindingLabel(readBinding(event('Slash')))).toBe('/');for(const code of ['','Unidentified','Mouse1'])expect(readBinding(event(code))).toBeUndefined();});
+it('accepts navigation, punctuation, editing, function and media keys', () => {
+  for (const code of [
+    'Home',
+    'End',
+    'Slash',
+    'Backslash',
+    'Escape',
+    'Backspace',
+    'Delete',
+    'Enter',
+    'Tab',
+    'Space',
+    'ArrowLeft',
+    'F12',
+    'NumpadAdd',
+    'AudioVolumeMute',
+  ])
+    expect(readBinding(event(code))?.code).toBe(code);
+  expect(bindingLabel(readBinding(event('Slash')))).toBe('/');
+  for (const code of ['', 'Unidentified', 'Mouse1'])
+    expect(readBinding(event(code))).toBeUndefined();
+});

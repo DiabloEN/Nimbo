@@ -153,7 +153,10 @@ func TestUploadedFilesRemainPrivateData(t *testing.T) {
 	}
 	w = apiCall(h, "GET", "/api/files/"+msg.Attachment.ID, token, nil)
 	mustStatus(t, w, 200)
-	if w.Header().Get("Content-Type") != "application/octet-stream" || !strings.HasPrefix(w.Header().Get("Content-Disposition"), "attachment;") || w.Header().Get("X-Content-Type-Options") != "nosniff" || !strings.Contains(w.Header().Get("Content-Security-Policy"), "sandbox") {
+	if w.Header().Get("Content-Type") != "application/octet-stream" ||
+		!strings.HasPrefix(w.Header().Get("Content-Disposition"), "attachment;") ||
+		w.Header().Get("X-Content-Type-Options") != "nosniff" ||
+		!strings.Contains(w.Header().Get("Content-Security-Policy"), "sandbox") {
 		t.Fatal("active content can be served inline")
 	}
 	mustStatus(t, apiCall(h, "GET", "/api/files/"+msg.Attachment.ID, "", nil), 401)

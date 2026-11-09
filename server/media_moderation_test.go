@@ -17,7 +17,14 @@ func TestMediaModerationTargetsOnlyMatchingSourceAndIdentity(t *testing.T) {
 			jsonReply(w, 200, map[string]any{"rooms": []map[string]string{{"name": "lounge"}}})
 		case "/twirp/livekit.RoomService/ListParticipants":
 			tracks := []map[string]any{{"sid": "mic", "source": "MICROPHONE"}, {"sid": "camera", "source": 1}, {"sid": "screen", "source": "SCREEN_SHARE"}, {"sid": "screen-audio", "source": 4}, {"sid": "already-muted", "source": "MICROPHONE", "muted": true}}
-			jsonReply(w, 200, map[string]any{"participants": []map[string]any{{"identity": "target.one", "tracks": tracks}, {"identity": "target.two", "tracks": tracks}, {"identity": "target-other.one", "tracks": tracks}, {"identity": "someone.one", "tracks": tracks}}})
+			jsonReply(w, 200, map[string]any{
+				"participants": []map[string]any{
+					{"identity": "target.one", "tracks": tracks},
+					{"identity": "target.two", "tracks": tracks},
+					{"identity": "target-other.one", "tracks": tracks},
+					{"identity": "someone.one", "tracks": tracks},
+				},
+			})
 		case "/twirp/livekit.RoomService/MutePublishedTrack":
 			var body map[string]any
 			json.NewDecoder(r.Body).Decode(&body)

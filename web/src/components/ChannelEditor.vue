@@ -2,61 +2,796 @@
 import ChannelPostingSettings from './ChannelPostingSettings.vue';
 import AppSelect from './AppSelect.vue';
 import ChannelIconPicker from './ChannelIconPicker.vue';
-import {computed,ref,nextTick,onBeforeUnmount} from 'vue';import type{Channel,ChannelSection,Role,PostingPolicy}from '../composables/useWorkspace';import AppIcon from './AppIcon.vue';
-const props=defineProps<{roles:Role[];sections:ChannelSection[];channels:Channel[];sectionOrder:string[];mutate:(path:string,method:string,body?:unknown)=>Promise<unknown>}>();
-const posting=ref<PostingPolicy>({mode:'everyone',roleIds:[]});
-const editKind=computed(()=>props.sections.find(s=>s.id===adding.value)?.kind||props.channels.find(c=>c.id===editing.value)?.kind);
-const icon=ref('sound'),targetSection=ref(''),sectionEditing=ref<string|null>(null),sectionName=ref(''),sectionKind=ref('voice');
-async function editSection(s?:ChannelSection){cancel();sectionEditing.value=s?.id||'';sectionName.value=s?.name||'';sectionKind.value=s?.kind||'voice';await nextTick();document.getElementById(s?'section-name-'+s.id:'new-section-name')?.focus();}
-async function saveSection(){if(!sectionName.value.trim()){error.value='Введите название секции.';return;}await run(async()=>{await props.mutate(sectionEditing.value?'/api/sections/'+sectionEditing.value:'/api/sections',sectionEditing.value?'PATCH':'POST',{name:sectionName.value,kind:sectionKind.value});sectionEditing.value=null;});}
-const busy=ref(false),error=ref(''),editing=ref(''),name=ref(''),adding=ref(''),removal=ref<Channel>(),drag=ref<{kind:'section'|'channel';id:string;group:string}>();
-const preview=ref<{sections:string[];channels:Channel[]}>();
-const groups=computed(()=>(preview.value?.sections||props.sectionOrder).map(id=>{const section=props.sections.find(s=>s.id===id)!;return {kind:id,type:section.kind,title:section.name,channels:(preview.value?.channels||props.channels).filter(c=>(c.section||c.kind)===id)}}));
-async function run(action:()=>Promise<unknown>){if(busy.value)return;busy.value=true;error.value='';try{await action();}catch(e){error.value=(e as Error).message;}finally{busy.value=false;}}
-function edit(ch:Channel){sectionEditing.value=null;posting.value=ch.posting?{mode:ch.posting.mode,roleIds:[...ch.posting.roleIds]}:{mode:'everyone',roleIds:[]};editing.value=ch.id;targetSection.value=ch.section||ch.kind;adding.value='';name.value=ch.name;icon.value=ch.icon||(ch.kind==='voice'?'sound':'hash');}
-function cancel(){posting.value={mode:'everyone',roleIds:[]};editing.value='';adding.value='';name.value='';}
-async function save(){if(!name.value.trim()){error.value='Введите название канала.';return;}await run(async()=>{await props.mutate(editing.value?'/api/channels/'+editing.value:'/api/channels',editing.value?'PATCH':'POST',{name:name.value,section:targetSection.value||adding.value,kind:props.sections.find(s=>s.id===adding.value)?.kind||props.channels.find(c=>c.id===editing.value)?.kind,description:props.channels.find(c=>c.id===editing.value)?.description||'',icon:icon.value,...(editKind.value==='text'?{posting:posting.value}:{})});cancel();});}
-const ghost=ref<{x:number;y:number;width:number;title:string;names:string[]}>();
-let pointer:{x:number;y:number;id:number;moved:boolean;offsetX:number;offsetY:number;element:HTMLElement}|undefined;
-function cleanup(){pointer=undefined;drag.value=undefined;ghost.value=undefined;preview.value=undefined;window.removeEventListener('pointermove',movePointer);window.removeEventListener('pointerup',endPointer);window.removeEventListener('pointercancel',cleanup);window.removeEventListener('keydown',cancelKey);}
-function cancelKey(e:KeyboardEvent){if(e.key==='Escape')cleanup();}
-function movePointer(e:PointerEvent){
- if(!pointer||e.pointerId!==pointer.id||!drag.value)return;
- if(!pointer.moved&&Math.hypot(e.clientX-pointer.x,e.clientY-pointer.y)<5)return;
- e.preventDefault();pointer.moved=true;
- const item=drag.value,rect=pointer.element.getBoundingClientRect();
- ghost.value={x:e.clientX-pointer.offsetX,y:e.clientY-pointer.offsetY,width:rect.width,title:item.kind==='section'?(props.sections.find(s=>s.id===item.id)?.name||''):props.channels.find(c=>c.id===item.id)?.name||'',names:item.kind==='section'?props.channels.filter(c=>(c.section||c.kind)===item.id).map(c=>c.name):[]};
- const target=document.elementFromPoint(e.clientX,e.clientY)?.closest<HTMLElement>('[data-order-type="'+item.kind+'"]');
- const to=target?.dataset.orderId;if(!target||!to||to===item.id||item.kind==='channel'&&target.dataset.orderGroup!==item.group)return;
- const box=target.getBoundingClientRect();const values=item.kind==='section'?preview.value!.sections:preview.value!.channels.filter(c=>(c.section||c.kind)===item.group).map(c=>c.id);
- const down=values.indexOf(item.id)<values.indexOf(to);
- if(down?e.clientY<box.top+box.height*.55:e.clientY>box.top+box.height*.45)return;
- if(item.kind==='section')preview.value!.sections=moved(preview.value!.sections,item.id,to);
- else{const ids=moved(preview.value!.channels.map(c=>c.id),item.id,to);preview.value!.channels=ids.map(id=>preview.value!.channels.find(c=>c.id===id)!);}
+import { computed, ref, nextTick, onBeforeUnmount } from 'vue';
+import type { Channel, ChannelSection, Role, PostingPolicy } from '../composables/useWorkspace';
+import AppIcon from './AppIcon.vue';
+const props = defineProps<{
+  roles: Role[];
+  sections: ChannelSection[];
+  channels: Channel[];
+  sectionOrder: string[];
+  mutate: (path: string, method: string, body?: unknown) => Promise<unknown>;
+}>();
+const posting = ref<PostingPolicy>({ mode: 'everyone', roleIds: [] });
+const editKind = computed(
+  () =>
+    props.sections.find((s) => s.id === adding.value)?.kind ||
+    props.channels.find((c) => c.id === editing.value)?.kind,
+);
+const icon = ref('sound'),
+  targetSection = ref(''),
+  sectionEditing = ref<string | null>(null),
+  sectionName = ref(''),
+  sectionKind = ref('voice');
+async function editSection(s?: ChannelSection) {
+  cancel();
+  sectionEditing.value = s?.id || '';
+  sectionName.value = s?.name || '';
+  sectionKind.value = s?.kind || 'voice';
+  await nextTick();
+  document.getElementById(s ? 'section-name-' + s.id : 'new-section-name')?.focus();
 }
-function endPointer(e:PointerEvent){
- if(!pointer||e.pointerId!==pointer.id)return;
- const order=pointer.moved&&preview.value?{sections:[...preview.value.sections],channels:preview.value.channels.map(c=>c.id)}:undefined;
- cleanup();
- if(order&&(order.sections.join()!==props.sectionOrder.join()||order.channels.join()!==props.channels.map(c=>c.id).join()))void run(()=>props.mutate('/api/channel-order','PATCH',order));
+async function saveSection() {
+  if (!sectionName.value.trim()) {
+    error.value = 'Введите название секции.';
+    return;
+  }
+  await run(async () => {
+    await props.mutate(
+      sectionEditing.value ? '/api/sections/' + sectionEditing.value : '/api/sections',
+      sectionEditing.value ? 'PATCH' : 'POST',
+      { name: sectionName.value, kind: sectionKind.value },
+    );
+    sectionEditing.value = null;
+  });
 }
-function startPointer(e:PointerEvent,kind:'section'|'channel',id:string,group:string){
- if(e.button!==0||busy.value||editing.value||adding.value)return;e.preventDefault();cleanup();
- const handle=e.currentTarget as HTMLElement;handle.focus();const element=handle.closest<HTMLElement>('[data-order-type="'+kind+'"]')!,box=element.getBoundingClientRect();
- drag.value={kind,id,group};preview.value={sections:[...props.sectionOrder],channels:[...props.channels]};pointer={x:e.clientX,y:e.clientY,id:e.pointerId,moved:false,offsetX:e.clientX-box.left,offsetY:e.clientY-box.top,element};
- window.addEventListener('pointermove',movePointer,{passive:false});window.addEventListener('pointerup',endPointer);window.addEventListener('pointercancel',cleanup);window.addEventListener('keydown',cancelKey);
+const busy = ref(false),
+  error = ref(''),
+  editing = ref(''),
+  name = ref(''),
+  adding = ref(''),
+  removal = ref<Channel>(),
+  drag = ref<{ kind: 'section' | 'channel'; id: string; group: string }>();
+const preview = ref<{ sections: string[]; channels: Channel[] }>();
+const groups = computed(() =>
+  (preview.value?.sections || props.sectionOrder).map((id) => {
+    const section = props.sections.find((s) => s.id === id)!;
+    return {
+      kind: id,
+      type: section.kind,
+      title: section.name,
+      channels: (preview.value?.channels || props.channels).filter(
+        (c) => (c.section || c.kind) === id,
+      ),
+    };
+  }),
+);
+async function run(action: () => Promise<unknown>) {
+  if (busy.value) return;
+  busy.value = true;
+  error.value = '';
+  try {
+    await action();
+  } catch (e) {
+    error.value = (e as Error).message;
+  } finally {
+    busy.value = false;
+  }
+}
+function edit(ch: Channel) {
+  sectionEditing.value = null;
+  posting.value = ch.posting
+    ? { mode: ch.posting.mode, roleIds: [...ch.posting.roleIds] }
+    : { mode: 'everyone', roleIds: [] };
+  editing.value = ch.id;
+  targetSection.value = ch.section || ch.kind;
+  adding.value = '';
+  name.value = ch.name;
+  icon.value = ch.icon || (ch.kind === 'voice' ? 'sound' : 'hash');
+}
+function cancel() {
+  posting.value = { mode: 'everyone', roleIds: [] };
+  editing.value = '';
+  adding.value = '';
+  name.value = '';
+}
+async function save() {
+  if (!name.value.trim()) {
+    error.value = 'Введите название канала.';
+    return;
+  }
+  await run(async () => {
+    await props.mutate(
+      editing.value ? '/api/channels/' + editing.value : '/api/channels',
+      editing.value ? 'PATCH' : 'POST',
+      {
+        name: name.value,
+        section: targetSection.value || adding.value,
+        kind:
+          props.sections.find((s) => s.id === adding.value)?.kind ||
+          props.channels.find((c) => c.id === editing.value)?.kind,
+        description: props.channels.find((c) => c.id === editing.value)?.description || '',
+        icon: icon.value,
+        ...(editKind.value === 'text' ? { posting: posting.value } : {}),
+      },
+    );
+    cancel();
+  });
+}
+const ghost = ref<{ x: number; y: number; width: number; title: string; names: string[] }>();
+let pointer:
+  | {
+      x: number;
+      y: number;
+      id: number;
+      moved: boolean;
+      offsetX: number;
+      offsetY: number;
+      element: HTMLElement;
+    }
+  | undefined;
+function cleanup() {
+  pointer = undefined;
+  drag.value = undefined;
+  ghost.value = undefined;
+  preview.value = undefined;
+  window.removeEventListener('pointermove', movePointer);
+  window.removeEventListener('pointerup', endPointer);
+  window.removeEventListener('pointercancel', cleanup);
+  window.removeEventListener('keydown', cancelKey);
+}
+function cancelKey(e: KeyboardEvent) {
+  if (e.key === 'Escape') cleanup();
+}
+function movePointer(e: PointerEvent) {
+  if (!pointer || e.pointerId !== pointer.id || !drag.value) return;
+  if (!pointer.moved && Math.hypot(e.clientX - pointer.x, e.clientY - pointer.y) < 5) return;
+  e.preventDefault();
+  pointer.moved = true;
+  const item = drag.value,
+    rect = pointer.element.getBoundingClientRect();
+  ghost.value = {
+    x: e.clientX - pointer.offsetX,
+    y: e.clientY - pointer.offsetY,
+    width: rect.width,
+    title:
+      item.kind === 'section'
+        ? props.sections.find((s) => s.id === item.id)?.name || ''
+        : props.channels.find((c) => c.id === item.id)?.name || '',
+    names:
+      item.kind === 'section'
+        ? props.channels.filter((c) => (c.section || c.kind) === item.id).map((c) => c.name)
+        : [],
+  };
+  const target = document
+    .elementFromPoint(e.clientX, e.clientY)
+    ?.closest<HTMLElement>('[data-order-type="' + item.kind + '"]');
+  const to = target?.dataset.orderId;
+  if (
+    !target ||
+    !to ||
+    to === item.id ||
+    (item.kind === 'channel' && target.dataset.orderGroup !== item.group)
+  )
+    return;
+  const box = target.getBoundingClientRect();
+  const values =
+    item.kind === 'section'
+      ? preview.value!.sections
+      : preview
+          .value!.channels.filter((c) => (c.section || c.kind) === item.group)
+          .map((c) => c.id);
+  const down = values.indexOf(item.id) < values.indexOf(to);
+  if (down ? e.clientY < box.top + box.height * 0.55 : e.clientY > box.top + box.height * 0.45)
+    return;
+  if (item.kind === 'section')
+    preview.value!.sections = moved(preview.value!.sections, item.id, to);
+  else {
+    const ids = moved(
+      preview.value!.channels.map((c) => c.id),
+      item.id,
+      to,
+    );
+    preview.value!.channels = ids.map((id) => preview.value!.channels.find((c) => c.id === id)!);
+  }
+}
+function endPointer(e: PointerEvent) {
+  if (!pointer || e.pointerId !== pointer.id) return;
+  const order =
+    pointer.moved && preview.value
+      ? { sections: [...preview.value.sections], channels: preview.value.channels.map((c) => c.id) }
+      : undefined;
+  cleanup();
+  if (
+    order &&
+    (order.sections.join() !== props.sectionOrder.join() ||
+      order.channels.join() !== props.channels.map((c) => c.id).join())
+  )
+    void run(() => props.mutate('/api/channel-order', 'PATCH', order));
+}
+function startPointer(e: PointerEvent, kind: 'section' | 'channel', id: string, group: string) {
+  if (e.button !== 0 || busy.value || editing.value || adding.value) return;
+  e.preventDefault();
+  cleanup();
+  const handle = e.currentTarget as HTMLElement;
+  handle.focus();
+  const element = handle.closest<HTMLElement>('[data-order-type="' + kind + '"]')!,
+    box = element.getBoundingClientRect();
+  drag.value = { kind, id, group };
+  preview.value = { sections: [...props.sectionOrder], channels: [...props.channels] };
+  pointer = {
+    x: e.clientX,
+    y: e.clientY,
+    id: e.pointerId,
+    moved: false,
+    offsetX: e.clientX - box.left,
+    offsetY: e.clientY - box.top,
+    element,
+  };
+  window.addEventListener('pointermove', movePointer, { passive: false });
+  window.addEventListener('pointerup', endPointer);
+  window.addEventListener('pointercancel', cleanup);
+  window.addEventListener('keydown', cancelKey);
 }
 onBeforeUnmount(cleanup);
-function moved(values:string[],from:string,to:string){const result=values.filter(x=>x!==from);result.splice(values.indexOf(to),0,from);return result;}
-async function reorder(kind:'section'|'channel',from:string,to:string){if(from===to)return;const sections=kind==='section'?moved(props.sectionOrder,from,to):props.sectionOrder;const channels=kind==='channel'?moved(props.channels.map(c=>c.id),from,to):props.channels.map(c=>c.id);await run(()=>props.mutate('/api/channel-order','PATCH',{sections,channels}));}
-function drop(kind:'section'|'channel',id:string,group:string){const item=drag.value;drag.value=undefined;if(!item||item.kind!==kind||kind==='channel'&&item.group!==group)return;void reorder(kind,item.id,id);}
-function keyboard(e:KeyboardEvent,kind:'section'|'channel',id:string,group:string){if(e.key!=='ArrowUp'&&e.key!=='ArrowDown')return;e.preventDefault();const values=kind==='section'?props.sectionOrder:props.channels.filter(c=>(c.section||c.kind)===group).map(c=>c.id);const target=values[values.indexOf(id)+(e.key==='ArrowUp'?-1:1)];if(target)void reorder(kind,id,target);}
+function moved(values: string[], from: string, to: string) {
+  const result = values.filter((x) => x !== from);
+  result.splice(values.indexOf(to), 0, from);
+  return result;
+}
+async function reorder(kind: 'section' | 'channel', from: string, to: string) {
+  if (from === to) return;
+  const sections = kind === 'section' ? moved(props.sectionOrder, from, to) : props.sectionOrder;
+  const channels =
+    kind === 'channel'
+      ? moved(
+          props.channels.map((c) => c.id),
+          from,
+          to,
+        )
+      : props.channels.map((c) => c.id);
+  await run(() => props.mutate('/api/channel-order', 'PATCH', { sections, channels }));
+}
+function drop(kind: 'section' | 'channel', id: string, group: string) {
+  const item = drag.value;
+  drag.value = undefined;
+  if (!item || item.kind !== kind || (kind === 'channel' && item.group !== group)) return;
+  void reorder(kind, item.id, id);
+}
+function keyboard(e: KeyboardEvent, kind: 'section' | 'channel', id: string, group: string) {
+  if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+  e.preventDefault();
+  const values =
+    kind === 'section'
+      ? props.sectionOrder
+      : props.channels.filter((c) => (c.section || c.kind) === group).map((c) => c.id);
+  const target = values[values.indexOf(id) + (e.key === 'ArrowUp' ? -1 : 1)];
+  if (target) void reorder(kind, id, target);
+}
 </script>
-<template><div class="channel-editor"><p v-if="error" class="form-error" role="alert">{{error}}</p><TransitionGroup name="order" tag="div"><section v-for="group in groups" :key="group.kind" class="channel-group" :class="{'drag-source':ghost&&drag?.kind==='section'&&drag.id===group.kind}" data-order-type="section" :data-order-id="group.kind" @dragover.prevent @drop.stop.prevent="drop('section',group.kind,group.kind)"><header><button class="drag-handle"  :disabled="busy||!!editing||!!adding" :aria-label="`Переместить секцию ${group.title}`" title="Перетащите или используйте стрелки вверх/вниз" @pointerdown="startPointer($event,'section',group.kind,group.kind)"  @keydown="keyboard($event,'section',group.kind,group.kind)"><AppIcon name="drag" :size="20"/></button><form v-if="sectionEditing===group.kind" class="section-rename" @submit.prevent="saveSection"><input :id="'section-name-'+group.kind" v-model="sectionName" aria-label="Название секции" maxlength="60" required :disabled="busy" @keydown.esc.prevent="sectionEditing=null"><button type="submit" class="section-action" :disabled="busy" aria-label="Сохранить название секции" title="Сохранить"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12 4 4L19 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button><button type="button" class="section-action" :disabled="busy" aria-label="Отменить переименование" @click="sectionEditing=null"><AppIcon name="close" :size="16"/></button></form><button v-else class="section-name" :disabled="busy" :aria-label="'Изменить секцию '+group.title" @click="editSection(sections.find(s=>s.id===group.kind))">{{group.title}}</button><span class="section-kind">{{group.type==='voice'?'Голосовая':'Текстовая'}}</span><button v-if="!group.channels.length&&sections.length>1" class="text-button" :disabled="busy" :aria-label="'Удалить пустую секцию '+group.title" @click="run(()=>mutate('/api/sections/'+group.kind,'DELETE'))"><AppIcon name="close" :size="16"/></button><button class="text-button" :disabled="busy" :aria-label="`Добавить канал: ${group.title}`" @click="cancel();targetSection=group.kind;adding=group.kind;icon=group.type==='voice'?'sound':'hash'"><AppIcon name="plus" :size="16"/>Добавить</button></header><TransitionGroup name="order" tag="ul"><li v-for="ch in group.channels" :key="ch.id" :class="{'drag-source':ghost&&drag?.kind==='channel'&&drag.id===ch.id}" data-order-type="channel" :data-order-id="ch.id" :data-order-group="ch.section||ch.kind" @dragover.stop.prevent @drop.stop.prevent="drop('channel',ch.id,ch.section||ch.kind)"><button class="drag-handle"  :disabled="busy||!!editing||!!adding" :aria-label="`Переместить канал ${ch.name}`" title="Перетащите или используйте стрелки вверх/вниз" @pointerdown="startPointer($event,'channel',ch.id,ch.section||ch.kind)"  @keydown="keyboard($event,'channel',ch.id,ch.section||ch.kind)"><AppIcon name="drag" :size="20"/></button><AppIcon v-if="editing!==ch.id" :name="ch.icon||(ch.kind==='voice'?'sound':'hash')" :size="18"/><form v-if="editing===ch.id" class="inline-channel-form" @submit.prevent="save"><ChannelIconPicker v-model="icon" :disabled="busy"/><input v-model="name" :aria-label="`Название канала ${ch.name}`" required maxlength="60" :disabled="busy" @keydown.esc.prevent="cancel"><select v-model="targetSection" aria-label="Секция канала" :disabled="busy"><option v-for="s in sections.filter(s=>s.kind===ch.kind)" :key="s.id" :value="s.id">{{s.name}}</option></select><ChannelPostingSettings v-if="ch.kind==='text'" v-model="posting" :roles="roles" :disabled="busy"/><button type="submit" class="text-button" :disabled="busy" aria-label="Сохранить канал" title="Сохранить">✓</button><button type="button" class="text-button" :disabled="busy" aria-label="Отменить изменения канала" title="Отмена" @click="cancel"><AppIcon name="close" :size="16"/></button></form><template v-else><strong>{{ch.name}}<small v-if="ch.posting?.mode==='roles'" class="posting-hint">Запись по ролям</small></strong><button class="text-button" :disabled="busy" :aria-label="`Изменить ${ch.name}`" @click="edit(ch)">Изменить</button><button class="icon-button" :disabled="busy" :aria-label="`Удалить ${ch.name}`" @click="removal=ch"><AppIcon name="close" :size="17"/></button></template></li></TransitionGroup><form v-if="adding===group.kind" class="inline-channel-form new-channel" @submit.prevent="save"><ChannelIconPicker v-model="icon" :disabled="busy"/><input v-model="name" aria-label="Название нового канала" placeholder="Название канала" required maxlength="60" @keydown.esc="cancel"><button class="text-button" :disabled="busy">Создать</button><button type="button" class="text-button" :disabled="busy" aria-label="Отменить изменения канала" title="Отмена" @click="cancel"><AppIcon name="close" :size="16"/></button><ChannelPostingSettings v-if="group.type==='text'" v-model="posting" :roles="roles" :disabled="busy"/></form></section></TransitionGroup><div class="section-tools"><form v-if="sectionEditing===''" class="section-create" @submit.prevent="saveSection"><input id="new-section-name" v-model="sectionName" aria-label="Название новой секции" placeholder="Название секции" required maxlength="60" :disabled="busy" @keydown.esc.prevent="sectionEditing=null"><AppSelect id="new-section-kind" label="Тип секции" v-model="sectionKind" :disabled="busy" :options="[{value:'voice',label:'Голосовая'},{value:'text',label:'Текстовая'}]"/><button type="submit" class="text-button" :disabled="busy">Создать</button><button type="button" class="section-action" :disabled="busy" aria-label="Отменить создание секции" @click="sectionEditing=null"><AppIcon name="close" :size="16"/></button></form><button v-else class="text-button" :disabled="busy" @click="editSection()"><AppIcon name="plus" :size="16"/>Добавить секцию</button></div><Teleport to="body"><div v-if="ghost" class="channel-drag-ghost" aria-hidden="true" :style="{left:ghost.x+'px',top:ghost.y+'px',width:ghost.width+'px'}"><strong><AppIcon name="drag" :size="18"/> {{ghost.title}}</strong><div v-for="n in ghost.names" :key="n">{{n}}</div></div></Teleport><div v-if="removal" class="editor-fill" role="alert"><h3>Удалить «{{removal.name}}»?</h3><p class="field-help">Канал и его история будут удалены с сервера без возможности восстановления.</p><div class="button-row"><button class="danger-button" :disabled="busy" @click="run(async()=>{await mutate('/api/channels/'+removal!.id,'DELETE');removal=undefined;})">Удалить канал</button><button class="text-button" :disabled="busy" @click="removal=undefined">Отмена</button></div></div></div></template>
+<template>
+  <div class="channel-editor">
+    <p v-if="error" class="form-error" role="alert">{{ error }}</p>
+    <TransitionGroup name="order" tag="div"
+      ><section
+        v-for="group in groups"
+        :key="group.kind"
+        class="channel-group"
+        :class="{ 'drag-source': ghost && drag?.kind === 'section' && drag.id === group.kind }"
+        data-order-type="section"
+        :data-order-id="group.kind"
+        @dragover.prevent
+        @drop.stop.prevent="drop('section', group.kind, group.kind)"
+      >
+        <header>
+          <button
+            class="drag-handle"
+            :disabled="busy || !!editing || !!adding"
+            :aria-label="`Переместить секцию ${group.title}`"
+            title="Перетащите или используйте стрелки вверх/вниз"
+            @pointerdown="startPointer($event, 'section', group.kind, group.kind)"
+            @keydown="keyboard($event, 'section', group.kind, group.kind)"
+          >
+            <AppIcon name="drag" :size="20" />
+          </button>
+          <form
+            v-if="sectionEditing === group.kind"
+            class="section-rename"
+            @submit.prevent="saveSection"
+          >
+            <input
+              :id="'section-name-' + group.kind"
+              v-model="sectionName"
+              aria-label="Название секции"
+              maxlength="60"
+              required
+              :disabled="busy"
+              @keydown.esc.prevent="sectionEditing = null"
+            /><button
+              type="submit"
+              class="section-action"
+              :disabled="busy"
+              aria-label="Сохранить название секции"
+              title="Сохранить"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="m5 12 4 4L19 6"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg></button
+            ><button
+              type="button"
+              class="section-action"
+              :disabled="busy"
+              aria-label="Отменить переименование"
+              @click="sectionEditing = null"
+            >
+              <AppIcon name="close" :size="16" />
+            </button>
+          </form>
+          <button
+            v-else
+            class="section-name"
+            :disabled="busy"
+            :aria-label="'Изменить секцию ' + group.title"
+            @click="editSection(sections.find((s) => s.id === group.kind))"
+          >
+            {{ group.title }}</button
+          ><span class="section-kind">{{ group.type === 'voice' ? 'Голосовая' : 'Текстовая' }}</span
+          ><button
+            v-if="!group.channels.length && sections.length > 1"
+            class="text-button"
+            :disabled="busy"
+            :aria-label="'Удалить пустую секцию ' + group.title"
+            @click="run(() => mutate('/api/sections/' + group.kind, 'DELETE'))"
+          >
+            <AppIcon name="close" :size="16" /></button
+          ><button
+            class="text-button"
+            :disabled="busy"
+            :aria-label="`Добавить канал: ${group.title}`"
+            @click="
+              cancel();
+              targetSection = group.kind;
+              adding = group.kind;
+              icon = group.type === 'voice' ? 'sound' : 'hash';
+            "
+          >
+            <AppIcon name="plus" :size="16" />Добавить
+          </button>
+        </header>
+        <TransitionGroup name="order" tag="ul"
+          ><li
+            v-for="ch in group.channels"
+            :key="ch.id"
+            :class="{ 'drag-source': ghost && drag?.kind === 'channel' && drag.id === ch.id }"
+            data-order-type="channel"
+            :data-order-id="ch.id"
+            :data-order-group="ch.section || ch.kind"
+            @dragover.stop.prevent
+            @drop.stop.prevent="drop('channel', ch.id, ch.section || ch.kind)"
+          >
+            <button
+              class="drag-handle"
+              :disabled="busy || !!editing || !!adding"
+              :aria-label="`Переместить канал ${ch.name}`"
+              title="Перетащите или используйте стрелки вверх/вниз"
+              @pointerdown="startPointer($event, 'channel', ch.id, ch.section || ch.kind)"
+              @keydown="keyboard($event, 'channel', ch.id, ch.section || ch.kind)"
+            >
+              <AppIcon name="drag" :size="20" /></button
+            ><AppIcon
+              v-if="editing !== ch.id"
+              :name="ch.icon || (ch.kind === 'voice' ? 'sound' : 'hash')"
+              :size="18"
+            />
+            <form v-if="editing === ch.id" class="inline-channel-form" @submit.prevent="save">
+              <ChannelIconPicker v-model="icon" :disabled="busy" /><input
+                v-model="name"
+                :aria-label="`Название канала ${ch.name}`"
+                required
+                maxlength="60"
+                :disabled="busy"
+                @keydown.esc.prevent="cancel"
+              /><select v-model="targetSection" aria-label="Секция канала" :disabled="busy">
+                <option
+                  v-for="s in sections.filter((s) => s.kind === ch.kind)"
+                  :key="s.id"
+                  :value="s.id"
+                >
+                  {{ s.name }}
+                </option></select
+              ><ChannelPostingSettings
+                v-if="ch.kind === 'text'"
+                v-model="posting"
+                :roles="roles"
+                :disabled="busy"
+              /><button
+                type="submit"
+                class="text-button"
+                :disabled="busy"
+                aria-label="Сохранить канал"
+                title="Сохранить"
+              >
+                ✓</button
+              ><button
+                type="button"
+                class="text-button"
+                :disabled="busy"
+                aria-label="Отменить изменения канала"
+                title="Отмена"
+                @click="cancel"
+              >
+                <AppIcon name="close" :size="16" />
+              </button>
+            </form>
+            <template v-else
+              ><strong
+                >{{ ch.name
+                }}<small v-if="ch.posting?.mode === 'roles'" class="posting-hint"
+                  >Запись по ролям</small
+                ></strong
+              ><button
+                class="text-button"
+                :disabled="busy"
+                :aria-label="`Изменить ${ch.name}`"
+                @click="edit(ch)"
+              >
+                Изменить</button
+              ><button
+                class="icon-button"
+                :disabled="busy"
+                :aria-label="`Удалить ${ch.name}`"
+                @click="removal = ch"
+              >
+                <AppIcon name="close" :size="17" /></button
+            ></template></li
+        ></TransitionGroup>
+        <form
+          v-if="adding === group.kind"
+          class="inline-channel-form new-channel"
+          @submit.prevent="save"
+        >
+          <ChannelIconPicker v-model="icon" :disabled="busy" /><input
+            v-model="name"
+            aria-label="Название нового канала"
+            placeholder="Название канала"
+            required
+            maxlength="60"
+            @keydown.esc="cancel"
+          /><button class="text-button" :disabled="busy">Создать</button
+          ><button
+            type="button"
+            class="text-button"
+            :disabled="busy"
+            aria-label="Отменить изменения канала"
+            title="Отмена"
+            @click="cancel"
+          >
+            <AppIcon name="close" :size="16" /></button
+          ><ChannelPostingSettings
+            v-if="group.type === 'text'"
+            v-model="posting"
+            :roles="roles"
+            :disabled="busy"
+          />
+        </form></section
+    ></TransitionGroup>
+    <div class="section-tools">
+      <form v-if="sectionEditing === ''" class="section-create" @submit.prevent="saveSection">
+        <input
+          id="new-section-name"
+          v-model="sectionName"
+          aria-label="Название новой секции"
+          placeholder="Название секции"
+          required
+          maxlength="60"
+          :disabled="busy"
+          @keydown.esc.prevent="sectionEditing = null"
+        /><AppSelect
+          id="new-section-kind"
+          label="Тип секции"
+          v-model="sectionKind"
+          :disabled="busy"
+          :options="[
+            { value: 'voice', label: 'Голосовая' },
+            { value: 'text', label: 'Текстовая' },
+          ]"
+        /><button type="submit" class="text-button" :disabled="busy">Создать</button
+        ><button
+          type="button"
+          class="section-action"
+          :disabled="busy"
+          aria-label="Отменить создание секции"
+          @click="sectionEditing = null"
+        >
+          <AppIcon name="close" :size="16" />
+        </button>
+      </form>
+      <button v-else class="text-button" :disabled="busy" @click="editSection()">
+        <AppIcon name="plus" :size="16" />Добавить секцию
+      </button>
+    </div>
+    <Teleport to="body"
+      ><div
+        v-if="ghost"
+        class="channel-drag-ghost"
+        aria-hidden="true"
+        :style="{ left: ghost.x + 'px', top: ghost.y + 'px', width: ghost.width + 'px' }"
+      >
+        <strong><AppIcon name="drag" :size="18" /> {{ ghost.title }}</strong>
+        <div v-for="n in ghost.names" :key="n">{{ n }}</div>
+      </div></Teleport
+    >
+    <div v-if="removal" class="editor-fill" role="alert">
+      <h3>Удалить «{{ removal.name }}»?</h3>
+      <p class="field-help">
+        Канал и его история будут удалены с сервера без возможности восстановления.
+      </p>
+      <div class="button-row">
+        <button
+          class="danger-button"
+          :disabled="busy"
+          @click="
+            run(async () => {
+              await mutate('/api/channels/' + removal!.id, 'DELETE');
+              removal = undefined;
+            })
+          "
+        >
+          Удалить канал</button
+        ><button class="text-button" :disabled="busy" @click="removal = undefined">Отмена</button>
+      </div>
+    </div>
+  </div>
+</template>
 <style scoped>
-.section-tools{display:flex;justify-content:flex-end;margin-top:16px;padding:0 12px}.section-name{font-size:14px;font-weight:500;background:transparent;padding:8px 12px;text-align:left;border-radius:8px;min-height:36px}.section-kind{color:#777;font-size:10px}.section-rename{display:flex;align-items:center;gap:4px;flex:1;min-width:0}.section-rename input{margin:0;padding:8px 12px;min-width:60px;height:36px;font-size:14px}.section-action{display:grid;place-items:center;flex:none;width:28px;height:28px;padding:0;background:transparent;border-radius:7px}.section-create{display:flex;align-items:center;gap:8px;width:100%}.section-create input{flex:1;min-width:80px;margin:0;padding:10px 12px}.section-create :deep(.app-select){width:150px;flex:none}.section-create>button{flex:none}.section-create>input,.section-create>button[type=submit],.section-create :deep(.app-select>button){height:40px;margin:0;padding:8px 12px;border-radius:9px;font-size:12px}.section-create>button[type=submit]{background:var(--raised)}@media(max-width:430px){.section-create{flex-wrap:wrap}.section-create>input{flex-basis:100%}.section-rename{flex-basis:calc(100% - 36px)}}.inline-channel-form select{width:150px;flex-shrink:0;margin:0;padding:9px 36px 9px 12px;font-size:11px;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23aaa' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");background-position:right 12px center;background-repeat:no-repeat}@media(max-width:700px){.channel-group header{flex-wrap:wrap}.section-kind{font-size:9px}.inline-channel-form{flex-wrap:wrap}}
+.section-tools {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+  padding: 0 12px;
+}
+.section-name {
+  font-size: 14px;
+  font-weight: 500;
+  background: transparent;
+  padding: 8px 12px;
+  text-align: left;
+  border-radius: 8px;
+  min-height: 36px;
+}
+.section-kind {
+  color: #777;
+  font-size: 10px;
+}
+.section-rename {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+.section-rename input {
+  margin: 0;
+  padding: 8px 12px;
+  min-width: 60px;
+  height: 36px;
+  font-size: 14px;
+}
+.section-action {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border-radius: 7px;
+}
+.section-create {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+.section-create input {
+  flex: 1;
+  min-width: 80px;
+  margin: 0;
+  padding: 10px 12px;
+}
+.section-create :deep(.app-select) {
+  width: 150px;
+  flex: none;
+}
+.section-create > button {
+  flex: none;
+}
+.section-create > input,
+.section-create > button[type='submit'],
+.section-create :deep(.app-select > button) {
+  height: 40px;
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 9px;
+  font-size: 12px;
+}
+.section-create > button[type='submit'] {
+  background: var(--raised);
+}
+@media (max-width: 430px) {
+  .section-create {
+    flex-wrap: wrap;
+  }
+  .section-create > input {
+    flex-basis: 100%;
+  }
+  .section-rename {
+    flex-basis: calc(100% - 36px);
+  }
+}
+.inline-channel-form select {
+  width: 150px;
+  flex-shrink: 0;
+  margin: 0;
+  padding: 9px 36px 9px 12px;
+  font-size: 11px;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23aaa' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-position: right 12px center;
+  background-repeat: no-repeat;
+}
+@media (max-width: 700px) {
+  .channel-group header {
+    flex-wrap: wrap;
+  }
+  .section-kind {
+    font-size: 9px;
+  }
+  .inline-channel-form {
+    flex-wrap: wrap;
+  }
+}
 
-.channel-group{margin:16px 0;padding:12px;border-radius:14px}.channel-group>header{display:flex;align-items:center;gap:8px;margin-bottom:8px}.channel-group .section-name{flex:1;min-width:0;justify-content:flex-start;overflow-wrap:anywhere}.drag-handle{font-size:22px;width:28px;height:28px;padding:4px;border-radius:6px;background:transparent;color:#777;cursor:grab;touch-action:none;user-select:none;flex-shrink:0}.drag-handle:active{cursor:grabbing}.channel-group ul{list-style:none;margin:0;padding-left:22px}.channel-group li{display:flex;align-items:center;gap:10px;padding:8px;border-radius:12px;background:#171717;margin:5px 0}.channel-group li>strong{flex:1;min-width:0;overflow-wrap:anywhere}.inline-channel-form{display:flex;flex-wrap:nowrap;align-items:center;gap:5px;flex:1;min-width:0}.inline-channel-form input{margin:0;padding:10px;flex:1;min-width:50px}.inline-channel-form button{flex-shrink:0;padding:8px}.new-channel{padding-left:22px}@media(max-width:600px){.channel-group ul{padding-left:6px}.inline-channel-form{flex-wrap:wrap}.inline-channel-form input{flex-basis:100%}}
-.posting-hint{font-size:10px;color:#888;font-weight:400;margin-top:4px}.drag-source{opacity:.35;background:#242424!important}.order-move{transition:transform 140ms ease}.channel-drag-ghost{position:fixed;z-index:1000;pointer-events:none;background:#292929;border-radius:12px;padding:16px;box-shadow:0 12px 32px #0008;color:#eee;cursor:grabbing}.channel-drag-ghost>div{margin:12px 0 0 26px;padding:10px;background:#202020;border-radius:8px}.channel-group{user-select:none}.channel-group input{user-select:text}@media(prefers-reduced-motion:reduce){.order-move{transition:none}}
-.channel-editor{container-type:inline-size}@container(max-width:510px){.inline-channel-form{flex-wrap:wrap}.inline-channel-form>input{flex-basis:calc(100% - 55px)}}
+.channel-group {
+  margin: 16px 0;
+  padding: 12px;
+  border-radius: 14px;
+}
+.channel-group > header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.channel-group .section-name {
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-start;
+  overflow-wrap: anywhere;
+}
+.drag-handle {
+  font-size: 22px;
+  width: 28px;
+  height: 28px;
+  padding: 4px;
+  border-radius: 6px;
+  background: transparent;
+  color: #777;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  flex-shrink: 0;
+}
+.drag-handle:active {
+  cursor: grabbing;
+}
+.channel-group ul {
+  list-style: none;
+  margin: 0;
+  padding-left: 22px;
+}
+.channel-group li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border-radius: 12px;
+  background: #171717;
+  margin: 5px 0;
+}
+.channel-group li > strong {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.inline-channel-form {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 5px;
+  flex: 1;
+  min-width: 0;
+}
+.inline-channel-form input {
+  margin: 0;
+  padding: 10px;
+  flex: 1;
+  min-width: 50px;
+}
+.inline-channel-form button {
+  flex-shrink: 0;
+  padding: 8px;
+}
+.new-channel {
+  padding-left: 22px;
+}
+@media (max-width: 600px) {
+  .channel-group ul {
+    padding-left: 6px;
+  }
+  .inline-channel-form {
+    flex-wrap: wrap;
+  }
+  .inline-channel-form input {
+    flex-basis: 100%;
+  }
+}
+.posting-hint {
+  font-size: 10px;
+  color: #888;
+  font-weight: 400;
+  margin-top: 4px;
+}
+.drag-source {
+  opacity: 0.35;
+  background: #242424 !important;
+}
+.order-move {
+  transition: transform 140ms ease;
+}
+.channel-drag-ghost {
+  position: fixed;
+  z-index: 1000;
+  pointer-events: none;
+  background: #292929;
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 12px 32px #0008;
+  color: #eee;
+  cursor: grabbing;
+}
+.channel-drag-ghost > div {
+  margin: 12px 0 0 26px;
+  padding: 10px;
+  background: #202020;
+  border-radius: 8px;
+}
+.channel-group {
+  user-select: none;
+}
+.channel-group input {
+  user-select: text;
+}
+@media (prefers-reduced-motion: reduce) {
+  .order-move {
+    transition: none;
+  }
+}
+.channel-editor {
+  container-type: inline-size;
+}
+@container (max-width:510px) {
+  .inline-channel-form {
+    flex-wrap: wrap;
+  }
+  .inline-channel-form > input {
+    flex-basis: calc(100% - 55px);
+  }
+}
 </style>

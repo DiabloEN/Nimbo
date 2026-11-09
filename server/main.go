@@ -373,7 +373,15 @@ func main() {
 	}
 	presence := newPresence(c, store, mediaAPI)
 	metrics := newHTTPMetrics()
-	srv := &http.Server{Addr: c.Listen, Handler: metrics.wrap(newWorkspaceHandler(c, store, presence)), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 8192}
+	srv := &http.Server{
+		Addr:              c.Listen,
+		Handler:           metrics.wrap(newWorkspaceHandler(c, store, presence)),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    8192,
+	}
 	var metricsServer *http.Server
 	if address := os.Getenv("NIMBO_METRICS_LISTEN"); address != "" {
 		listener, err := metricsListener(address)

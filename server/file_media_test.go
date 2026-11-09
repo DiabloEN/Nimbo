@@ -55,7 +55,11 @@ func TestMediaStreamingSessionRangeAndRevocation(t *testing.T) {
 	mustStatus(t, get("GET", path, true, "", "cross-site", ""), 403)
 	w := get("GET", path, true, c.Origin, "same-origin", "bytes=0-7")
 	mustStatus(t, w, 206)
-	if w.Body.Len() != 8 || !bytes.Equal(w.Body.Bytes(), imageData.Bytes()[:8]) || w.Header().Get("Content-Type") != "image/png" || w.Header().Get("X-Content-Type-Options") != "nosniff" || !strings.HasPrefix(w.Header().Get("Content-Disposition"), "inline;") {
+	if w.Body.Len() != 8 ||
+		!bytes.Equal(w.Body.Bytes(), imageData.Bytes()[:8]) ||
+		w.Header().Get("Content-Type") != "image/png" ||
+		w.Header().Get("X-Content-Type-Options") != "nosniff" ||
+		!strings.HasPrefix(w.Header().Get("Content-Disposition"), "inline;") {
 		t.Fatal("unsafe or non-streaming response")
 	}
 	mustStatus(t, get("HEAD", path, true, "", "same-origin", ""), 200)

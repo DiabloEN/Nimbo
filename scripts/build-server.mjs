@@ -33,8 +33,13 @@ run(go, ['vet', './...'], join(root, 'server'));
 mkdirSync(join(root, 'build-server'), { recursive: true });
 const targetOS = env.GOOS || process.platform;
 // An alternate output lets a preview build coexist with a running local server.
-const output = env.NIMBO_BUILD_OUTPUT ? resolve(root, env.NIMBO_BUILD_OUTPUT)
-  : join(root, 'build-server', targetOS === 'win32' || targetOS === 'windows' ? 'nimbo-server.exe' : 'nimbo-server');
+const output = env.NIMBO_BUILD_OUTPUT
+  ? resolve(root, env.NIMBO_BUILD_OUTPUT)
+  : join(
+      root,
+      'build-server',
+      targetOS === 'win32' || targetOS === 'windows' ? 'nimbo-server.exe' : 'nimbo-server',
+    );
 mkdirSync(dirname(output), { recursive: true });
 run(go, ['build', '-trimpath', '-o', output, '.'], join(root, 'server'));
 console.log(`Built: ${output}`);

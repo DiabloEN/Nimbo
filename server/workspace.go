@@ -124,8 +124,12 @@ func validLabel(value string, max int) bool {
 }
 func openWorkspace(path, ownerKey string) (*workspaceStore, error) {
 	s := &workspaceStore{path: path, ownerKey: ownerKey, data: workspaceData{Version: 1, Name: "Свои люди",
-		Channels: []channel{{ID: "lounge", Name: "Гостиная", Kind: "voice", Description: "Без повестки и лишних слов."}, {ID: "test", Name: "Проверка звука", Kind: "voice", Description: "Место, чтобы проверить связь."}, {ID: "general", Name: "общий", Kind: "text", Description: "Сообщения для своих."}},
-		Members:  []member{}, Messages: map[string][]chatMessage{}}}
+		Channels: []channel{
+			{ID: "lounge", Name: "Гостиная", Kind: "voice", Description: "Без повестки и лишних слов."},
+			{ID: "test", Name: "Проверка звука", Kind: "voice", Description: "Место, чтобы проверить связь."},
+			{ID: "general", Name: "общий", Kind: "text", Description: "Сообщения для своих."},
+		},
+		Members: []member{}, Messages: map[string][]chatMessage{}}}
 	if path == "" {
 		return s, nil
 	}
@@ -422,7 +426,25 @@ func (s *workspaceStore) register(mux *http.ServeMux, c config, presence *presen
 		chatActivity := activityFor(&s.data, id)
 		s.mu.Unlock()
 		live, fresh := presence.snapshot()
-		jsonReply(w, 200, map[string]any{"invitations": invitations, "chatActivity": chatActivity, "notifications": notifications, "roles": definitions, "sectionOrder": sections, "sections": sectionDefinitions, "channelSections": assignments, "name": name, "description": description, "avatar": avatar, "channels": channels, "members": members, "selfId": id, "ownerExists": ownerExists, "presence": live, "presenceAvailable": fresh, "serverTime": time.Now().UnixMilli()})
+		jsonReply(w, 200, map[string]any{
+			"invitations":       invitations,
+			"chatActivity":      chatActivity,
+			"notifications":     notifications,
+			"roles":             definitions,
+			"sectionOrder":      sections,
+			"sections":          sectionDefinitions,
+			"channelSections":   assignments,
+			"name":              name,
+			"description":       description,
+			"avatar":            avatar,
+			"channels":          channels,
+			"members":           members,
+			"selfId":            id,
+			"ownerExists":       ownerExists,
+			"presence":          live,
+			"presenceAvailable": fresh,
+			"serverTime":        time.Now().UnixMilli(),
+		})
 	})
 	s.registerSections(handle)
 	s.registerStorage(handle)
@@ -622,7 +644,12 @@ func (s *workspaceStore) register(mux *http.ServeMux, c config, presence *presen
 			req.Mentions[i].End -= leading
 		}
 		req.Text = strings.TrimSpace(req.Text)
-		if !utf8.ValidString(req.Text) || len(req.Text) > 32000 || utf8.RuneCountInString(req.Text) < 1 || utf8.RuneCountInString(req.Text) > 8000 || !validKey(req.ClientID) || strings.IndexFunc(req.Text, func(r rune) bool { return unicode.IsControl(r) && r != '\n' && r != '\t' }) >= 0 {
+		if !utf8.ValidString(req.Text) ||
+			len(req.Text) > 32000 ||
+			utf8.RuneCountInString(req.Text) < 1 ||
+			utf8.RuneCountInString(req.Text) > 8000 ||
+			!validKey(req.ClientID) ||
+			strings.IndexFunc(req.Text, func(r rune) bool { return unicode.IsControl(r) && r != '\n' && r != '\t' }) >= 0 {
 			reject(w, 400, "Сообщение: от 1 до 8000 символов")
 			return
 		}

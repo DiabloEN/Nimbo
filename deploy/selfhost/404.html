@@ -1,15 +1,160 @@
 <!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>404 — nimbo.</title>
-<style>
-:root{color-scheme:dark;font-family:Inter,system-ui,sans-serif;background:#090909;color:#eee}*{box-sizing:border-box}body{margin:0;min-height:100svh;display:grid;grid-template-rows:auto 1fr}header{padding:36px clamp(24px,7vw,96px)}.brand{font-size:25px;font-weight:750;letter-spacing:-1px;text-decoration:none;color:#eee}.brand span{color:#929292}main{padding:12px 24px 80px;text-align:center;align-self:center}.art{width:min(340px,80vw);height:auto;overflow:visible}.label{font-size:13px;color:#888;letter-spacing:.16em;margin:22px 0 16px}h1{font-size:clamp(28px,5vw,44px);line-height:1.15;letter-spacing:-1px;margin:0 0 18px}p{font-size:15px;line-height:1.7;color:#999;margin:0 0 30px}.button{display:inline-block;padding:13px 20px;border-radius:14px;background:#e4e4e4;color:#181818;text-decoration:none;font-size:14px;font-weight:600}.button:hover{background:#fff}a:focus-visible{outline:2px solid #aaa;outline-offset:5px}.leaving{animation:float 4s ease-in-out infinite;transform-origin:center}@keyframes float{50%{transform:translate(6px,-5px) rotate(2deg)}}@media(prefers-reduced-motion:reduce){.leaving{animation:none}}@media(max-height:600px){header{padding-top:20px;padding-bottom:12px}.art{width:200px}main{padding-bottom:24px}}
-</style></head><body><header><a class="brand" href="/" aria-label="Nimbo — на главную">nimbo<span>.</span></a></header>
-<main><svg class="art" viewBox="0 0 340 190" role="img" aria-label="Облачко сообщения тихонько уходит из чата">
-<ellipse cx="184" cy="165" rx="102" ry="9" fill="#141414"/>
-<path d="M58 68h28M45 91h31M62 114h19" fill="none" stroke="#383838" stroke-width="4" stroke-linecap="round"/>
-<g class="leaving"><path d="M126 34h117a26 26 0 0 1 26 26v55a26 26 0 0 1-26 26h-60l-28 19 3-19h-32a26 26 0 0 1-26-26V60a26 26 0 0 1 26-26Z" fill="#242424"/>
-<path d="m166 146-9 18-13 2m78-25 12 15 16-2" fill="none" stroke="#a3a3a3" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
-<path d="M221 78v7m24-7v7" stroke="#e3e3e3" stroke-width="5" stroke-linecap="round"/>
-<path d="m225 101 12 2" stroke="#9b9b9b" stroke-width="3" stroke-linecap="round"/>
-<path d="m267 99 16-8 9 6" fill="none" stroke="#a3a3a3" stroke-width="4" stroke-linecap="round"/>
-</g><path d="M305 30v130" stroke="#303030" stroke-width="3" stroke-linecap="round"/>
-</svg><div class="label">ОШИБКА 404</div><h1>Страница вышла из чата.</h1><p>Даже не попрощалась.<br>Зато главная на месте.</p><a class="button" href="/">На главную</a></main></body></html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>404 — nimbo.</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Inter, system-ui, sans-serif;
+        background: #090909;
+        color: #eee;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100svh;
+        display: grid;
+        grid-template-rows: auto 1fr;
+      }
+      header {
+        padding: 36px clamp(24px, 7vw, 96px);
+      }
+      .brand {
+        font-size: 25px;
+        font-weight: 750;
+        letter-spacing: -1px;
+        text-decoration: none;
+        color: #eee;
+      }
+      .brand span {
+        color: #929292;
+      }
+      main {
+        padding: 12px 24px 80px;
+        text-align: center;
+        align-self: center;
+      }
+      .art {
+        width: min(340px, 80vw);
+        height: auto;
+        overflow: visible;
+      }
+      .label {
+        font-size: 13px;
+        color: #888;
+        letter-spacing: 0.16em;
+        margin: 22px 0 16px;
+      }
+      h1 {
+        font-size: clamp(28px, 5vw, 44px);
+        line-height: 1.15;
+        letter-spacing: -1px;
+        margin: 0 0 18px;
+      }
+      p {
+        font-size: 15px;
+        line-height: 1.7;
+        color: #999;
+        margin: 0 0 30px;
+      }
+      .button {
+        display: inline-block;
+        padding: 13px 20px;
+        border-radius: 14px;
+        background: #e4e4e4;
+        color: #181818;
+        text-decoration: none;
+        font-size: 14px;
+        font-weight: 600;
+      }
+      .button:hover {
+        background: #fff;
+      }
+      a:focus-visible {
+        outline: 2px solid #aaa;
+        outline-offset: 5px;
+      }
+      .leaving {
+        animation: float 4s ease-in-out infinite;
+        transform-origin: center;
+      }
+      @keyframes float {
+        50% {
+          transform: translate(6px, -5px) rotate(2deg);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .leaving {
+          animation: none;
+        }
+      }
+      @media (max-height: 600px) {
+        header {
+          padding-top: 20px;
+          padding-bottom: 12px;
+        }
+        .art {
+          width: 200px;
+        }
+        main {
+          padding-bottom: 24px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <a class="brand" href="/" aria-label="Nimbo — на главную">nimbo<span>.</span></a>
+    </header>
+    <main>
+      <svg
+        class="art"
+        viewBox="0 0 340 190"
+        role="img"
+        aria-label="Облачко сообщения тихонько уходит из чата"
+      >
+        <ellipse cx="184" cy="165" rx="102" ry="9" fill="#141414" />
+        <path
+          d="M58 68h28M45 91h31M62 114h19"
+          fill="none"
+          stroke="#383838"
+          stroke-width="4"
+          stroke-linecap="round"
+        />
+        <g class="leaving">
+          <path
+            d="M126 34h117a26 26 0 0 1 26 26v55a26 26 0 0 1-26 26h-60l-28 19 3-19h-32a26 26 0 0 1-26-26V60a26 26 0 0 1 26-26Z"
+            fill="#242424"
+          />
+          <path
+            d="m166 146-9 18-13 2m78-25 12 15 16-2"
+            fill="none"
+            stroke="#a3a3a3"
+            stroke-width="5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+          <path d="M221 78v7m24-7v7" stroke="#e3e3e3" stroke-width="5" stroke-linecap="round" />
+          <path d="m225 101 12 2" stroke="#9b9b9b" stroke-width="3" stroke-linecap="round" />
+          <path
+            d="m267 99 16-8 9 6"
+            fill="none"
+            stroke="#a3a3a3"
+            stroke-width="4"
+            stroke-linecap="round"
+          />
+        </g>
+        <path d="M305 30v130" stroke="#303030" stroke-width="3" stroke-linecap="round" />
+      </svg>
+      <div class="label">ОШИБКА 404</div>
+      <h1>Страница вышла из чата.</h1>
+      <p>Даже не попрощалась.<br />Зато главная на месте.</p>
+      <a class="button" href="/">На главную</a>
+    </main>
+  </body>
+</html>

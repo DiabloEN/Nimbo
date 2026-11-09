@@ -79,7 +79,17 @@ func sealProfile(p portableProfile, password string) ([]byte, error) {
 func unsealProfile(raw []byte, password string) (portableProfile, error) {
 	var e encryptedProfile
 	var p portableProfile
-	if len(raw) > 300000 || json.Unmarshal(raw, &e) != nil || e.Format != "nimbo-encrypted-profile" || e.Version != 1 || e.KDF != "PBKDF2-SHA256" || e.Iterations != 600000 || e.Cipher != "AES-256-GCM" || len(e.Salt) != 16 || len(e.IV) != 12 || len(e.Data) < 17 || len(e.Data) > 200016 {
+	if len(raw) > 300000 ||
+		json.Unmarshal(raw, &e) != nil ||
+		e.Format != "nimbo-encrypted-profile" ||
+		e.Version != 1 ||
+		e.KDF != "PBKDF2-SHA256" ||
+		e.Iterations != 600000 ||
+		e.Cipher != "AES-256-GCM" ||
+		len(e.Salt) != 16 ||
+		len(e.IV) != 12 ||
+		len(e.Data) < 17 ||
+		len(e.Data) > 200016 {
 		return p, errors.New("unsupported encrypted profile")
 	}
 	a, err := profileCipher(password, e.Salt)
@@ -167,7 +177,16 @@ func runOwnerCommand(args []string) error {
 		return s.assignOwner(*id, *transfer)
 	}
 	u, err := url.Parse(*origin)
-	if err != nil || u == nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "" || u.Scheme != "https" && !(u.Scheme == "http" && (u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1" || u.Hostname() == "::1")) {
+	if err != nil ||
+		u == nil ||
+		u.Host == "" ||
+		u.User != nil ||
+		u.RawQuery != "" ||
+		u.Fragment != "" ||
+		u.Path != "" ||
+		u.Scheme != "https" && !(u.Scheme == "http" && (u.Hostname() == "localhost" ||
+			u.Hostname() == "127.0.0.1" ||
+			u.Hostname() == "::1")) {
 		return errors.New("valid --origin required")
 	}
 	passwordBytes, err := boundedRead(*passwordFile, 1024)

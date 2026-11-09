@@ -2464,23 +2464,6 @@ html {
 .managed-list .member-actions button:hover {
   background: #303030;
 }
-/* Collapse the panel first; open it only after the content has made room. */
-.app-shell {
-  transition: grid-template-columns 160ms ease 240ms;
-}
-.app-shell.with-members {
-  transition-delay: 0ms;
-}
-.members-panel {
-  top: 0;
-  border-radius: 0 0 0 14px;
-  transition: height 240ms ease 0ms;
-}
-.members-panel.expanded {
-  height: 100dvh;
-  border-radius: 0 0 0 14px;
-  transition-delay: 160ms;
-}
 .members-sidebar {
   z-index: 11;
 }
@@ -2488,19 +2471,6 @@ html {
   width: 100%;
 }
 @media (max-width: 800px) {
-  .members-panel {
-    top: 0;
-  }
-  .members-panel.expanded {
-    height: 100dvh;
-  }
-  .app-shell,
-  .app-shell.with-members {
-    transition: none;
-  }
-  .members-panel.expanded {
-    transition-delay: 0ms;
-  }
   .space-name-form {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -2526,42 +2496,6 @@ html {
   .members-panel,
   .members-panel.expanded {
     transition: none;
-  }
-}
-/* Entry from Settings also waits for the grid, not only the toggle transition. */
-@keyframes members-reveal {
-  from {
-    height: 78px;
-  }
-  to {
-    height: 100dvh;
-  }
-}
-.members-panel {
-  height: 78px;
-}
-.members-panel .members-toggle {
-  height: 78px;
-  min-height: 78px;
-}
-.members-panel.expanded {
-  animation: members-reveal 240ms ease 160ms backwards;
-}
-@media (max-width: 800px) {
-  .members-panel {
-    height: 55px;
-  }
-  .members-panel .members-toggle {
-    height: 55px;
-    min-height: 55px;
-  }
-  .members-panel.expanded {
-    animation: none;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .members-panel.expanded {
-    animation: none;
   }
 }
 /* Shared sidebar surface: 8px outer gutter, 14px corners on both sides. */
@@ -2594,14 +2528,6 @@ html {
 .members-panel.expanded {
   height: var(--members-open-height);
   border-radius: 14px;
-}
-@keyframes members-reveal {
-  from {
-    height: var(--members-closed-height);
-  }
-  to {
-    height: var(--members-open-height);
-  }
 }
 @media (min-width: 801px) and (max-width: 1200px) {
   .app-shell.with-members {
@@ -2642,26 +2568,51 @@ html {
     top: 0;
     right: 0;
     width: 100%;
+    transition-duration: 240ms;
   }
   .members-panel.expanded {
     height: min(480px, 65dvh);
-    animation: none;
   }
 }
-/* Fast response: reserve space in 80ms, then reveal the roster in 180ms. */
+/* One reversible transition: reserve the column, then unfold the list.
+   Both dimensions share the same progress even when a click reverses the motion. */
+@property --roster-progress {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0;
+}
 @media (min-width: 801px) and (prefers-reduced-motion: no-preference) {
+  .app-shell.has-member-panel {
+    --roster-progress: 0;
+    --column-phase: min(1, calc(2 * var(--roster-progress)));
+    --list-phase: max(0, calc(2 * var(--roster-progress) - 1));
+    /* Ease each half to a stop at its endpoint (smoothstep). */
+    --column-fraction: calc(
+      var(--column-phase) * var(--column-phase) * (3 - 2 * var(--column-phase))
+    );
+    --list-fraction: calc(var(--list-phase) * var(--list-phase) * (3 - 2 * var(--list-phase)));
+    grid-template-columns: var(--navigation-width, 250px) minmax(0, 1fr) calc(
+        218px * var(--column-fraction)
+      );
+    transition: --roster-progress 240ms linear;
+  }
+  .app-shell.has-member-panel.with-members {
+    --roster-progress: 1;
+  }
+  .has-member-panel .members-panel {
+    height: calc(
+      var(--members-closed-height) + (var(--members-open-height) - var(--members-closed-height)) *
+        var(--list-fraction)
+    );
+    transition: none;
+  }
+  .has-member-panel .room-view .room-body .stage-content {
+    padding-right: calc(var(--room-content-inset) * var(--column-fraction));
+  }
+}
+@media (min-width: 801px) and (max-width: 1200px) {
   .app-shell {
-    transition: grid-template-columns 80ms ease 180ms;
-  }
-  .app-shell.with-members {
-    transition-delay: 0ms;
-  }
-  .members-panel {
-    transition: height 180ms ease;
-  }
-  .members-panel.expanded {
-    transition-delay: 80ms;
-    animation: members-reveal 180ms ease 80ms backwards;
+    --navigation-width: 220px;
   }
 }
 

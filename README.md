@@ -103,3 +103,13 @@ node scripts/package-selfhost.mjs
 ## Лицензии
 
 Собственный код — [MIT](LICENSE). Зависимости и ресурсы сохраняют свои лицензии; см. [THIRD_PARTY.md](THIRD_PARTY.md). Приватность репозитория не заменяет проверку прав на зависимости перед публичным выпуском.
+
+<details>
+<summary>Поддержать проект</summary>
+
+[DonationAlerts](https://www.donationalerts.com/r/ajurion)
+
+- Bitcoin (BTC) — `1JyhWD9XppxU39ryrtux6xn2RmNW1wcZWw`
+- Ethereum (ETH) — `0xA3EdFFfc60B5606259308DA8cD468832C450b0eE`
+
+</details>

@@ -8,6 +8,7 @@ type Person = {
   identity: string;
   name: string;
   local: boolean;
+  ownProfile?: boolean;
   speaking: boolean;
   mic: boolean;
   avatar?: string;
@@ -200,7 +201,9 @@ onBeforeUnmount(() => {
           </button>
         </div>
         <div class="person-caption">
-          <strong>{{ person.name }}<span v-if="person.local"> · вы</span></strong>
+          <strong
+            >{{ person.name }}<span v-if="person.local || person.ownProfile"> · вы</span></strong
+          >
         </div>
       </article>
       <article v-for="tile in screensFor(person.identity)" :key="tile.id" class="screen-card">

@@ -865,11 +865,12 @@ watch(
   () => page.value,
   () => (volumePerson.value = null),
 );
+function isOwnProfile(person: { identity: string; local?: boolean }) {
+  return !!person.local || person.identity.split('.')[0] === workspace.selfId.value;
+}
 function avatarFor(person: { identity: string; local?: boolean }) {
   const id = person.identity.split('.')[0]!;
-  return person.local || id === self.value?.id
-    ? profileAvatar.value || avatars.value[id]
-    : avatars.value[id];
+  return isOwnProfile(person) ? profileAvatar.value || avatars.value[id] : avatars.value[id];
 }
 function displayPerson(person: {
   identity: string;
@@ -882,6 +883,7 @@ function displayPerson(person: {
   const member = members.value.find((m) => m.id === person.identity.split('.')[0]);
   return {
     ...person,
+    ownProfile: isOwnProfile(person),
     name: member?.name || person.name,
     avatar: avatarFor(person),
     canModerateMedia:
@@ -1047,7 +1049,7 @@ function peopleIn(id: string) {
   if (!pendingRoom.value && connected.value && id === localVoiceRoom.value)
     return participants.value.map((p) => ({ ...p, pending: false, reconnecting: false }));
   const others = (presenceAvailable.value ? presence.value[id]?.people || [] : [])
-    .filter((p) => p.identity.split('.')[0] !== self.value?.id)
+    .filter((p) => !call.isOwnConnection(activeServer.value, p.identity))
     .map((p) => ({
       ...p,
       local: false,
@@ -1494,7 +1496,7 @@ onBeforeUnmount(() => {
                         >{{ initials(person.name) }}</template
                       ></span
                     ><span
-                      >{{ person.name }}{{ person.local ? ' · вы' : ''
+                      >{{ person.name }}{{ isOwnProfile(person) ? ' · вы' : ''
                       }}<small v-if="person.pending">Подключение…</small
                       ><small v-else-if="person.reconnecting">Переподключается…</small></span
                     ><span class="person-media-hints"
@@ -1620,7 +1622,7 @@ onBeforeUnmount(() => {
                       initials(person.name)
                     }}</template>
                   </div>
-                  <strong>{{ person.name }}</strong
+                  <strong>{{ person.name }}{{ person.ownProfile ? ' · вы' : '' }}</strong
                   ><small v-if="person.reconnecting">Восстанавливает связь</small>
                 </article>
                 <button class="join-person" :disabled="joining" @click="chooseRoom(selectedId)">

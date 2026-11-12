@@ -1,4 +1,4 @@
-import { apiFetch } from './serverConnection';
+import { activeServer, apiFetch } from './serverConnection';
 import { computed, ref } from 'vue';
 import { Room, RoomEvent, Track, VideoPresets, AudioPresets, setLogLevel } from 'livekit-client';
 import type {
@@ -84,6 +84,13 @@ export function useCall(
     }),
   });
   let room: Room | null = null;
+  // The server roster can lag behind a leave. Match sessions issued to this tab, not the member ID.
+  const ownConnections = ref<{ origin: string; identity: string }[]>([]);
+  function isOwnConnection(origin: string, identity: string) {
+    return ownConnections.value.some(
+      (entry) => entry.origin === origin && entry.identity === identity,
+    );
+  }
   async function playCue(active: Room, url: string) {
     try {
       if (room !== active || active.state !== 'connected') return;
@@ -437,6 +444,7 @@ export function useCall(
     const timeout = setTimeout(() => controller.abort(), 15000);
     let candidate: Room | undefined;
     try {
+      const origin = activeServer.value;
       const response = await apiFetch('/api/join', {
         method: 'POST',
         headers: {
@@ -452,6 +460,12 @@ export function useCall(
       if (!response.ok) {
         status.value = invitation.error || 'Вход недоступен.';
         return;
+      }
+      if (invitation.identity) {
+        ownConnections.value = [
+          ...ownConnections.value.slice(-15),
+          { origin, identity: invitation.identity },
+        ];
       }
       status.value = 'Вход подтверждён. Устанавливаем медиасоединение…';
       // Subscription limits below handle visibility and size as well as manual caps.
@@ -816,6 +830,7 @@ export function useCall(
   }
   return {
     linkQuality,
+    isOwnConnection,
     effects,
     selectCamera,
     volumeFor,

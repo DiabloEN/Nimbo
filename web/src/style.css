@@ -2591,13 +2591,16 @@ html {
       var(--column-phase) * var(--column-phase) * (3 - 2 * var(--column-phase))
     );
     --list-fraction: calc(var(--list-phase) * var(--list-phase) * (3 - 2 * var(--list-phase)));
-    grid-template-columns: var(--navigation-width, 250px) minmax(0, 1fr) calc(
-        218px * var(--column-fraction)
-      );
+    --roster-column: calc(218px * var(--column-fraction));
+    grid-template-columns: var(--navigation-width, 250px) minmax(0, 1fr) var(--roster-column);
     transition: --roster-progress 240ms linear;
   }
   .app-shell.has-member-panel.with-members {
     --roster-progress: 1;
+  }
+  .app-shell.has-member-panel .topbar {
+    /* Keep the controls beside the fixed roster toggle throughout the transition. */
+    padding-right: calc(230px - var(--roster-column));
   }
   .has-member-panel .members-panel {
     height: calc(
@@ -2608,6 +2611,11 @@ html {
   }
   .has-member-panel .room-view .room-body .stage-content {
     padding-right: calc(var(--room-content-inset) * var(--column-fraction));
+  }
+}
+@media (min-width: 801px) and (prefers-reduced-motion: reduce) {
+  .has-member-panel.with-members .topbar {
+    padding-right: 12px;
   }
 }
 @media (min-width: 801px) and (max-width: 1200px) {

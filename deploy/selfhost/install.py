@@ -15,6 +15,7 @@ import socket
 import subprocess
 import sys
 import host
+import nimbo_cli
 import not_found
 
 LIVEKIT = (
@@ -597,7 +598,11 @@ def install(a, records):
         print("Supplied certificates are copies; arrange renewal before they expire.")
     if not a.prepare_only:
         run(str(root / "nimbo"), "install")
-    print(f"Control this installation: sudo {root}/nimbo help")
+    if nimbo_cli.install_launcher():
+        selector = f" --instance {a.project}" if len(records) > 1 else ""
+        print(f"Управление: sudo nimbo{selector} help")
+    else:
+        print(f"{nimbo_cli.COMMAND} уже занят. Управление: sudo {root}/nimbo help")
 
 
 if __name__ == "__main__":

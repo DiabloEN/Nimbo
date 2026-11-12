@@ -66,6 +66,7 @@ run(
 for (const name of [
   'install.py',
   'host.py',
+  'nimbo_cli.py',
   'not_found.py',
   '404.html',
   'nimbo',
@@ -121,6 +122,7 @@ run(
     bundle,
     'install.py',
     'host.py',
+    'nimbo_cli.py',
     'not_found.py',
     '404.html',
     'nimbo',

@@ -4,12 +4,14 @@ import (
 	"crypto/hmac"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 )
 
 type invitation struct {
 	ID        string `json:"id"`
 	Code      string `json:"code"`
+	Label     string `json:"label,omitempty"`
 	CreatedAt int64  `json:"createdAt"`
 	ExpiresAt int64  `json:"expiresAt,omitempty"`
 	SingleUse bool   `json:"singleUse"`
@@ -70,8 +72,9 @@ func (s *workspaceStore) registerInvitations(handle func(string, func(http.Respo
 	})
 	handle("POST /api/invitations", func(w http.ResponseWriter, r *http.Request, actor string) {
 		var req struct {
-			SingleUse bool  `json:"singleUse"`
-			Seconds   int64 `json:"seconds"`
+			SingleUse bool   `json:"singleUse"`
+			Seconds   int64  `json:"seconds"`
+			Label     string `json:"label"`
 		}
 		if !decodeRequest(w, r, &req) {
 			return
@@ -84,11 +87,15 @@ func (s *workspaceStore) registerInvitations(handle func(string, func(http.Respo
 			if req.Seconds < 0 || req.Seconds > 31536000 || (req.Seconds > 0 && req.Seconds < 60) {
 				return fail(400, "Срок приглашения: от минуты до года или без срока")
 			}
+			label := strings.TrimSpace(req.Label)
+			if label != "" && !validLabel(label, 80) {
+				return fail(400, "Подпись должна быть одной строкой до 80 символов")
+			}
 			d.Invitations = activeInvitations(d)
 			if len(d.Invitations) >= 100 {
 				return fail(409, "Можно создать не больше 100 активных приглашений")
 			}
-			item = invitation{ID: randomKey(), Code: randomKey(), SingleUse: req.SingleUse, CreatedAt: time.Now().UnixMilli()}
+			item = invitation{ID: randomKey(), Code: randomKey(), Label: label, SingleUse: req.SingleUse, CreatedAt: time.Now().UnixMilli()}
 			if req.Seconds > 0 {
 				item.ExpiresAt = time.Now().Add(time.Duration(req.Seconds) * time.Second).UnixMilli()
 			}

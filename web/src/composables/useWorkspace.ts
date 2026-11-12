@@ -20,6 +20,7 @@ export type Channel = {
 export type Invitation = {
   id: string;
   code: string;
+  label?: string;
   singleUse: boolean;
   createdAt: number;
   expiresAt?: number;

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { activeServer } from '../composables/serverConnection';
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import AppSelect from './AppSelect.vue';
 import type { Invitation } from '../composables/useWorkspace';
 const props = defineProps<{
@@ -9,6 +9,9 @@ const props = defineProps<{
 }>();
 const creating = ref(false),
   duration = ref('personal'),
+  label = ref(''),
+  createdId = ref(''),
+  list = ref<HTMLUListElement>(),
   busy = ref(false),
   error = ref(''),
   copied = ref(''),
@@ -16,27 +19,50 @@ const creating = ref(false),
 const active = computed(() =>
   props.invitations
     .filter((i) => !i.expiresAt || i.expiresAt > now.value)
-    .slice()
+    .reverse()
     .sort((a, b) => b.createdAt - a.createdAt),
 );
+watch(
+  () => active.value.find((item) => item.id === createdId.value)?.id,
+  (id) => {
+    if (!id) return;
+    list.value
+      ?.querySelector<HTMLElement>('[data-new-invitation]')
+      ?.scrollIntoView({ block: 'nearest' });
+  },
+  { flush: 'post' },
+);
+const dateFormat = new Intl.DateTimeFormat('ru-RU', {
+  day: 'numeric',
+  month: 'short',
+  year: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+});
 let timer: ReturnType<typeof setInterval> | undefined;
+let clearMarker: ReturnType<typeof setTimeout> | undefined;
 onMounted(() => {
   timer = setInterval(() => (now.value = Date.now()), 1000);
 });
-onBeforeUnmount(() => clearInterval(timer));
+onBeforeUnmount(() => {
+  clearInterval(timer);
+  clearTimeout(clearMarker);
+});
 function link(item: Invitation) {
   return activeServer.value + '/#/invite/' + encodeURIComponent(item.code);
 }
-function expiry(item: Invitation) {
-  return item.expiresAt
-    ? 'До ' +
-        new Date(item.expiresAt).toLocaleString('ru', {
-          day: 'numeric',
-          month: 'short',
-          hour: '2-digit',
-          minute: '2-digit',
-        })
-    : 'Без срока';
+async function createInvitation() {
+  const item = (await props.request('/api/invitations', 'POST', {
+    singleUse: duration.value === 'personal',
+    seconds: duration.value === 'personal' ? 0 : Number(duration.value),
+    ...(label.value.trim() && { label: label.value.trim() }),
+  })) as Invitation;
+  createdId.value = item.id;
+  clearTimeout(clearMarker);
+  clearMarker = setTimeout(() => {
+    createdId.value = '';
+  }, 15000);
+  label.value = '';
 }
 async function run(action: () => Promise<unknown>) {
   if (busy.value) return;
@@ -73,12 +99,16 @@ async function copy(item: Invitation) {
 <template>
   <section class="invitation-settings">
     <p v-if="error" class="form-error" role="alert">{{ error }}</p>
-    <ul v-if="active.length" class="invitation-list">
-      <li v-for="item in active" :key="item.id">
+    <ul v-if="active.length" ref="list" class="invitation-list">
+      <li
+        v-for="item in active"
+        :key="item.id"
+        :data-new-invitation="item.id === createdId ? '' : undefined"
+      >
         <div class="invitation-meta">
-          <strong>{{ item.singleUse ? 'Персональное' : 'Приглашение' }}</strong
-          ><small>{{ expiry(item) }}</small
-          ><button
+          <strong>{{ item.singleUse ? 'Персональное' : 'Многоразовое' }}</strong>
+          <small v-if="item.id === createdId" role="status">Только что создано</small>
+          <button
             type="button"
             class="text-button"
             :disabled="busy"
@@ -88,6 +118,12 @@ async function copy(item: Invitation) {
             Отозвать
           </button>
         </div>
+        <p v-if="item.label" class="invitation-label">{{ item.label }}</p>
+        <p class="invitation-dates">
+          <span v-if="item.createdAt">Создано {{ dateFormat.format(item.createdAt) }}</span>
+          <span v-if="item.expiresAt">До {{ dateFormat.format(item.expiresAt) }}</span>
+          <span v-else>{{ item.singleUse ? 'До первого входа' : 'Без срока' }}</span>
+        </p>
         <textarea
           readonly
           :value="shareText(item)"
@@ -103,18 +139,7 @@ async function copy(item: Invitation) {
       </li>
     </ul>
     <p v-else class="field-help">Активных приглашений нет.</p>
-    <form
-      v-if="creating"
-      class="invitation-create"
-      @submit.prevent="
-        run(() =>
-          request('/api/invitations', 'POST', {
-            singleUse: duration === 'personal',
-            seconds: duration === 'personal' ? 0 : Number(duration),
-          }),
-        )
-      "
-    >
+    <form v-if="creating" class="invitation-create" @submit.prevent="run(createInvitation)">
       <div class="invitation-options">
         <label
           >Приглашение<AppSelect
@@ -131,6 +156,15 @@ async function copy(item: Invitation) {
               { value: '0', label: 'Бессрочное' },
             ]"
         /></label>
+        <label
+          >Подпись (необязательно)
+          <input
+            v-model="label"
+            maxlength="80"
+            :disabled="busy"
+            placeholder="Например, для команды"
+          />
+        </label>
       </div>
       <div class="invitation-actions">
         <button class="primary" :disabled="busy">Создать приглашение</button
@@ -146,6 +180,7 @@ async function copy(item: Invitation) {
       :disabled="busy"
       @click="
         creating = true;
+        label = '';
         error = '';
       "
     >
@@ -176,6 +211,19 @@ async function copy(item: Invitation) {
   align-items: center;
   gap: 12px;
   font-size: 12px;
+}
+.invitation-label {
+  margin: 4px 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.invitation-dates {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 12px;
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 11px;
 }
 .invitation-meta small {
   font-size: 11px;
@@ -214,7 +262,8 @@ async function copy(item: Invitation) {
   margin: 0;
   font-size: 11px;
 }
-.invitation-options :deep(.app-select) {
+.invitation-options :deep(.app-select),
+.invitation-options input {
   margin-top: 8px;
 }
 .invitation-create,

@@ -111,5 +111,6 @@ node scripts/package-selfhost.mjs
 
 - Bitcoin (BTC) — `1JyhWD9XppxU39ryrtux6xn2RmNW1wcZWw`
 - Ethereum (ETH) — `0xA3EdFFfc60B5606259308DA8cD468832C450b0eE`
+- USDT (TRON, TRC20) — `TNi2B8DnNeZ4X4PvcZERx6S8S4KCaxD2eE`
 
 </details>

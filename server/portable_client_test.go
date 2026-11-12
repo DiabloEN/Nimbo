@@ -32,7 +32,7 @@ func TestPortableClientUsesExplicitKeysNotCookies(t *testing.T) {
 		h.ServeHTTP(w, r)
 		return w
 	}
-	origin := "https://client.example:7443"
+	origin := "https://client.example:8443"
 	w := request("POST", "/api/profile-session", "", `{"profileKey":"`+access.ProfileKey+`"}`, origin, true)
 	mustStatus(t, w, 200)
 	if len(w.Result().Cookies()) != 0 || len(s.data.Sessions) != before+1 {

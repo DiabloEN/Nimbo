@@ -10,7 +10,7 @@ const dev = {
 };
 const prod = {
   ...dev,
-  url: 'https://prod.example.com:7443',
+  url: 'https://prod.example.com:8443',
   name: 'Prod',
   profileKey: 'b'.repeat(43),
 };

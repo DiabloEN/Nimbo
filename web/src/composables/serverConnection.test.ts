@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { activeServer, clientOrigin, prepareServer, serverFetch } from './serverConnection';
 import { useWorkspace } from './useWorkspace';
 const target = {
-  url: 'https://other.example:7443',
+  url: 'https://other.example:8443',
   name: 'Other',
   displayName: 'Me',
   profileKey: 'b'.repeat(43),

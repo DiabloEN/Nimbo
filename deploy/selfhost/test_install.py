@@ -55,12 +55,12 @@ class InstallerTests(unittest.TestCase):
             "--public-ip",
             "203.0.113.10",
             "--https-port",
-            "7443",
+            "8443",
         ]
         with patch.object(sys, "argv", argv):
             args = installer.arguments()
         args.antivirus_enabled = enabled
-        args.project = "nimbo-7443"
+        args.project = "nimbo-8443"
         with patch.object(host, "free_port", return_value=True):
             host.allocate_ports(args, {})
         return installer.configuration(args)
@@ -163,7 +163,7 @@ class ReadinessTests(unittest.TestCase):
             )
 
     def test_https_waits_for_proxy_startup(self):
-        self.settings.write_text('{"origin":"https://chat.example.org:7443"}')
+        self.settings.write_text('{"origin":"https://chat.example.org:8443"}')
         with (
             patch.object(self.control.urllib.request, "urlopen") as request,
             patch.object(self.control.time, "sleep"),
@@ -177,7 +177,7 @@ class ReadinessTests(unittest.TestCase):
             self.assertEqual(request.call_count, 2)
 
     def test_https_failure_is_not_reported_as_success(self):
-        self.settings.write_text('{"origin":"https://chat.example.org:7443"}')
+        self.settings.write_text('{"origin":"https://chat.example.org:8443"}')
         with (
             patch.object(self.control.urllib.request, "urlopen", side_effect=OSError()),
             patch.object(self.control.time, "sleep"),
@@ -189,9 +189,9 @@ class ReadinessTests(unittest.TestCase):
 class HostTests(unittest.TestCase):
     def args(self, **values):
         defaults = dict(
-            project="nimbo-7443",
-            directory=Path("/opt/nimbo-7443"),
-            https_port=7443,
+            project="nimbo-8443",
+            directory=Path("/opt/nimbo-8443"),
+            https_port=8443,
             memory_mib=1536,
             cpus=2.0,
             storage_gib=10,
@@ -208,7 +208,7 @@ class HostTests(unittest.TestCase):
             host.select_port(None, {}, interactive=False)
 
     def test_prompt_suggests_free_port_but_needs_answer(self):
-        with patch.object(host, "free_port", side_effect=lambda n, udp=False: n != 7443):
+        with patch.object(host, "free_port", side_effect=lambda n, udp=False: n != 8443):
             prompts = []
             value = host.select_port(
                 None, {}, interactive=True, ask=lambda p: prompts.append(p) or ""
@@ -219,7 +219,7 @@ class HostTests(unittest.TestCase):
     def test_reserved_port_is_unavailable_even_when_no_listener(self):
         with patch.object(host, "free_port", return_value=True):
             with self.assertRaises(ValueError):
-                host.select_port(7443, {"stopped": {"tcp": [7443]}}, interactive=False)
+                host.select_port(8443, {"stopped": {"tcp": [8443]}}, interactive=False)
 
     def test_auto_allocation_honours_explicit_ports_and_stopped_records(self):
         args = self.args(turn_tls_port=20001)
@@ -308,24 +308,24 @@ class HostTests(unittest.TestCase):
             self.assertAlmostEqual(sum(s["cpus"] for s in services.values()), 2)
             for s in services.values():
                 self.assertEqual(s["mem_limit"], s["memswap_limit"])
-            self.assertEqual(origin, "https://chat.example.org:7443")
+            self.assertEqual(origin, "https://chat.example.org:8443")
             self.assertFalse(livekit["turn"]["external_tls"])
-            self.assertEqual(caddy["apps"]["http"]["servers"]["nimbo"]["listen"], [":7443"])
+            self.assertEqual(caddy["apps"]["http"]["servers"]["nimbo"]["listen"], [":8443"])
             self.assertTrue(caddy["apps"]["http"]["servers"]["nimbo"]["automatic_https"]["disable"])
             self.assertFalse(services["nimbo"]["volumes"][0]["bind"]["create_host_path"])
 
     def test_acme_uses_private_state_and_webroot_without_shell(self):
         settings = {
-            "project": "nimbo-7443",
+            "project": "nimbo-8443",
             "domains": ["a.example.org", "b.example.org", "c.example.org"],
             "acmeWebroot": "/srv/acme",
         }
-        cmd = host.certificate_command(settings, Path("/opt/nimbo-7443"))
+        cmd = host.certificate_command(settings, Path("/opt/nimbo-8443"))
         self.assertIn("--webroot", cmd)
-        self.assertIn(str(Path("/opt/nimbo-7443") / "private/acme"), cmd)
+        self.assertIn(str(Path("/opt/nimbo-8443") / "private/acme"), cmd)
         self.assertNotIn("--standalone", cmd)
         self.assertEqual(cmd.count("-d"), 3)
-        renew = host.certificate_command(settings, Path("/opt/nimbo-7443"), renew=True)
+        renew = host.certificate_command(settings, Path("/opt/nimbo-8443"), renew=True)
         self.assertEqual(renew[1], "renew")
         self.assertNotIn("--agree-tos", renew)
 

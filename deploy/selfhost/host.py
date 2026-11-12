@@ -55,7 +55,7 @@ def select_port(value, records, interactive=None, ask=input):
         suggestion = next(
             (
                 n
-                for n in (7443, 9443, 8443, *range(10443, 65536))
+                for n in (8443, 9443, *range(10443, 65536))
                 if n not in reserved and free_port(n)
             ),
             None,

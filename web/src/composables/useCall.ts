@@ -14,6 +14,7 @@ import type {
   LocalParticipant,
   LocalTrackPublication,
   LocalVideoTrack,
+  RemoteAudioTrack,
   RemoteTrackPublication,
   VideoCaptureOptions,
 } from 'livekit-client';
@@ -85,6 +86,7 @@ export function useCall(
   setLogLevel('warn');
   const serialInput = <T>(op: () => Promise<T>) => (devices.runInput ? devices.runInput(op) : op());
   const micOptions = () => ({
+    channelCount: { ideal: 1 },
     deviceId: devices.inputId.value === 'default' ? 'default' : { exact: devices.inputId.value },
     ...(devices.captureOptions?.() || {
       echoCancellation: true,
@@ -93,6 +95,29 @@ export function useCall(
     }),
   });
   let room: Room | null = null;
+  let playbackContext: AudioContext | undefined;
+  const voiceOutputs = new Map<MediaTrack, GainNode>();
+  const voiceMeters = new Map<
+    MediaTrack,
+    { owner: string; analyser: AnalyserNode; lastVoice: number }
+  >();
+  const voiceSamples = new Float32Array(512);
+  let meterTimer: ReturnType<typeof setInterval> | undefined;
+  function updateVoiceMeters() {
+    const now = performance.now();
+    for (const meter of voiceMeters.values()) {
+      const { owner, analyser } = meter;
+      analyser.getFloatTimeDomainData(voiceSamples);
+      let power = 0;
+      for (const sample of voiceSamples) power += sample * sample;
+      if (power / voiceSamples.length > 0.003 ** 2) meter.lastVoice = now;
+      const peer = room?.remoteParticipants.get(owner);
+      const person = participants.value.find((p) => p.identity === owner);
+      if (person && peer)
+        person.speaking =
+          peer.isMicrophoneEnabled && (peer.isSpeaking || now - meter.lastVoice < 220);
+    }
+  }
   // The server roster can lag behind a leave. Match sessions issued to this tab, not the member ID.
   const ownConnections = ref<{ origin: string; identity: string }[]>([]);
   function isOwnConnection(origin: string, identity: string) {
@@ -134,14 +159,35 @@ export function useCall(
   }
   const audioOwners = new Map<MediaTrack, string>();
   const volumeKey = (id: string) => (id || '').split('.')[0]!;
-  const volumeFor = (id: string) => volumes.value[volumeKey(id)] ?? 100;
+  const defaultVoiceVolume = 100;
+  function voiceGain(percent: number) {
+    return percent <= 100 ? percent / 50 : 2 * 4 ** ((percent - 100) / 100);
+  }
+  const volumeFor = (id: string) => volumes.value[volumeKey(id)] ?? defaultVoiceVolume;
   const mutedScreens = ref(new Set<string>());
   const audibleScreens = ref(new Set<string>());
   function applyVolume(track: MediaTrack, owner: string) {
-    const muted = track.source === Track.Source.ScreenShareAudio && mutedScreens.value.has(owner);
-    (track as MediaTrack & { setVolume?: (n: number) => void }).setVolume?.(
-      muted ? 0 : volumeFor(owner) / 100,
-    );
+    const isScreen = track.source === Track.Source.ScreenShareAudio;
+    const percent = isScreen ? (volumes.value[volumeKey(owner)] ?? 100) : volumeFor(owner);
+    const gain = isScreen
+      ? mutedScreens.value.has(owner)
+        ? 0
+        : percent / 100
+      : voiceGain(percent);
+    const output = voiceOutputs.get(track);
+    if (output) {
+      output.gain.setTargetAtTime(gain, output.context.currentTime, 0.015);
+      return;
+    }
+    const audioTrack = track as MediaTrack & { setVolume?: (n: number) => void };
+    try {
+      audioTrack.setVolume?.(gain);
+    } catch (error) {
+      // Without a Web Audio context, the SDK uses HTMLMediaElement.volume (maximum 1).
+      if (gain <= 1 || !(error instanceof DOMException) || error.name !== 'IndexSizeError')
+        throw error;
+      audioTrack.setVolume?.(1);
+    }
   }
   function toggleScreenPlayback(owner: string) {
     if (mutedScreens.value.has(owner)) mutedScreens.value.delete(owner);
@@ -288,7 +334,7 @@ export function useCall(
       localSpeaking = value;
       participants.value = participants.value.map((p) =>
         p.local
-          ? { ...p, speaking: mic.value && (value ?? !!room?.localParticipant.isSpeaking) }
+          ? { ...p, speaking: mic.value && (!!value || !!room?.localParticipant.isSpeaking) }
           : p,
       );
     },
@@ -320,7 +366,13 @@ export function useCall(
           local: p === room!.localParticipant,
           speaking:
             p.isMicrophoneEnabled &&
-            (p === room!.localParticipant ? (localSpeaking ?? p.isSpeaking) : p.isSpeaking),
+            (p.isSpeaking ||
+              (p === room!.localParticipant
+                ? !!localSpeaking
+                : [...voiceMeters.values()].some(
+                    (meter) =>
+                      meter.owner === p.identity && performance.now() - meter.lastVoice < 220,
+                  ))),
           mic: p.isMicrophoneEnabled,
           micKnown: true,
           camera: p.isCameraEnabled,
@@ -343,6 +395,12 @@ export function useCall(
     if (item) {
       item.cleanup?.();
       track.detach(item.element);
+      voiceOutputs.delete(track);
+      voiceMeters.delete(track);
+      if (!voiceMeters.size) {
+        clearInterval(meterTimer);
+        meterTimer = undefined;
+      }
       item.container.remove();
       attachments.delete(track);
       if (item.tile) videoHosts.delete(item.tile.id);
@@ -361,6 +419,33 @@ export function useCall(
       (track.kind === 'video' && track.isMuted)
     )
       return;
+    if (
+      !local &&
+      track.kind === 'audio' &&
+      track.source !== Track.Source.ScreenShareAudio &&
+      playbackContext
+    ) {
+      // Install before attach so the first samples and every SDK graph rebuild use the saved gain.
+      const output = playbackContext.createGain();
+      output.channelCount = 1;
+      output.channelCountMode = 'explicit';
+      output.channelInterpretation = 'speakers';
+      output.gain.value = voiceGain(volumeFor(participant.identity));
+      const analyser = playbackContext.createAnalyser();
+      analyser.fftSize = voiceSamples.length;
+      analyser.channelCount = 1;
+      analyser.channelCountMode = 'explicit';
+      const limiter = playbackContext.createDynamicsCompressor();
+      limiter.threshold.value = -3;
+      limiter.knee.value = 0;
+      limiter.ratio.value = 20;
+      limiter.attack.value = 0.003;
+      limiter.release.value = 0.12;
+      (track as RemoteAudioTrack).setWebAudioPlugins([analyser, output, limiter]);
+      voiceOutputs.set(track, output);
+      voiceMeters.set(track, { owner: participant.identity, analyser, lastVoice: -Infinity });
+      meterTimer ??= setInterval(updateVoiceMeters, 60);
+    }
     const element = track.attach();
     element.autoplay = true;
     let container: HTMLElement = element;
@@ -434,6 +519,8 @@ export function useCall(
     clearInterval(qualityTimer);
     qualityTimer = undefined;
     const previous = room;
+    const previousContext = playbackContext;
+    playbackContext = undefined;
     room = null;
     devices.bindRoom(null);
     for (const track of [...attachments.keys()]) removeTrack(track);
@@ -441,7 +528,11 @@ export function useCall(
     needsAudio.value = false;
     sync();
     status.value = message;
-    if (previous) await previous.disconnect(true);
+    try {
+      if (previous) await previous.disconnect(true);
+    } finally {
+      if (previousContext && previousContext.state !== 'closed') await previousContext.close();
+    }
   }
   function playAudio() {
     const current = room;
@@ -502,11 +593,14 @@ export function useCall(
       }
       status.value = 'Вход подтверждён. Устанавливаем медиасоединение…';
       // Subscription limits below handle visibility and size as well as manual caps.
+      playbackContext = window.AudioContext
+        ? new AudioContext({ latencyHint: 'interactive' })
+        : undefined;
       candidate = new Room({
         disconnectOnPageLeave: false,
         adaptiveStream: false,
         dynacast: true,
-        webAudioMix: true,
+        webAudioMix: playbackContext ? { audioContext: playbackContext } : true,
         publishDefaults: {
           videoSimulcastLayers: [VideoPresets.h360, VideoPresets.h720],
           screenShareSimulcastLayers: [VideoPresets.h360, VideoPresets.h720],

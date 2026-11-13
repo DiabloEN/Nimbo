@@ -94,6 +94,9 @@ export class NimboNoiseProcessor
       this.node = node;
       this.source = context.createMediaStreamSource(new MediaStream([track]));
       this.destination = context.createMediaStreamDestination();
+      node.channelCount = 1;
+      node.channelCountMode = 'explicit';
+      this.destination.channelCount = 1;
       this.source.connect(node).connect(this.destination);
       this.processedTrack = this.destination.stream.getAudioTracks()[0];
       this.processedTrack!.enabled = track.enabled;

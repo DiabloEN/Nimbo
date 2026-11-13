@@ -492,19 +492,38 @@ describe('useCall lifecycle and audio devices', () => {
     const capture = call.toggle('screen');
     expect(sdk.MockRoom.instances[0]!.localParticipant.createScreenTracks).toHaveBeenCalledWith(
       expect.objectContaining({ audio: expect.objectContaining({ noiseSuppression: false }) }),
-
     );
     await capture;
   });
 
-  it.each([['monitor', false, false], ['monitor', true, false], ['window', undefined, false], ['browser', false, true]])(
-    'only publishes isolated audio for %s with restrictOwnAudio=%s', async (surface, restricted, expected) => {
-      vi.stubGlobal('navigator', { userAgent: 'Chrome/144.0', mediaDevices: { getDisplayMedia: vi.fn(), getSupportedConstraints: () => ({ restrictOwnAudio: true }) } });
+  it.each([
+    ['monitor', false, false],
+    ['monitor', true, false],
+    ['window', undefined, false],
+    ['browser', false, true],
+  ])(
+    'only publishes isolated audio for %s with restrictOwnAudio=%s',
+    async (surface, restricted, expected) => {
+      vi.stubGlobal('navigator', {
+        userAgent: 'Chrome/144.0',
+        mediaDevices: {
+          getDisplayMedia: vi.fn(),
+          getSupportedConstraints: () => ({ restrictOwnAudio: true }),
+        },
+      });
       const { call } = create();
       await call.join(form);
       const me = sdk.MockRoom.instances[0]!.localParticipant;
-      const video = { source: 'screen', mediaStreamTrack: { getSettings: () => ({ displaySurface: surface }) }, stop: vi.fn() };
-      const audio = { source: 'screen_audio', mediaStreamTrack: { getSettings: () => ({ restrictOwnAudio: restricted }) }, stop: vi.fn() };
+      const video = {
+        source: 'screen',
+        mediaStreamTrack: { getSettings: () => ({ displaySurface: surface }) },
+        stop: vi.fn(),
+      };
+      const audio = {
+        source: 'screen_audio',
+        mediaStreamTrack: { getSettings: () => ({ restrictOwnAudio: restricted }) },
+        stop: vi.fn(),
+      };
       me.createScreenTracks.mockResolvedValue([video, audio]);
       await call.toggle('screen');
       expect(me.publishTrack).toHaveBeenCalledWith(video);
@@ -528,14 +547,28 @@ describe('useCall lifecycle and audio devices', () => {
       setVolume: vi.fn(),
     };
     room.emit('TrackSubscribed', track, {}, { identity: 'person.connection1', name: 'Remote' });
-    call.setParticipantVolume('person.connection1', 160);
-    expect(track.setVolume).toHaveBeenLastCalledWith(1.6);
+    expect(call.volumeFor('person.connection1')).toBe(100);
+    expect(track.setVolume).toHaveBeenLastCalledWith(2);
     const screen = { ...track, source: 'screen_audio', setVolume: vi.fn() };
     const peer = { identity: 'person.connection1', name: 'Remote' };
     room.emit('TrackSubscribed', screen, {}, peer);
+    expect(screen.setVolume).toHaveBeenLastCalledWith(1);
+    const elementOnly = {
+      ...track,
+      setVolume: vi.fn((gain: number) => {
+        if (gain > 1) throw new DOMException('Volume exceeds 1', 'IndexSizeError');
+      }),
+    };
+    room.emit('TrackSubscribed', elementOnly, {}, { ...peer, identity: 'other.connection1' });
+    expect(elementOnly.setVolume).toHaveBeenLastCalledWith(1);
+    call.setParticipantVolume(peer.identity, 0);
+    expect(track.setVolume).toHaveBeenLastCalledWith(0);
+    call.setParticipantVolume(peer.identity, 200);
+    expect(track.setVolume).toHaveBeenLastCalledWith(8);
+    expect(screen.setVolume).toHaveBeenLastCalledWith(2);
     call.toggleScreenPlayback(peer.identity);
     call.setParticipantVolume(peer.identity, 80);
-    expect(track.setVolume).toHaveBeenLastCalledWith(0.8);
+    expect(track.setVolume).toHaveBeenLastCalledWith(1.6);
     expect(screen.setVolume).toHaveBeenLastCalledWith(0);
     call.toggleScreenPlayback(peer.identity);
     expect(screen.setVolume).toHaveBeenLastCalledWith(0.8);

@@ -182,7 +182,7 @@ onBeforeUnmount(() => {
           :aria-label="`Громкость: ${person.name}`"
           @click="emit('person-menu', person, $event)"
         >
-          <AppIcon name="headphones" :size="15" />
+          <AppIcon name="headphones" :size="16" />
         </button>
         <div v-if="person.canModerateMedia" class="media-admin-actions">
           <button
@@ -193,7 +193,7 @@ onBeforeUnmount(() => {
             title="Выключить микрофон участника"
             @click="emit('moderate-media', person, 'mute_mic')"
           >
-            <AppIcon name="mic-off" :size="18" /></button
+            <AppIcon name="mic-off" :size="16" /></button
           ><button
             v-if="cameraFor(person.identity)"
             type="button"
@@ -202,7 +202,7 @@ onBeforeUnmount(() => {
             title="Выключить камеру участника"
             @click="emit('moderate-media', person, 'mute_camera')"
           >
-            <AppIcon name="camera-off" :size="18" />
+            <AppIcon name="camera-off" :size="16" />
           </button>
         </div>
         <div class="person-caption">
@@ -262,19 +262,41 @@ onBeforeUnmount(() => {
       @keydown.esc.stop.prevent="minimized ? close() : minimize(true)"
     >
       <header>
-        <h2 :class="{ 'drag-title': minimized }" @pointerdown="mini.start($event, 'move')">{{ expanded?.name }} · экран</h2>
-        <button v-if="expanded && !expanded.local && audibleScreens?.has(expanded.participantId)"
-          type="button" class="icon-button" aria-label="Заглушить звук трансляции у себя"
+        <h2 :class="{ 'drag-title': minimized }" @pointerdown="mini.start($event, 'move')">
+          {{ expanded?.name }} · экран
+        </h2>
+        <button
+          v-if="expanded && !expanded.local && audibleScreens?.has(expanded.participantId)"
+          type="button"
+          class="icon-button"
+          aria-label="Заглушить звук трансляции у себя"
           :aria-pressed="mutedScreens?.has(expanded.participantId)"
-          :title="mutedScreens?.has(expanded.participantId) ? 'Включить звук у себя' : 'Выключить звук у себя'"
-          @click="emit('toggle-screen-playback', expanded.participantId)">
-          <AppIcon :name="mutedScreens?.has(expanded.participantId) ? 'sound-off' : 'sound'" :size="16" />
+          :title="
+            mutedScreens?.has(expanded.participantId)
+              ? 'Включить звук у себя'
+              : 'Выключить звук у себя'
+          "
+          @click="emit('toggle-screen-playback', expanded.participantId)"
+        >
+          <AppIcon
+            :name="mutedScreens?.has(expanded.participantId) ? 'sound-off' : 'sound'"
+            :size="16"
+          />
         </button>
-        <button v-if="minimized && expanded?.local && screenAudioAvailable" type="button"
-          class="icon-button" :disabled="screenAudioBusy" :aria-pressed="!!screenAudio"
-          :aria-label="screenAudio ? 'Выключить звук своей трансляции' : 'Включить звук своей трансляции'"
-          :title="screenAudio ? 'Выключить звук своей трансляции' : 'Включить звук своей трансляции'"
-          @click="emit('toggle-screen-audio')">
+        <button
+          v-if="minimized && expanded?.local && screenAudioAvailable"
+          type="button"
+          class="icon-button"
+          :disabled="screenAudioBusy"
+          :aria-pressed="!!screenAudio"
+          :aria-label="
+            screenAudio ? 'Выключить звук своей трансляции' : 'Включить звук своей трансляции'
+          "
+          :title="
+            screenAudio ? 'Выключить звук своей трансляции' : 'Включить звук своей трансляции'
+          "
+          @click="emit('toggle-screen-audio')"
+        >
           <AppIcon :name="screenAudio ? 'sound' : 'sound-off'" :size="16" />
         </button>
         <button
@@ -307,11 +329,23 @@ onBeforeUnmount(() => {
       <div class="stream-viewer-body" @pointerdown="mini.start($event, 'move')">
         <div ref="enlargedHost" class="media-slot enlarged-slot"></div>
       </div>
-      <button v-if="minimized" type="button" class="mini-resize"
-        aria-label="Изменить размер трансляции" title="Изменить размер" @pointerdown="mini.start($event, 'resize')"
-        @keydown.left.prevent="mini.grow(-16)" @keydown.right.prevent="mini.grow(16)">
+      <button
+        v-if="minimized"
+        type="button"
+        class="mini-resize"
+        aria-label="Изменить размер трансляции"
+        title="Изменить размер"
+        @pointerdown="mini.start($event, 'resize')"
+        @keydown.left.prevent="mini.grow(-16)"
+        @keydown.right.prevent="mini.grow(16)"
+      >
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-          <path d="m3 11 8-8m-3 8 3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+          <path
+            d="m3 11 8-8m-3 8 3-3"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+          />
         </svg>
       </button>
       <div v-if="expanded?.local && !minimized" class="screen-viewer-footer">
@@ -530,6 +564,36 @@ onBeforeUnmount(() => {
   left: 10px;
   right: auto;
   bottom: 48px;
+}
+.person-card .media-admin-actions {
+  bottom: 10px;
+  flex-direction: row-reverse;
+  padding: 0;
+  background: transparent;
+}
+.person-card .participant-volume,
+.person-card .media-admin-actions button {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 9px;
+  background: #202020e8;
+  color: #ddd;
+}
+.person-card .participant-volume:hover,
+.person-card .media-admin-actions button:hover {
+  background: #393939;
+  color: #fff;
+}
+.person-card:is(.with-camera, .has-screen .person-card):has(.media-admin-actions button)
+  .person-caption {
+  padding-right: 48px;
+}
+.person-card:is(.with-camera, .has-screen .person-card):has(
+    .media-admin-actions button:nth-child(2)
+  )
+  .person-caption {
+  padding-right: 82px;
 }
 @media (hover: none) {
   .media-admin-actions {

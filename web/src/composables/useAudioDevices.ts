@@ -157,6 +157,7 @@ export function useAudioDevices() {
     ) {
       await track.restartTrack({
         ...options,
+        channelCount: { ideal: 1 },
         deviceId: inputId.value === 'default' ? 'default' : { exact: inputId.value },
       });
       if (current !== room) {
@@ -179,6 +180,7 @@ export function useAudioDevices() {
           if (current === room) {
             await track.restartTrack({
               ...options,
+              channelCount: { ideal: 1 },
               noiseSuppression: true,
               deviceId: inputId.value === 'default' ? 'default' : { exact: inputId.value },
             });

@@ -42,6 +42,7 @@ type member struct {
 	Blocked        bool     `json:"blocked,omitempty"`
 }
 type chatMessage struct {
+	Format        string              `json:"format,omitempty"`
 	EditedAt      int64               `json:"editedAt,omitempty"`
 	Attachments   []fileAttachment    `json:"attachments,omitempty"`
 	Attachment    *fileAttachment     `json:"attachment,omitempty"`
@@ -346,6 +347,9 @@ func decodeRequest(w http.ResponseWriter, r *http.Request, target any) bool {
 	if r.URL.Path == "/api/profile" || r.URL.Path == "/api/workspace" || r.URL.Path == "/api/messages" {
 		limit = 65536
 	}
+	if r.Method == "PATCH" && strings.HasPrefix(r.URL.Path, "/api/messages/") {
+		limit = 131072
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	d := json.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
@@ -449,6 +453,8 @@ func (s *workspaceStore) register(mux *http.ServeMux, c config, presence *presen
 	s.registerSections(handle)
 	s.registerStorage(handle)
 	s.registerFiles(handle)
+	s.registerServerUpdates(handle)
+	s.registerLinkPreviews(handle)
 	s.registerFileMedia(mux, c)
 	s.registerRoles(handle)
 	s.registerInvitations(handle)
@@ -634,6 +640,7 @@ func (s *workspaceStore) register(mux *http.ServeMux, c config, presence *presen
 			ReplyTo  string        `json:"replyTo"`
 			ClientID string        `json:"clientId"`
 			Mentions []chatMention `json:"mentions"`
+			Format   string        `json:"format,omitempty"`
 		}
 		if !decodeRequest(w, r, &req) {
 			return
@@ -643,7 +650,13 @@ func (s *workspaceStore) register(mux *http.ServeMux, c config, presence *presen
 			req.Mentions[i].Start -= leading
 			req.Mentions[i].End -= leading
 		}
+		format, formatErr := messageFormat(req.Text, req.Format, leading)
+		if formatErr != nil {
+			report(w, formatErr)
+			return
+		}
 		req.Text = strings.TrimSpace(req.Text)
+		format = format[:min(len(format), len(utf16.Encode([]rune(req.Text))))]
 		if !utf8.ValidString(req.Text) ||
 			len(req.Text) > 32000 ||
 			utf8.RuneCountInString(req.Text) < 1 ||
@@ -690,6 +703,7 @@ func (s *workspaceStore) register(mux *http.ServeMux, c config, presence *presen
 			}
 			recipients = replyRecipients(data, messages, id, req.ReplyTo, recipients)
 			result = chatMessage{Mentions: mentions, MentionUnread: recipients, ReplyTo: req.ReplyTo, ID: randomKey(), AuthorID: id, Name: findMember(data, id).Name, Text: req.Text, CreatedAt: time.Now().UnixMilli(), ClientID: req.ClientID}
+			result.Format = format
 			messages = append(messages, result)
 			data.Messages[ch.ID] = messages
 			result = withReply(result, messages)

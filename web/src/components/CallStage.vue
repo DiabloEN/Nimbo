@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch, nextTick, onBeforeUnmount } from 'vue';
+import { useMiniPlayer } from '../composables/useMiniPlayer';
 import AppIcon from './AppIcon.vue';
 import ScreenAudioButton from './ScreenAudioButton.vue';
 import type { VideoTile } from '../composables/useCall';
@@ -18,6 +19,7 @@ type Person = {
 const emit = defineEmits<{
   leave: [];
   'toggle-screen-audio': [];
+  'toggle-screen-playback': [string];
   'person-menu': [Person, MouseEvent?];
   'moderate-media': [Person, string];
 }>();
@@ -27,6 +29,8 @@ const props = defineProps<{
   visible: boolean;
   followRemoteScreen?: boolean;
   moderationBusy?: boolean;
+  mutedScreens?: Set<string>;
+  audibleScreens?: Set<string>;
   screenAudio?: boolean;
   screenAudioAvailable?: boolean;
   screenAudioBusy?: boolean;
@@ -37,6 +41,7 @@ const floating = ref<HTMLElement | null>(null),
   enlargedHost = ref<HTMLElement | null>(null),
   expandedId = ref(''),
   minimized = ref(false);
+const mini = useMiniPlayer(minimized);
 const hosts = new Map<string, HTMLElement>();
 const expanded = computed(() => props.tiles.find((t) => t.id === expandedId.value));
 const cameraFor = (id: string) =>
@@ -139,7 +144,7 @@ onBeforeUnmount(() => {
           @click="emit('leave')"
         >
           <AppIcon name="exit" :size="18" /></button
-        ><span class="person-state"
+        ><span v-if="person.reconnecting || person.speaking || !person.mic" class="person-state"
           ><span
             v-if="person.reconnecting"
             class="reconnecting-dot"
@@ -251,12 +256,27 @@ onBeforeUnmount(() => {
       v-show="expanded"
       class="stream-viewer"
       :class="{ 'stream-mini': minimized }"
+      :style="minimized ? mini.style.value : undefined"
       role="region"
       aria-label="Просмотр трансляции"
       @keydown.esc.stop.prevent="minimized ? close() : minimize(true)"
     >
       <header>
-        <h2>{{ expanded?.name }} · экран</h2>
+        <h2 :class="{ 'drag-title': minimized }" @pointerdown="mini.start($event, 'move')">{{ expanded?.name }} · экран</h2>
+        <button v-if="expanded && !expanded.local && audibleScreens?.has(expanded.participantId)"
+          type="button" class="icon-button" aria-label="Заглушить звук трансляции у себя"
+          :aria-pressed="mutedScreens?.has(expanded.participantId)"
+          :title="mutedScreens?.has(expanded.participantId) ? 'Включить звук у себя' : 'Выключить звук у себя'"
+          @click="emit('toggle-screen-playback', expanded.participantId)">
+          <AppIcon :name="mutedScreens?.has(expanded.participantId) ? 'sound-off' : 'sound'" :size="16" />
+        </button>
+        <button v-if="minimized && expanded?.local && screenAudioAvailable" type="button"
+          class="icon-button" :disabled="screenAudioBusy" :aria-pressed="!!screenAudio"
+          :aria-label="screenAudio ? 'Выключить звук своей трансляции' : 'Включить звук своей трансляции'"
+          :title="screenAudio ? 'Выключить звук своей трансляции' : 'Включить звук своей трансляции'"
+          @click="emit('toggle-screen-audio')">
+          <AppIcon :name="screenAudio ? 'sound' : 'sound-off'" :size="16" />
+        </button>
         <button
           v-if="minimized"
           class="icon-button"
@@ -284,9 +304,16 @@ onBeforeUnmount(() => {
           <AppIcon name="close" :size="18" />
         </button>
       </header>
-      <div class="stream-viewer-body">
+      <div class="stream-viewer-body" @pointerdown="mini.start($event, 'move')">
         <div ref="enlargedHost" class="media-slot enlarged-slot"></div>
       </div>
+      <button v-if="minimized" type="button" class="mini-resize"
+        aria-label="Изменить размер трансляции" title="Изменить размер" @pointerdown="mini.start($event, 'resize')"
+        @keydown.left.prevent="mini.grow(-16)" @keydown.right.prevent="mini.grow(16)">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+          <path d="m3 11 8-8m-3 8 3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+        </svg>
+      </button>
       <div v-if="expanded?.local && !minimized" class="screen-viewer-footer">
         <ScreenAudioButton
           :enabled="screenAudio"
@@ -576,8 +603,31 @@ onBeforeUnmount(() => {
   padding: 8px;
   border-radius: 14px;
 }
+.stream-mini .drag-title,
 .stream-mini .stream-viewer-body {
-  flex: none;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+.stream-mini .stream-viewer-body :deep(video) {
+  pointer-events: none;
+}
+.stream-mini .mini-resize {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: #181818d9;
+  color: #ddd;
+  display: grid;
+  place-items: center;
+  cursor: nwse-resize;
+  touch-action: none;
+}
+.stream-mini .stream-viewer-body {
+  flex: 1;
   aspect-ratio: 16/9;
   width: 100%;
 }

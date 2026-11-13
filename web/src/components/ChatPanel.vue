@@ -1,19 +1,23 @@
 <script setup lang="ts">
 import { remoteServer } from '../composables/serverConnection';
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { copyChatSelection } from '../composables/chatClipboard';
 import type { Message, Member, Role, PendingMessage } from '../composables/useWorkspace';
 import {
   mentionChoices,
   moveMentions,
   withEveryone,
-  messageParts,
   type Mention,
   type MentionChoice,
 } from '../composables/mentions';
 import EmojiPicker from './EmojiPicker.vue';
 import ReactionButton from './ReactionButton.vue';
 import AppIcon from './AppIcon.vue';
-import LinkedText from './LinkedText.vue';
+import ChatEditor from './ChatEditor.vue';
+import FormattedMessage from './FormattedMessage.vue';
+import type { ChatDraft } from '../composables/chatFormat';
+import LinkPreview from './LinkPreview.vue';
+import { linkParts } from '../composables/chatLinks';
 import { attachmentMedia } from '../composables/attachmentMedia';
 import AttachmentPreview from './AttachmentPreview.vue';
 import { fileSelectionError, preventFileNavigation } from '../composables/chatFiles';
@@ -23,7 +27,12 @@ const props = defineProps<{
   pendingMessages?: PendingMessage[];
   retryPending?: (p: PendingMessage) => Promise<void>;
   dismissPending?: (id: string) => void;
-  editMessage?: (message: Message, text: string, mentions: Mention[]) => Promise<void>;
+  editMessage?: (
+    message: Message,
+    text: string,
+    mentions: Mention[],
+    format: string,
+  ) => Promise<void>;
   canWrite?: boolean;
   loadFile?: (file: NonNullable<Message['attachment']>) => Promise<Blob>;
   request: (path: string) => Promise<any>;
@@ -31,6 +40,8 @@ const props = defineProps<{
   avatars?: Record<string, string>;
   active?: boolean;
   unreadMentions?: string[];
+  unreadMessage?: string;
+  scrollRequest?: number;
   members?: Member[];
   roles?: Role[];
   focusMessage?: string;
@@ -40,6 +51,7 @@ const props = defineProps<{
   removeMessage: (message: Message) => Promise<void>;
   messages: Message[];
   modelValue: string;
+  format: string;
   channel: string;
   selfId: string;
   hasMore: boolean;
@@ -53,7 +65,8 @@ function writingAllowed() {
 }
 const emit = defineEmits<{
   'read-mentions': [ids: string[]];
-  'update:modelValue': [value: string];
+  'read-messages': [ids: string[]];
+  'draft-change': [draft: ChatDraft];
   react: [message: Message, emoji: string];
   'member-menu': [message: Message, event: MouseEvent];
 }>();
@@ -159,12 +172,24 @@ function fileDrop(e: DragEvent) {
 function fileLeave(e: DragEvent) {
   if (!e.relatedTarget) dragging.value = false;
 }
+function copyMessage(event: ClipboardEvent) {
+  const selection = window.getSelection();
+  if (event.defaultPrevented || !props.active || !selection?.rangeCount || selection.isCollapsed)
+    return;
+  const node = selection.getRangeAt(0).commonAncestorContainer;
+  const message = (node instanceof Element ? node : node.parentElement)?.closest<HTMLElement>(
+    '.formatted-message',
+  );
+  if (message && panel.value?.contains(message)) copyChatSelection(event, message);
+}
 onMounted(() => {
+  document.addEventListener('copy', copyMessage);
   window.addEventListener('dragover', fileDrag);
   window.addEventListener('drop', fileDrop);
   window.addEventListener('dragleave', fileLeave);
 });
 onBeforeUnmount(() => {
+  document.removeEventListener('copy', copyMessage);
   policyVersion++;
   window.removeEventListener('dragover', fileDrag);
   window.removeEventListener('drop', fileDrop);
@@ -186,12 +211,74 @@ const replying = ref<Message>(),
   deleting = ref<Message>(),
   deleteBusy = ref(false),
   deleteError = ref('');
+const deletePopover = ref<HTMLElement>();
+const deletePosition = ref({ top: '0px', right: '0px' });
+let deleteTrigger: HTMLButtonElement | undefined;
+function closeDelete(restoreFocus = false) {
+  deleting.value = undefined;
+  deleteError.value = '';
+  if (restoreFocus) deleteTrigger?.focus({ preventScroll: true });
+  deleteTrigger = undefined;
+}
+function toggleDelete(message: Message, event: MouseEvent) {
+  if (deleteBusy.value) return;
+  if (deleting.value?.id === message.id) return closeDelete();
+  deleteTrigger = event.currentTarget as HTMLButtonElement;
+  const rect = deleteTrigger.getBoundingClientRect();
+  deletePosition.value = {
+    top: rect.bottom + 6 + 'px',
+    right: document.documentElement.clientWidth - rect.right + 'px',
+  };
+  deleteError.value = '';
+  deleting.value = message;
+  nextTick(() => deletePopover.value?.focus({ preventScroll: true }));
+}
+watch(deleting, (message, _, onCleanup) => {
+  if (!message) return;
+  function outside(event: PointerEvent) {
+    const target = event.target as Node;
+    if (
+      !deleteBusy.value &&
+      !deleteTrigger?.contains(target) &&
+      !deletePopover.value?.contains(target)
+    )
+      closeDelete();
+  }
+  function escape(event: KeyboardEvent) {
+    if (event.key === 'Escape' && !deleteBusy.value) {
+      event.preventDefault();
+      closeDelete(true);
+    }
+  }
+  function moved() {
+    if (!deleteBusy.value) closeDelete();
+  }
+  document.addEventListener('pointerdown', outside);
+  document.addEventListener('keydown', escape);
+  window.addEventListener('resize', moved);
+  const scroller = list.value;
+  scroller?.addEventListener('scroll', moved);
+  onCleanup(() => {
+    document.removeEventListener('pointerdown', outside);
+    document.removeEventListener('keydown', escape);
+    window.removeEventListener('resize', moved);
+    scroller?.removeEventListener('scroll', moved);
+  });
+});
+watch(
+  () => props.active,
+  (active) => {
+    if (!active) closeDelete();
+  },
+);
 const replyTarget = computed(() => props.messages.find((m) => m.id === replying.value?.id));
 watch(
   () => props.messages,
   () => {
     if (replying.value && !props.messages.some((m) => m.id === replying.value!.id))
       replying.value = undefined;
+    if (deleting.value && !props.messages.some((m) => m.id === deleting.value!.id && !m.deleted))
+      closeDelete();
   },
 );
 function quote(message: Message) {
@@ -215,7 +302,7 @@ async function send() {
   // Uploads move into an in-memory outbox immediately; retries keep the same ID.
   if (files.length) {
     delete fileDrafts.value[channel];
-    emit('update:modelValue', '');
+    emit('draft-change', { text: '', format: '' });
     replying.value = undefined;
     mentionDrafts.delete(channel);
     mentionStart.value = -1;
@@ -231,13 +318,13 @@ async function send() {
   }
 }
 const editing = ref<Message>(),
-  editText = ref(''),
+  editDraft = ref<ChatDraft>({ text: '', format: '' }),
   editBusy = ref(false),
   editError = ref(''),
-  editInput = ref<HTMLTextAreaElement[]>();
+  editInput = ref<InstanceType<typeof ChatEditor>[]>();
 async function beginEdit(message: Message) {
   editing.value = { ...message };
-  editText.value = message.text;
+  editDraft.value = { text: message.text, format: message.format || '' };
   editError.value = '';
   await nextTick();
   editInput.value?.[0]?.focus();
@@ -250,8 +337,9 @@ async function saveEdit() {
     const m = editing.value;
     await props.editMessage(
       m,
-      editText.value,
-      moveMentions(m.text, editText.value, m.mentions || []),
+      editDraft.value.text,
+      moveMentions(m.text, editDraft.value.text, m.mentions || []),
+      editDraft.value.format,
     );
     editing.value = undefined;
   } catch (e) {
@@ -275,14 +363,15 @@ watch(
 );
 
 async function confirmDelete() {
-  if (!deleting.value) return;
+  const message = deleting.value;
+  if (!message || deleteBusy.value) return;
   deleteBusy.value = true;
   deleteError.value = '';
   try {
-    await props.removeMessage(deleting.value);
-    deleting.value = undefined;
+    await props.removeMessage(message);
+    if (deleting.value?.id === message.id) closeDelete();
   } catch (e) {
-    deleteError.value = (e as Error).message;
+    if (deleting.value?.id === message.id) deleteError.value = (e as Error).message;
   } finally {
     deleteBusy.value = false;
   }
@@ -291,41 +380,48 @@ watch(
   () => props.channel,
   () => {
     replying.value = undefined;
-    deleting.value = undefined;
+    closeDelete();
   },
 );
-const input = ref<HTMLTextAreaElement>(),
+const input = ref<InstanceType<typeof ChatEditor>>(),
   list = ref<HTMLElement>(),
   loading = ref(false);
-let observer: ResizeObserver | undefined;
+const historyContent = ref<HTMLElement>();
+let followBottom = true;
+function updateScrollPosition() {
+  const el = list.value;
+  if (el && el.clientHeight && !loading.value)
+    followBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 3;
+}
+function scrollToBottom() {
+  if (followBottom && props.active && !loading.value && list.value)
+    list.value.scrollTop = list.value.scrollHeight;
+}
 useVisibleMentions(
   list,
   () => ({
     active: !!props.active,
-    ids: props.unreadMentions || [],
+    ids: [
+      ...new Set([
+        ...(props.unreadMentions || []),
+        ...(props.unreadMessage ? [props.unreadMessage] : []),
+      ]),
+    ],
     channel: props.channel,
     count: props.messages.length,
   }),
-  (ids) => emit('read-mentions', ids),
-);
-function resize() {
-  const el = input.value;
-  if (!el || !el.clientWidth) return;
-  el.style.height = '0px';
-  const max = 72;
-  el.style.height = Math.min(max, el.scrollHeight) + 'px';
-  el.style.overflowY = el.scrollHeight > max ? 'auto' : 'hidden';
-}
-watch(
-  () => props.modelValue,
-  () => nextTick(resize),
+  (ids) => {
+    if (props.unreadMessage && ids.includes(props.unreadMessage)) emit('read-messages', ids);
+    const mentions = ids.filter((id) => props.unreadMentions?.includes(id));
+    if (mentions.length) emit('read-mentions', mentions);
+  },
 );
 watch(
-  () => props.channel,
+  () => [props.channel, props.scrollRequest, props.active],
   async () => {
+    followBottom = true;
     await nextTick();
-    resize();
-    if (list.value) list.value.scrollTop = list.value.scrollHeight;
+    scrollToBottom();
   },
 );
 watch(
@@ -338,11 +434,12 @@ watch(
   },
 );
 onMounted(() => {
-  observer = new ResizeObserver(resize);
-  if (input.value) observer.observe(input.value);
-  resize();
+  const historyObserver = new ResizeObserver(scrollToBottom);
+  if (historyContent.value) historyObserver.observe(historyContent.value);
+  if (list.value) historyObserver.observe(list.value);
+  onBeforeUnmount(() => historyObserver.disconnect());
 });
-onBeforeUnmount(() => observer?.disconnect());
+
 async function older() {
   if (!list.value) return;
   const el = list.value,
@@ -356,14 +453,9 @@ async function older() {
 }
 async function insert(emoji: string) {
   const el = input.value;
-  const start = el?.selectionStart ?? props.modelValue.length,
-    end = el?.selectionEnd ?? start;
-  const value = props.modelValue.slice(0, start) + emoji + props.modelValue.slice(end);
-  if (value.length > 8000) return;
-  emit('update:modelValue', value);
-  await nextTick();
-  el?.focus();
-  el?.setSelectionRange(start + emoji.length, start + emoji.length);
+  if (!el) return;
+  const { start, end } = el.selection();
+  el.replace(start, end, emoji);
 }
 const mentionDrafts = new Map<string, { text: string; mentions: Mention[] }>();
 const mentionStart = ref(-1),
@@ -392,13 +484,14 @@ watch(
 );
 function findMention() {
   const el = input.value;
-  if (!el || el.selectionStart !== el.selectionEnd) {
+  const range = el?.selection();
+  if (!el || !range || range.start !== range.end) {
     mentionStart.value = -1;
     return;
   }
-  const prefix = el.value.slice(0, el.selectionStart),
+  const prefix = el.text().slice(0, range.start),
     match = prefix.match(/(?:^|\s)@([^@\n]{0,64})$/);
-  const start = match ? el.selectionStart - match[1]!.length - 1 : -1;
+  const start = match ? range.start - match[1]!.length - 1 : -1;
   if (start < 0 || currentMentions().some((m) => start >= m.start && start < m.end)) {
     mentionStart.value = -1;
     return;
@@ -407,15 +500,11 @@ function findMention() {
   mentionQuery.value = match![1]!;
   activeChoice.value = 0;
 }
-function updateText(e: Event) {
-  emit('update:modelValue', (e.target as HTMLTextAreaElement).value);
-  findMention();
-}
 async function selectMention(choice: MentionChoice) {
   const el = input.value,
     start = mentionStart.value;
   if (!el || start < 0) return;
-  const end = el.selectionStart,
+  const end = el.selection().start,
     tag = '@' + choice.label,
     value = props.modelValue.slice(0, start) + tag + ' ' + props.modelValue.slice(end);
   if (value.length > 8000) return;
@@ -429,11 +518,8 @@ async function selectMention(choice: MentionChoice) {
   });
   mentions.sort((a, b) => a.start - b.start);
   mentionDrafts.set(props.channel, { text: value, mentions });
-  emit('update:modelValue', value);
+  el.replace(start, end, tag + ' ');
   mentionStart.value = -1;
-  await nextTick();
-  el.focus();
-  el.setSelectionRange(start + tag.length + 1, start + tag.length + 1);
 }
 function keydown(e: KeyboardEvent) {
   if (e.isComposing || e.keyCode === 229) return;
@@ -461,11 +547,6 @@ function keydown(e: KeyboardEvent) {
       void selectMention(choices.value[activeChoice.value]!);
       return;
     }
-  }
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    mentionStart.value = -1;
-    void send();
   }
 }
 watch(
@@ -496,234 +577,287 @@ function time(value: number) {
     </div>
     <div
       ref="list"
+      @scroll.passive="updateScrollPosition"
       class="chat-messages"
       role="log"
       aria-label="Сообщения"
       aria-live="polite"
       aria-relevant="additions text"
     >
-      <button
-        v-if="hasMore"
-        class="text-button older-messages"
-        :disabled="loadingOlder"
-        @click="older"
-      >
-        {{ loadingOlder ? 'Загрузка…' : 'Показать предыдущие сообщения' }}
-      </button>
-      <article
-        v-for="message in messages"
-        :key="message.id"
-        class="chat-message"
-        :class="{ 'message-target': message.id === focusMessage }"
-        :data-message-id="message.id"
-        tabindex="0"
-        @contextmenu.prevent="emit('member-menu', message, $event)"
-      >
-        <span class="avatar small"
-          ><img
-            v-if="avatars?.[message.authorId]"
-            :src="avatars[message.authorId]"
-            alt=""
-          /><template v-else>{{ message.name?.slice(0, 2).toUpperCase() }}</template></span
+      <div ref="historyContent">
+        <button
+          v-if="hasMore"
+          class="text-button older-messages"
+          :disabled="loadingOlder"
+          @click="older"
         >
-        <div class="message-body">
-          <div class="message-meta">
-            <strong>{{ message.name }}</strong
-            ><time :datetime="new Date(message.createdAt).toISOString()">{{
-              time(message.createdAt)
-            }}</time
-            ><small v-if="message.editedAt" :title="time(message.editedAt)">изменено</small>
-          </div>
-          <div v-if="message.replyTo && !message.deleted" class="quoted-message">
-            <strong>{{ quote(message)?.name }}</strong
-            ><span>{{ quote(message)?.deleted ? 'Сообщение удалено' : quote(message)?.text }}</span>
-          </div>
-          <form v-if="editing?.id === message.id" class="message-edit" @submit.prevent="saveEdit">
-            <textarea
-              ref="editInput"
-              v-model="editText"
-              maxlength="8000"
-              aria-label="Редактировать сообщение"
-              :disabled="editBusy"
-              @keydown.esc.stop.prevent="editing = undefined"
-              @keydown.ctrl.enter.prevent="saveEdit"
-            />
-            <div>
-              <button class="soft-button" :disabled="editBusy" type="submit">Сохранить</button
-              ><button
-                class="text-button"
-                type="button"
+          {{ loadingOlder ? 'Загрузка…' : 'Показать предыдущие сообщения' }}
+        </button>
+        <article
+          v-for="message in messages"
+          :key="message.id"
+          class="chat-message"
+          :class="{ 'message-target': message.id === focusMessage }"
+          :data-message-id="message.id"
+          tabindex="0"
+          @contextmenu.prevent="emit('member-menu', message, $event)"
+        >
+          <span class="avatar small"
+            ><img
+              v-if="avatars?.[message.authorId]"
+              :src="avatars[message.authorId]"
+              alt=""
+            /><template v-else>{{ message.name?.slice(0, 2).toUpperCase() }}</template></span
+          >
+          <div class="message-body">
+            <div class="message-meta">
+              <strong>{{ message.name }}</strong
+              ><time :datetime="new Date(message.createdAt).toISOString()">{{
+                time(message.createdAt)
+              }}</time
+              ><small v-if="message.editedAt" :title="time(message.editedAt)">изменено</small>
+            </div>
+            <div v-if="message.replyTo && !message.deleted" class="quoted-message">
+              <strong>{{ quote(message)?.name }}</strong
+              ><span>{{
+                quote(message)?.deleted ? 'Сообщение удалено' : quote(message)?.text
+              }}</span>
+            </div>
+            <form v-if="editing?.id === message.id" class="message-edit" @submit.prevent="saveEdit">
+              <ChatEditor
+                ref="editInput"
+                editing
+                :draft="editDraft"
+                label="Редактировать сообщение"
                 :disabled="editBusy"
-                @click="editing = undefined"
-              >
-                Отмена</button
-              ><small>Ctrl + Enter — сохранить</small>
+                @change="editDraft = $event"
+                @cancel="editing = undefined"
+                @submit="saveEdit"
+              />
+              <div>
+                <button class="soft-button" :disabled="editBusy" type="submit">Сохранить</button
+                ><button
+                  class="text-button"
+                  type="button"
+                  :disabled="editBusy"
+                  @click="editing = undefined"
+                >
+                  Отмена</button
+                ><small>Ctrl + Enter — сохранить</small>
+              </div>
+              <small v-if="editError" role="alert">{{ editError }}</small>
+            </form>
+            <p v-else-if="message.deleted" class="deleted-message">Сообщение удалено</p>
+            <FormattedMessage
+              v-else
+              :text="message.text"
+              :format="message.format"
+              :mentions="message.mentions"
+              :self="members?.find((m) => m.id === selfId)"
+            />
+            <template v-if="!message.deleted && editing?.id !== message.id">
+              <LinkPreview
+                v-for="part in linkParts(message.text)
+                  .filter((part) => part.href?.startsWith('https://'))
+                  .slice(0, 1)"
+                :key="part.href"
+                :href="part.href!"
+                :source="part.text"
+                :message="message.id"
+                :channel="channel"
+                :request="request"
+              />
+            </template>
+            <div v-if="visualAttachments(message).length" class="message-attachments">
+              <AttachmentPreview
+                v-for="(file, index) in visualAttachments(message)"
+                :gallery="
+                  visualAttachments(message).map((f) => ({
+                    name: f.name,
+                    src: remoteServer() ? '' : '/api/session/media/' + encodeURIComponent(f.id),
+                    load: loadFile ? () => loadFile!(f) : undefined,
+                  }))
+                "
+                :gallery-index="index"
+                :compact="visualCount(message) > 1"
+                :key="file.id"
+                :src="remoteServer() ? '' : '/api/session/media/' + encodeURIComponent(file.id)"
+                :name="file.name"
+                :size="file.size"
+                :scanned="file.scanned"
+                :load="loadFile ? () => loadFile!(file) : undefined"
+                :downloading="downloading === file.id"
+                @download="
+                  download($event === undefined ? file : visualAttachments(message)[$event]!)
+                "
+              />
             </div>
-            <small v-if="editError" role="alert">{{ editError }}</small>
-          </form>
-          <p v-else :class="{ 'deleted-message': message.deleted }">
-            <template v-if="message.deleted">Сообщение удалено</template
-            ><template v-else
-              ><span
-                v-for="(part, i) in messageParts(
-                  message.text,
-                  message.mentions,
-                  members?.find((m) => m.id === selfId),
-                )"
-                :key="i"
-                :title="part.personal ? 'Упоминание для вас' : undefined"
-                :class="{ 'message-mention': part.mention, 'personal-mention': part.personal }"
-                ><template v-if="part.mention">{{ part.text }}</template
-                ><LinkedText v-else :text="part.text" /></span
-            ></template>
-          </p>
-          <div v-if="visualAttachments(message).length" class="message-attachments">
-            <AttachmentPreview
-              v-for="(file, index) in visualAttachments(message)"
-              :gallery="
-                visualAttachments(message).map((f) => ({
-                  name: f.name,
-                  src: remoteServer() ? '' : '/api/session/media/' + encodeURIComponent(f.id),
-                  load: loadFile ? () => loadFile!(f) : undefined,
-                }))
-              "
-              :gallery-index="index"
-              :compact="visualCount(message) > 1"
-              :key="file.id"
-              :src="remoteServer() ? '' : '/api/session/media/' + encodeURIComponent(file.id)"
-              :name="file.name"
-              :size="file.size"
-              :scanned="file.scanned"
-              :load="loadFile ? () => loadFile!(file) : undefined"
-              :downloading="downloading === file.id"
-              @download="
-                download($event === undefined ? file : visualAttachments(message)[$event]!)
-              "
-            />
-          </div>
-          <div v-if="otherAttachments(message).length" class="other-attachments">
-            <AttachmentPreview
-              v-for="file in otherAttachments(message)"
-              :key="file.id"
-              :src="remoteServer() ? '' : '/api/session/media/' + encodeURIComponent(file.id)"
-              :name="file.name"
-              :size="file.size"
-              :scanned="file.scanned"
-              :load="loadFile ? () => loadFile!(file) : undefined"
-              :downloading="downloading === file.id"
-              @download="download(file)"
-            />
-          </div>
-          <div v-if="Object.keys(message.reactions || {}).length" class="message-reactions">
-            <ReactionButton
-              v-for="(users, emoji) in message.reactions"
-              :key="emoji"
-              :emoji="emoji"
-              :users="users"
-              :members="members || []"
-              :self-id="selfId"
-              :disabled="!!mutedUntil || reactionBusy[message.id + emoji]"
-              @toggle="emit('react', message, emoji)"
-            />
-          </div>
-          <div v-if="!message.deleted" class="message-actions">
-            <EmojiPicker
-              v-if="!mutedUntil"
-              icon="reaction-solid"
-              label="Добавить реакцию"
-              @select="emit('react', message, $event)"
-            /><button
-              v-if="!mutedUntil && canWrite !== false"
-              type="button"
-              class="icon-button"
-              aria-label="Ответить на сообщение"
-              title="Ответить"
-              @click="reply(message)"
-            >
-              <AppIcon name="reply-solid" :size="18" /></button
-            ><button
-              v-if="editMessage && message.authorId === selfId && !mutedUntil && canWrite !== false"
-              class="icon-button"
-              type="button"
-              aria-label="Редактировать сообщение"
-              title="Редактировать"
-              @click="beginEdit(message)"
-            >
-              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path
-                  d="m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15v5Z"
-                  stroke="currentColor"
-                  stroke-width="1.5"
-                  stroke-linejoin="round"
-                />
-              </svg></button
-            ><button
-              v-if="canModerate || message.authorId === selfId"
-              type="button"
-              class="icon-button"
-              :aria-label="'Удалить сообщение от ' + message.name"
-              title="Удалить"
-              @click="deleting = message"
-            >
-              <AppIcon name="trash-solid" :size="18" />
-            </button>
-          </div>
-        </div>
-      </article>
-      <article
-        v-for="pending in (pendingMessages || []).filter(
-          (p) => !messages.some((m) => m.clientId === p.id),
-        )"
-        :key="pending.id"
-        class="chat-message pending-message"
-      >
-        <span class="avatar small"
-          ><img v-if="avatars?.[selfId]" :src="avatars[selfId]" alt="" /><template v-else>{{
-            members?.find((m) => m.id === selfId)?.name.slice(0, 2)
-          }}</template></span
-        >
-        <div class="message-body">
-          <div class="message-meta">
-            <strong>{{ members?.find((m) => m.id === selfId)?.name }}</strong
-            ><small>Видно только вам</small>
-          </div>
-          <p v-if="pending.text">{{ pending.text }}</p>
-          <div class="pending-files">
-            <div v-for="(file, index) in pending.files" :key="index" class="pending-file">
-              <AppIcon name="paperclip" :size="18" /><span
-                >{{ file.name }}<small>{{ fileSize(file.size) }}</small></span
-              >
+            <div v-if="otherAttachments(message).length" class="other-attachments">
+              <AttachmentPreview
+                v-for="file in otherAttachments(message)"
+                :key="file.id"
+                :src="remoteServer() ? '' : '/api/session/media/' + encodeURIComponent(file.id)"
+                :name="file.name"
+                :size="file.size"
+                :scanned="file.scanned"
+                :load="loadFile ? () => loadFile!(file) : undefined"
+                :downloading="downloading === file.id"
+                @download="download(file)"
+              />
             </div>
-          </div>
-          <div class="pending-status" role="status">
-            <span>{{
-              pending.status === 'failed'
-                ? 'Не отправлено'
-                : pending.status === 'checking'
-                  ? 'На проверке…'
-                  : 'Загрузка · ' + pending.progress + '%'
-            }}</span
-            ><template v-if="pending.status === 'failed'"
+            <div v-if="Object.keys(message.reactions || {}).length" class="message-reactions">
+              <ReactionButton
+                v-for="(users, emoji) in message.reactions"
+                :key="emoji"
+                :emoji="emoji"
+                :users="users"
+                :members="members || []"
+                :self-id="selfId"
+                :disabled="!!mutedUntil || reactionBusy[message.id + emoji]"
+                @toggle="emit('react', message, emoji)"
+              />
+            </div>
+            <div v-if="!message.deleted" class="message-actions">
+              <EmojiPicker
+                v-if="!mutedUntil"
+                icon="reaction-solid"
+                label="Добавить реакцию"
+                @select="emit('react', message, $event)"
+              /><button
+                v-if="!mutedUntil && canWrite !== false"
+                type="button"
+                class="icon-button"
+                aria-label="Ответить на сообщение"
+                title="Ответить"
+                @click="reply(message)"
+              >
+                <AppIcon name="reply-solid" :size="18" /></button
               ><button
-                class="text-button"
-                :disabled="sending || canWrite === false || !!mutedUntil"
-                @click="retryPending?.(pending)"
+                v-if="
+                  editMessage && message.authorId === selfId && !mutedUntil && canWrite !== false
+                "
+                class="icon-button"
+                type="button"
+                aria-label="Редактировать сообщение"
+                title="Редактировать"
+                @click="beginEdit(message)"
               >
-                Повторить</button
-              ><button class="text-button" @click="dismissPending?.(pending.id)">Убрать</button
-              ><small>{{ pending.error }}</small></template
-            >
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path
+                    d="m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15v5Z"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                    stroke-linejoin="round"
+                  />
+                </svg></button
+              ><button
+                v-if="canModerate || message.authorId === selfId"
+                type="button"
+                class="icon-button"
+                :aria-label="'Удалить сообщение от ' + message.name"
+                :aria-expanded="deleting?.id === message.id"
+                title="Удалить"
+                @click="toggleDelete(message, $event)"
+              >
+                <AppIcon name="trash-solid" :size="18" />
+              </button>
+            </div>
           </div>
-        </div>
-      </article>
+        </article>
+        <article
+          v-for="pending in (pendingMessages || []).filter(
+            (p) => !messages.some((m) => m.clientId === p.id),
+          )"
+          :key="pending.id"
+          class="chat-message pending-message"
+        >
+          <span class="avatar small"
+            ><img v-if="avatars?.[selfId]" :src="avatars[selfId]" alt="" /><template v-else>{{
+              members?.find((m) => m.id === selfId)?.name.slice(0, 2)
+            }}</template></span
+          >
+          <div class="message-body">
+            <div class="message-meta">
+              <strong>{{ members?.find((m) => m.id === selfId)?.name }}</strong
+              ><small>Видно только вам</small>
+            </div>
+            <FormattedMessage
+              v-if="pending.text"
+              :text="pending.text"
+              :format="pending.format"
+              :mentions="pending.mentions"
+            />
+            <div class="pending-files">
+              <div v-for="(file, index) in pending.files" :key="index" class="pending-file">
+                <AppIcon name="paperclip" :size="18" /><span
+                  >{{ file.name }}<small>{{ fileSize(file.size) }}</small></span
+                >
+              </div>
+            </div>
+            <div class="pending-status" role="status">
+              <span>{{
+                pending.status === 'failed'
+                  ? 'Не отправлено'
+                  : pending.status === 'checking'
+                    ? 'На проверке…'
+                    : 'Загрузка · ' + pending.progress + '%'
+              }}</span
+              ><template v-if="pending.status === 'failed'"
+                ><button
+                  class="text-button"
+                  :disabled="sending || canWrite === false || !!mutedUntil"
+                  @click="retryPending?.(pending)"
+                >
+                  Повторить</button
+                ><button class="text-button" @click="dismissPending?.(pending.id)">Убрать</button
+                ><small>{{ pending.error }}</small></template
+              >
+            </div>
+          </div>
+        </article>
+      </div>
     </div>
-    <div v-if="deleting" class="chat-delete-confirm" role="alert">
-      <span>Удалить это сообщение?</span
-      ><button class="danger-button" :disabled="deleteBusy" @click="confirmDelete">Удалить</button
-      ><button class="text-button" :disabled="deleteBusy" @click="deleting = undefined">
-        Отмена</button
-      ><span v-if="deleteError">{{ deleteError }}</span>
-    </div>
+    <Teleport to="body">
+      <div
+        v-if="deleting"
+        ref="deletePopover"
+        class="chat-delete-confirm"
+        :style="deletePosition"
+        role="group"
+        aria-label="Удаление сообщения"
+        tabindex="-1"
+      >
+        <button
+          type="button"
+          class="icon-button confirm-delete"
+          aria-label="Подтвердить удаление"
+          title="Удалить"
+          :disabled="deleteBusy"
+          @click="confirmDelete"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path
+              d="m5 12 4.5 4.5L19 7"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+        <button
+          type="button"
+          class="icon-button"
+          aria-label="Отменить удаление"
+          title="Отмена"
+          :disabled="deleteBusy"
+          @click="closeDelete(true)"
+        >
+          <AppIcon name="close" :size="16" />
+        </button>
+        <span v-if="deleteError" class="delete-error" role="alert">{{ deleteError }}</span>
+      </div>
+    </Teleport>
     <p v-if="canWrite === false" class="field-help" role="status">
       В этом канале могут писать только выбранные роли.
     </p>
@@ -805,29 +939,24 @@ function time(value: number) {
           @click="fileInput?.click()"
         >
           <AppIcon name="paperclip" :size="20" /></button
-        ><label class="sr-only" for="message-input">Сообщение</label
-        ><textarea
-          id="message-input"
+        ><label class="sr-only" for="message-input">Сообщение</label>
+        <ChatEditor
           ref="input"
+          :key="channel"
+          input-id="message-input"
+          label="Сообщение"
+          :draft="{ text: modelValue, format }"
           :disabled="canWrite === false || !!mutedUntil"
-          :value="modelValue"
-          maxlength="8000"
-          rows="1"
           :placeholder="canWrite === false ? 'Канал только для чтения' : 'Написать… @ — упомянуть'"
-          :aria-expanded="mentionStart >= 0"
-          aria-autocomplete="list"
-          :aria-controls="mentionStart >= 0 ? 'mention-options' : undefined"
-          :aria-activedescendant="
-            mentionStart >= 0 && choices.length ? 'mention-option-' + activeChoice : undefined
-          "
-          @input="updateText"
-          @click="findMention"
-          @keyup.left="findMention"
-          @keyup.right="findMention"
+          :expanded="mentionStart >= 0"
+          :option="choices.length ? 'mention-option-' + activeChoice : undefined"
+          @change="emit('draft-change', $event)"
+          @selection="findMention"
           @blur="mentionStart = -1"
-          @keydown="keydown"
-        ></textarea
-        ><span
+          @key="keydown"
+          @submit="send"
+        />
+        <span
           v-if="modelValue.length >= 7800"
           class="chat-character-count"
           :class="{ limit: modelValue.length >= 8000 }"
@@ -880,10 +1009,43 @@ function time(value: number) {
   font-style: italic;
 }
 .chat-delete-confirm {
+  position: fixed;
+  z-index: 200;
   display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
+  gap: 2px;
+  padding: 2px 3px;
+  border-radius: 10px;
+  background: #262626;
+  box-shadow: 0 4px 12px #0004;
+  outline: none;
+}
+.chat-delete-confirm button {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #b8b8b8;
+}
+.chat-delete-confirm button:hover {
+  background: #3b3b3b;
+}
+.chat-delete-confirm .confirm-delete {
+  color: #ff9797;
+}
+.chat-delete-confirm .confirm-delete:hover {
+  background: #482d30;
+}
+.delete-error {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  width: max-content;
+  max-width: min(280px, 85vw);
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: #262626;
+  color: #ffb0b0;
 }
 .message-actions {
   display: flex;
@@ -975,12 +1137,12 @@ function time(value: number) {
   box-shadow: none;
   border: 0;
 }
-.chat-compose textarea {
+.chat-compose .chat-editor {
   flex: 1;
   width: 0;
   min-height: 24px;
-  height: 24px;
-  max-height: 72px;
+  overflow-y: auto;
+  max-height: 5lh;
   line-height: 24px;
   padding: 0 6px;
   margin: 6px 0;
@@ -997,16 +1159,16 @@ function time(value: number) {
 .chat-compose:focus-within {
   background: #1c1c1c;
 }
-.chat-compose textarea::-webkit-scrollbar,
+.chat-compose .chat-editor::-webkit-scrollbar,
 .chat-messages::-webkit-scrollbar {
   width: 4px;
 }
-.chat-compose textarea::-webkit-scrollbar-thumb,
+.chat-compose .chat-editor::-webkit-scrollbar-thumb,
 .chat-messages::-webkit-scrollbar-thumb {
   border-radius: 4px;
   background: #555;
 }
-.chat-compose textarea::-webkit-scrollbar-button,
+.chat-compose .chat-editor::-webkit-scrollbar-button,
 .chat-messages::-webkit-scrollbar-button {
   display: none;
   width: 0;
@@ -1068,7 +1230,7 @@ function time(value: number) {
   }
 }
 @supports selector(::-webkit-scrollbar) {
-  .chat-compose textarea,
+  .chat-compose .chat-editor,
   .chat-messages {
     scrollbar-width: auto;
     scrollbar-color: auto;
@@ -1437,16 +1599,20 @@ function time(value: number) {
 .message-edit {
   margin: 10px 0;
 }
-.message-edit textarea {
+.message-edit .chat-editor {
   display: block;
   width: 100%;
   min-height: 90px;
   max-height: 300px;
+  overflow: auto;
+  background: var(--field, #202020);
+  border-radius: 8px;
+  padding: 8px 12px;
   resize: vertical;
   margin: 0 0 8px;
   line-height: 1.6;
 }
-.message-edit > div {
+.message-edit > div:not(.chat-editor) {
   display: flex;
   align-items: center;
   gap: 8px;

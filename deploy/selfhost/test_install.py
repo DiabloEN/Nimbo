@@ -93,7 +93,7 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn("NIMBO_CLAMD", env)
         self.assertNotIn("NIMBO_ANTIVIRUS_MANAGER", env)
         self.assertEqual(
-            compose["services"]["nimbo"]["volumes"], [host.bind("./storage/data", "/var/lib/nimbo")]
+            compose["services"]["nimbo"]["volumes"], [host.bind("./storage/data", "/var/lib/nimbo"),host.bind("./updates","/run/nimbo-updates",True),host.bind("./updates/requests","/run/nimbo-updates/requests"),host.bind("/etc/ssl/certs/ca-certificates.crt","/etc/ssl/certs/ca-certificates.crt",True)]
         )
 
     def test_memory_uses_smaller_daemon_capacity_not_free_memory(self):

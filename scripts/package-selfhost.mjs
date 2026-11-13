@@ -18,6 +18,8 @@ const web = join(root, 'web');
 const artifacts = join(root, 'artifacts', 'selfhost');
 mkdirSync(artifacts, { recursive: true });
 const work = mkdtempSync(join(artifacts, 'package-'));
+const version = process.env.NIMBO_SERVER_VERSION || 'development';
+if (!/^(?:development|(?:server-)?v[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}|web-[0-9.]+-[0-9]+)$/.test(version)) throw Error('Invalid server version');
 const source = join(work, 'source');
 const bundle = join(work, 'bundle');
 mkdirSync(source);
@@ -49,7 +51,7 @@ run(
     'build',
     '-buildvcs=false',
     '-trimpath',
-    '-ldflags=-s -w',
+    '-ldflags=-s -w -X main.serverVersion=' + version,
     '-o',
     join(bundle, 'nimbo-server'),
     '.',
@@ -65,7 +67,7 @@ run(
 );
 for (const name of [
   'install.py',
-  'host.py',
+  'host.py', 'server_update.py',
   'nimbo_cli.py',
   'not_found.py',
   '404.html',
@@ -84,6 +86,7 @@ cpSync(
   existsSync(exportNotice) ? exportNotice : join(root, 'THIRD_PARTY.md'),
   join(bundle, 'THIRD_PARTY.md'),
 );
+cpSync(join(root,'licenses','go-net.txt'),join(notices,'go-net.txt'));
 const dist = join(web, 'dist');
 for (const [from, to] of [
   ['assets/licenses.md', 'web-dependencies.md'],
@@ -121,7 +124,7 @@ run(
     '-C',
     bundle,
     'install.py',
-    'host.py',
+    'host.py', 'server_update.py',
     'nimbo_cli.py',
     'not_found.py',
     '404.html',

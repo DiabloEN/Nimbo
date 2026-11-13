@@ -14,6 +14,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import server_update
 import host
 import nimbo_cli
 import not_found
@@ -177,6 +178,7 @@ def configuration(a):
             f"LIVEKIT_API_SECRET={secret}",
             f"NIMBO_TEST_PASSWORD={secrets.token_urlsafe(32)}",
             "NIMBO_DATA_FILE=/var/lib/nimbo/workspace.json",
+            "NIMBO_UPDATE_DIR=/run/nimbo-updates",
             f"LIVEKIT_API_URL=http://127.0.0.1:{a.signal_port}",
             "",
         ]
@@ -327,7 +329,12 @@ def configuration(a):
         },
         "volumes": {"caddy_data": {}, "caddy_config": {}},
     }
-    compose["services"]["nimbo"]["volumes"] = [host.bind("./storage/data", "/var/lib/nimbo")]
+    compose["services"]["nimbo"]["volumes"] = [
+        host.bind("./storage/data", "/var/lib/nimbo"),
+        host.bind("./updates", "/run/nimbo-updates", True),
+        host.bind("./updates/requests", "/run/nimbo-updates/requests"),
+        host.bind("/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/certs/ca-certificates.crt", True),
+    ]
     compose["services"]["livekit"]["volumes"] = [
         "./private/livekit.yaml:/etc/livekit.yaml:ro",
         "./private/certificates:/certificates:ro",
@@ -466,7 +473,7 @@ def preflight(a, bundle):
     for command in ("fallocate", "mkfs.ext4", "systemctl", "systemd-escape"):
         if not shutil.which(command):
             raise ValueError(f"Missing host prerequisite: {command}")
-    for filename in ("nimbo-server", "nimbo", "host.py", "Dockerfile.binary", "SHA256SUMS"):
+    for filename in ("nimbo-server", "nimbo", "host.py", "Dockerfile.binary", "SHA256SUMS", "server_update.py"):
         if not (bundle / filename).is_file():
             raise ValueError(f"Missing release file: {filename}")
     expected = (bundle / "SHA256SUMS").read_text().split()[0]
@@ -533,7 +540,7 @@ def install(a, records):
     # silently hand their ports to a different instance.
     host.reserve(a, records)
     (root / "private").mkdir(mode=0o700)
-    for filename in ("nimbo-server", "nimbo", "host.py", "Dockerfile.binary", "SHA256SUMS"):
+    for filename in ("nimbo-server", "nimbo", "host.py", "Dockerfile.binary", "SHA256SUMS", "server_update.py"):
         shutil.copyfile(bundle / filename, root / filename)
     (root / "nimbo").chmod(0o700)
     (root / "nimbo-server").chmod(0o755)
@@ -583,6 +590,9 @@ def install(a, records):
     print(
         f"Prepared {root}. Public ports: TCP {a.https_port}, {a.rtc_tcp_port}; UDP {a.rtc_udp_port}, {a.turn_udp_port}."
     )
+    (root/"updates/requests").mkdir(parents=True)
+    (root/"updates").chmod(0o755)
+    os.chown(root/"updates/requests",65532,65532)
     if not a.prepare_only:
         host.firewall(a)
     else:

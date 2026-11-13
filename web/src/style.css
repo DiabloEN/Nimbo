@@ -957,7 +957,7 @@ strong {
   font-size: 10px;
   color: var(--quiet);
 }
-.chat-message p {
+.chat-message p, .chat-message .formatted-message :is(ul, ol) {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-size: 13px;
@@ -1859,7 +1859,7 @@ html {
 .effect-caption span {
   color: var(--muted);
 }
-.local-camera-preview {
+.mirrored-call-camera {
   transform: scaleX(-1);
 }
 .call-dock .dock-quality {
@@ -2825,6 +2825,21 @@ textarea:focus-visible {
   }
 }
 
+.text-channel-icon {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+.channel-unread-dot {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #81bc96;
+  box-shadow: 0 0 0 1px var(--panel, #101010);
+}
 .channel-mention {
   margin-left: auto;
   flex: none;

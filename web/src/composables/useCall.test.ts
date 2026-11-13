@@ -21,6 +21,8 @@ const sdk = vi.hoisted(() => {
       setCameraEnabled: vi.fn(
         async (_enabled: boolean, _options?: unknown) => undefined as unknown,
       ),
+      createScreenTracks: vi.fn(async () => [] as unknown[]),
+      publishTrack: vi.fn(async (_track: unknown) => ({})),
       setScreenShareEnabled: vi.fn(async () => undefined),
       getTrackPublication: vi.fn(() => undefined as { track: unknown } | undefined),
       unpublishTrack: vi.fn(async (_track: unknown, _stop: boolean) => undefined),
@@ -266,7 +268,7 @@ describe('useCall lifecycle and audio devices', () => {
     me.setMicrophoneEnabled.mockImplementation(async (enabled) => {
       me.isMicrophoneEnabled = enabled;
     });
-    me.setScreenShareEnabled.mockRejectedValue(new Error('Cancelled'));
+    me.createScreenTracks.mockRejectedValue(new Error('Cancelled'));
     await call.toggle('mic');
     await call.toggle('screen');
     await call.toggle('mic');
@@ -419,10 +421,10 @@ describe('useCall lifecycle and audio devices', () => {
     room.emit('LocalTrackPublished', { track: screenTrack }, room.localParticipant);
     expect(
       (cameraTrack.attach.mock.results[0]!.value as unknown as HTMLElement).className,
-    ).toContain('local-camera-preview');
+    ).toContain('mirrored-call-camera');
     expect(
       (screenTrack.attach.mock.results[0]!.value as unknown as HTMLElement).className || '',
-    ).not.toContain('local-camera-preview');
+    ).not.toContain('mirrored-call-camera');
     expect(call.videoTiles.value.map((t) => [t.participantId, t.source])).toEqual([
       ['local', 'camera'],
       ['local', 'screen'],
@@ -488,14 +490,28 @@ describe('useCall lifecycle and audio devices', () => {
     const { call } = create();
     await call.join(form);
     const capture = call.toggle('screen');
-    expect(sdk.MockRoom.instances[0]!.localParticipant.setScreenShareEnabled).toHaveBeenCalledWith(
-      true,
+    expect(sdk.MockRoom.instances[0]!.localParticipant.createScreenTracks).toHaveBeenCalledWith(
       expect.objectContaining({ audio: expect.objectContaining({ noiseSuppression: false }) }),
-      expect.objectContaining({ dtx: false }),
+
     );
     await capture;
   });
 
+  it.each([['monitor', false, false], ['monitor', true, false], ['window', undefined, false], ['browser', false, true]])(
+    'only publishes isolated audio for %s with restrictOwnAudio=%s', async (surface, restricted, expected) => {
+      vi.stubGlobal('navigator', { userAgent: 'Chrome/144.0', mediaDevices: { getDisplayMedia: vi.fn(), getSupportedConstraints: () => ({ restrictOwnAudio: true }) } });
+      const { call } = create();
+      await call.join(form);
+      const me = sdk.MockRoom.instances[0]!.localParticipant;
+      const video = { source: 'screen', mediaStreamTrack: { getSettings: () => ({ displaySurface: surface }) }, stop: vi.fn() };
+      const audio = { source: 'screen_audio', mediaStreamTrack: { getSettings: () => ({ restrictOwnAudio: restricted }) }, stop: vi.fn() };
+      me.createScreenTracks.mockResolvedValue([video, audio]);
+      await call.toggle('screen');
+      expect(me.publishTrack).toHaveBeenCalledWith(video);
+      expect(me.publishTrack.mock.calls.some(([track]) => track === audio)).toBe(expected);
+      expect(audio.stop).toHaveBeenCalledTimes(expected ? 0 : 1);
+    },
+  );
   it('restores local per-person gain across room identities without changing microphone volume', async () => {
     const values = new Map<string, string>();
     vi.stubGlobal('localStorage', {
@@ -514,6 +530,16 @@ describe('useCall lifecycle and audio devices', () => {
     room.emit('TrackSubscribed', track, {}, { identity: 'person.connection1', name: 'Remote' });
     call.setParticipantVolume('person.connection1', 160);
     expect(track.setVolume).toHaveBeenLastCalledWith(1.6);
+    const screen = { ...track, source: 'screen_audio', setVolume: vi.fn() };
+    const peer = { identity: 'person.connection1', name: 'Remote' };
+    room.emit('TrackSubscribed', screen, {}, peer);
+    call.toggleScreenPlayback(peer.identity);
+    call.setParticipantVolume(peer.identity, 80);
+    expect(track.setVolume).toHaveBeenLastCalledWith(0.8);
+    expect(screen.setVolume).toHaveBeenLastCalledWith(0);
+    call.toggleScreenPlayback(peer.identity);
+    expect(screen.setVolume).toHaveBeenLastCalledWith(0.8);
+    call.setParticipantVolume(peer.identity, 160);
     const second = create().call;
     expect(second.volumeFor('person.connection2')).toBe(160);
     expect(room.localParticipant.setMicrophoneEnabled).not.toHaveBeenCalled();
@@ -583,7 +609,7 @@ describe('useCall lifecycle and audio devices', () => {
   it('explains runtime screen capture rejection without ending the call', async () => {
     const { call } = create();
     await call.join(form);
-    sdk.MockRoom.instances[0]!.localParticipant.setScreenShareEnabled.mockRejectedValue(
+    sdk.MockRoom.instances[0]!.localParticipant.createScreenTracks.mockRejectedValue(
       Object.assign(new Error('secret URL'), { name: 'NotSupportedError' }),
     );
     await call.toggle('screen');

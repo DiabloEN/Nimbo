@@ -11,10 +11,12 @@ import (
 
 func (s *workspaceStore) editMessage(w http.ResponseWriter, r *http.Request, actor string) {
 	var req struct {
-		Channel      string        `json:"channel"`
-		Text         string        `json:"text"`
-		PreviousText *string       `json:"previousText"`
-		Mentions     []chatMention `json:"mentions"`
+		Channel        string        `json:"channel"`
+		Text           string        `json:"text"`
+		PreviousText   *string       `json:"previousText"`
+		Format         string        `json:"format"`
+		PreviousFormat string        `json:"previousFormat"`
+		Mentions       []chatMention `json:"mentions"`
 	}
 	if !decodeRequest(w, r, &req) {
 		return
@@ -24,7 +26,13 @@ func (s *workspaceStore) editMessage(w http.ResponseWriter, r *http.Request, act
 		req.Mentions[i].Start -= leading
 		req.Mentions[i].End -= leading
 	}
+	format, formatErr := messageFormat(req.Text, req.Format, leading)
+	if formatErr != nil {
+		report(w, formatErr)
+		return
+	}
 	req.Text = strings.TrimSpace(req.Text)
+	format = format[:min(len(format), len(utf16.Encode([]rune(req.Text))))]
 	if !utf8.ValidString(req.Text) || len(req.Text) > 32000 || utf8.RuneCountInString(req.Text) > 8000 || strings.IndexFunc(req.Text, func(r rune) bool { return unicode.IsControl(r) && r != '\n' && r != '\t' }) >= 0 {
 		reject(w, 400, "Сообщение: до 8000 символов")
 		return
@@ -52,7 +60,7 @@ func (s *workspaceStore) editMessage(w http.ResponseWriter, r *http.Request, act
 			if m.AuthorID != actor {
 				return fail(403, "Можно изменять только свои сообщения")
 			}
-			if req.PreviousText == nil || *req.PreviousText != m.Text {
+			if req.PreviousText == nil || *req.PreviousText != m.Text || req.PreviousFormat != m.Format {
 				return fail(409, "Сообщение уже изменилось. Откройте редактирование заново.")
 			}
 			if req.Text == "" && m.Attachment == nil && len(m.Attachments) == 0 {
@@ -62,7 +70,8 @@ func (s *workspaceStore) editMessage(w http.ResponseWriter, r *http.Request, act
 			if err != nil {
 				return err
 			}
-			if m.Text != req.Text {
+			if m.Text != req.Text || m.Format != format {
+				m.Format = format
 				m.Text = req.Text
 				m.Mentions = mentions
 				m.EditedAt = time.Now().UnixMilli()

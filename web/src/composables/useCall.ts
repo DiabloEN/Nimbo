@@ -1,6 +1,14 @@
 import { activeServer, apiFetch } from './serverConnection';
 import { computed, ref } from 'vue';
-import { Room, RoomEvent, Track, VideoPresets, AudioPresets, setLogLevel } from 'livekit-client';
+import {
+  ConnectionError,
+  ConnectionErrorReason,
+  Room,
+  RoomEvent,
+  Track,
+  VideoPresets,
+  setLogLevel,
+} from 'livekit-client';
 import type {
   Participant,
   LocalParticipant,
@@ -16,6 +24,7 @@ import {
   type SendQuality,
   type ReceiveQuality,
 } from './videoQuality';
+import { startScreenShare } from './shareScreen';
 import { useCameraEffects } from './useCameraEffects';
 
 import { audioDiagnostic } from './audioDiagnostics';
@@ -126,13 +135,26 @@ export function useCall(
   const audioOwners = new Map<MediaTrack, string>();
   const volumeKey = (id: string) => (id || '').split('.')[0]!;
   const volumeFor = (id: string) => volumes.value[volumeKey(id)] ?? 100;
+  const mutedScreens = ref(new Set<string>());
+  const audibleScreens = ref(new Set<string>());
+  function applyVolume(track: MediaTrack, owner: string) {
+    const muted = track.source === Track.Source.ScreenShareAudio && mutedScreens.value.has(owner);
+    (track as MediaTrack & { setVolume?: (n: number) => void }).setVolume?.(
+      muted ? 0 : volumeFor(owner) / 100,
+    );
+  }
+  function toggleScreenPlayback(owner: string) {
+    if (mutedScreens.value.has(owner)) mutedScreens.value.delete(owner);
+    else mutedScreens.value.add(owner);
+    for (const [track, id] of audioOwners)
+      if (id === owner && track.source === Track.Source.ScreenShareAudio) applyVolume(track, owner);
+  }
   function setParticipantVolume(id: string, value: number) {
     if (!Number.isFinite(value)) return;
     const amount = Math.max(0, Math.min(200, value));
     volumes.value[volumeKey(id)] = amount;
     for (const [track, owner] of audioOwners)
-      if (volumeKey(owner) === volumeKey(id))
-        (track as MediaTrack & { setVolume?: (n: number) => void }).setVolume?.(amount / 100);
+      if (volumeKey(owner) === volumeKey(id)) applyVolume(track, owner);
     try {
       localStorage.setItem('nimbo-participant-volumes', JSON.stringify(volumes.value));
     } catch {
@@ -307,7 +329,16 @@ export function useCall(
       : [];
   }
   function removeTrack(track: MediaTrack) {
+    const owner = audioOwners.get(track);
     audioOwners.delete(track);
+    if (
+      owner &&
+      track.source === Track.Source.ScreenShareAudio &&
+      ![...audioOwners].some(
+        ([other, id]) => id === owner && other.source === Track.Source.ScreenShareAudio,
+      )
+    )
+      audibleScreens.value.delete(owner);
     const item = attachments.get(track);
     if (item) {
       item.cleanup?.();
@@ -348,8 +379,8 @@ export function useCall(
       element.muted = local;
       container = document.createElement('figure');
       container.className = 'video-tile';
-      if (local && tile.source === 'camera')
-        element.className = (element.className || '') + ' local-camera-preview';
+      if (tile.source === 'camera')
+        element.className = (element.className || '') + ' mirrored-call-camera';
       const caption = document.createElement('figcaption');
       caption.textContent = participant.name || 'Гость';
       container.append(element, caption);
@@ -357,9 +388,9 @@ export function useCall(
     } else {
       media().audio?.append(element);
       audioOwners.set(track, participant.identity);
-      (track as MediaTrack & { setVolume?: (n: number) => void }).setVolume?.(
-        volumeFor(participant.identity) / 100,
-      );
+      if (track.source === Track.Source.ScreenShareAudio)
+        audibleScreens.value.add(participant.identity);
+      applyVolume(track, participant.identity);
     }
     attachments.set(track, {
       element,
@@ -393,6 +424,7 @@ export function useCall(
   }
   async function leave(message = 'Вы вышли из комнаты.') {
     audioDiagnostic('call-leave');
+    mutedScreens.value.clear();
     speakingMeter.stop();
     linkQuality.value = 'unknown';
     ++generation;
@@ -443,6 +475,7 @@ export function useCall(
     abortJoin = controller;
     const timeout = setTimeout(() => controller.abort(), 15000);
     let candidate: Room | undefined;
+    let connectingMedia = false;
     try {
       const origin = activeServer.value;
       const response = await apiFetch('/api/join', {
@@ -608,6 +641,8 @@ export function useCall(
         }
       });
       active.on(RoomEvent.Disconnected, () => {
+        // connect() rejects with the transport reason after emitting this event.
+        if (connectingMedia) return;
         if (room === active)
           void leave(
             joining.value
@@ -618,15 +653,18 @@ export function useCall(
       active.on(RoomEvent.AudioPlaybackStatusChanged, () => {
         if (room === active) needsAudio.value = !active.canPlaybackAudio;
       });
+      connectingMedia = true;
       await active.connect(invitation.url, invitation.token, {
         autoSubscribe: true,
         peerConnectionTimeout: 15000,
         websocketTimeout: 10000,
       });
+      connectingMedia = false;
       if (current !== generation) {
         await active.disconnect(true);
         return;
       }
+      sync();
       seedPeers();
       speakingMeter.start();
       qualityTimer = setInterval(() => {
@@ -678,11 +716,29 @@ export function useCall(
           ? 'Вы подключены. Выход звука не переключился — проверьте устройства в настройках.'
           : 'Вы в комнате.';
       void devices.refresh();
-    } catch {
+    } catch (error) {
       // SDK errors can contain token-bearing URLs; do not log them.
-      if (current === generation)
-        await leave('Не удалось подключиться. Проверьте доступность сервера и попробуйте снова.');
-      else if (candidate) await candidate.disconnect(true);
+      if (current === generation) {
+        let message = 'Не удалось подключиться. Попробуйте войти в комнату ещё раз.';
+        if (connectingMedia && error instanceof ConnectionError) {
+          switch (error.reason) {
+            case ConnectionErrorReason.NotAllowed:
+              message =
+                'Медиасервер отклонил вход. Войдите в комнату ещё раз, чтобы получить новый допуск.';
+              break;
+            case ConnectionErrorReason.Timeout:
+              message = 'Истекло время ожидания медиасоединения. Попробуйте войти ещё раз.';
+              break;
+            case ConnectionErrorReason.WebSocket:
+            case ConnectionErrorReason.ServiceNotFound:
+            case ConnectionErrorReason.ServerUnreachable:
+              message =
+                'Не удалось связаться с медиасервером. Проверьте подключение и повторите вход.';
+              break;
+          }
+        }
+        await leave(message);
+      } else if (candidate) await candidate.disconnect(true);
     } finally {
       clearTimeout(timeout);
       if (current === generation) {
@@ -724,14 +780,9 @@ export function useCall(
         );
       else {
         screenAudioNote.value = '';
-        publication = await participant.setScreenShareEnabled(
-          !participant.isScreenShareEnabled,
-          {
-            audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-            systemAudio: 'include',
-          },
-          { audioPreset: AudioPresets.musicHighQualityStereo, dtx: false },
-        );
+        publication = participant.isScreenShareEnabled
+          ? await participant.setScreenShareEnabled(false)
+          : await startScreenShare(participant, () => room === current);
       }
       // A permission dialog can finish after leave(). Release that late capture too.
       if (room !== current) {
@@ -758,7 +809,7 @@ export function useCall(
           !participant.getTrackPublication(Track.Source.ScreenShareAudio)?.track
         )
           screenAudioNote.value =
-            'Браузер передал экран без звука. Разрешите звук при следующем запуске демонстрации.';
+            'Экран передаётся без звука. Чтобы поделиться звуком, выберите отдельную вкладку со звуком в поддерживаемом браузере.';
       }
     } catch (error) {
       if (room === current) status.value = captureError(kind, error);
@@ -855,6 +906,9 @@ export function useCall(
     screenAudioAvailable,
     screenAudioNote,
     toggleScreenAudio,
+    mutedScreens,
+    audibleScreens,
+    toggleScreenPlayback,
     supportsScreen,
     screenUnavailable,
     sendQuality,

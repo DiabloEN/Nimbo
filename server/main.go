@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -128,7 +129,9 @@ func newWorkspaceHandler(c config, store *workspaceStore, presence *presenceServ
 	store.registerSessions(mux, c)
 	adminPassword, adminKey := os.Getenv("NIMBO_ADMIN_PASSWORD"), os.Getenv("NIMBO_ADMIN_PROFILE_KEY")
 	rate := &limiter{clients: map[string]attempt{}}
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { jsonReply(w, 200, map[string]string{"status": "ok"}) })
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		jsonReply(w, 200, map[string]string{"status": "ok", "version": serverVersion})
+	})
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
 		store.mu.Lock()
 		name := store.data.Name
@@ -337,12 +340,22 @@ func newWorkspaceHandler(c config, store *workspaceStore, presence *presenceServ
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(self), microphone=(self), display-capture=(self), speaker-selection=(self)")
-		w.Header().Set("Content-Security-Policy", fmt.Sprintf("default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self' https: wss: %s %s%s; media-src 'self' blob:; img-src 'self' data: blob:; worker-src 'self' blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'", c.MediaURL, mediaHTTP, localConnect))
+		w.Header().Set("Content-Security-Policy", fmt.Sprintf("default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self' https: wss: %s %s%s; media-src 'self' blob:; img-src 'self' data: blob:; worker-src 'self' blob:; object-src 'none'; frame-src https://www.youtube-nocookie.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'", c.MediaURL, mediaHTTP, localConnect))
+		if dir := os.Getenv("NIMBO_UPDATE_DIR"); dir != "" && strings.HasPrefix(r.URL.Path, "/api/") {
+			if _, err := os.Stat(filepath.Join(dir, "maintenance")); err == nil {
+				reject(w, 503, "Идёт установка обновления. Подождите несколько секунд.")
+				return
+			}
+		}
 		portableClients(c, mux).ServeHTTP(w, r)
 	})
 }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		fmt.Println(serverVersion)
+		return
+	}
 	if len(os.Args) > 1 && (os.Args[1] == "init" || os.Args[1] == "owner-code") {
 		if err := runBootstrapCommand(os.Args[1], os.Args[2:]); err != nil {
 			log.Fatal(err)

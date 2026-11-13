@@ -10,6 +10,7 @@ import sys
 import time
 import urllib.request
 import host
+import server_update
 
 ROOT = Path(__file__).resolve().parent
 
@@ -162,6 +163,7 @@ def main():
             healthy()
             antivirus_ready()
             network_check()
+            server_update.prepare(ROOT, settings["project"])
             if settings.get("managedCertificates"):
                 host.renewal_timer(ROOT, settings["project"])
             print("Enrollment is closed. When ready, run nimbo owner-code.")

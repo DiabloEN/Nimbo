@@ -45,6 +45,7 @@ export type VoicePerson = {
 export type VoicePresence = { since: number; people: VoicePerson[] };
 export type Attachment = { id: string; name: string; size: number; scanned: boolean };
 export type PendingMessage = {
+  format?: string;
   id: string;
   channel: string;
   text: string;
@@ -56,6 +57,7 @@ export type PendingMessage = {
   error: string;
 };
 export type Message = {
+  format?: string;
   editedAt?: number;
   attachment?: Attachment;
   attachments?: Attachment[];
@@ -129,6 +131,7 @@ export function useWorkspace(session: { value: string }, renewSession?: () => Pr
           text: string;
           replyTo: string;
           mentions: string;
+          format: string;
           key: string;
           files?: File[];
         }
@@ -386,6 +389,7 @@ export function useWorkspace(session: { value: string }, renewSession?: () => Pr
     mentions: Mention[] = [],
     files?: File[],
     retry?: PendingMessage,
+    format = '',
   ) {
     if (!canWrite.value || sending.value || (!text.trim() && !files?.length) || !textChannel.value)
       return false;
@@ -398,12 +402,14 @@ export function useWorkspace(session: { value: string }, renewSession?: () => Pr
         text,
         replyTo,
         mentions: JSON.stringify(mentions),
+        format,
         key: retry.id,
         files: files?.slice(),
       };
     if (
       draftAttempt?.channel !== channel ||
       draftAttempt?.text !== text ||
+      draftAttempt?.format !== format ||
       draftAttempt?.replyTo !== replyTo ||
       draftAttempt?.mentions !== JSON.stringify(mentions) ||
       draftAttempt?.files?.length !== files?.length ||
@@ -419,6 +425,7 @@ export function useWorkspace(session: { value: string }, renewSession?: () => Pr
         text,
         replyTo,
         mentions: JSON.stringify(mentions),
+        format,
         key,
         files: files?.slice(),
       };
@@ -433,6 +440,7 @@ export function useWorkspace(session: { value: string }, renewSession?: () => Pr
           text,
           replyTo,
           mentions: [...mentions],
+          format,
           files: [...files],
           status: 'uploading',
           progress: 0,
@@ -450,6 +458,7 @@ export function useWorkspace(session: { value: string }, renewSession?: () => Pr
         const body = new FormData();
         for (const file of files) body.append('file', file);
         body.set('text', text);
+        if (format) body.set('format', format);
         body.set('replyTo', replyTo);
         body.set('clientId', draftAttempt.key);
         body.set('mentions', JSON.stringify(mentions));
@@ -471,6 +480,7 @@ export function useWorkspace(session: { value: string }, renewSession?: () => Pr
           text,
           replyTo,
           mentions,
+          ...(format && { format }),
           clientId: draftAttempt.key,
         });
       if (current !== generation) return false;
@@ -504,20 +514,26 @@ export function useWorkspace(session: { value: string }, renewSession?: () => Pr
   }
   async function retryPending(p: PendingMessage) {
     if (p.channel !== textChannel.value || sending.value || p.status !== 'failed') return;
-    await send(p.text, p.replyTo, p.mentions, p.files, p);
+    await send(p.text, p.replyTo, p.mentions, p.files, p, p.format);
   }
   function dismissPending(id: string) {
     pendingMessages.value = pendingMessages.value.filter(
       (p) => p.id !== id || p.status !== 'failed',
     );
   }
-  async function editMessage(message: Message, text: string, mentions: Mention[]) {
+  async function editMessage(message: Message, text: string, mentions: Mention[], format = '') {
     const channel = textChannel.value,
       current = generation;
     const result: Message = await request(
       '/api/messages/' + encodeURIComponent(message.id),
       'PATCH',
-      { channel, text, mentions, previousText: message.text },
+      {
+        channel,
+        text,
+        mentions,
+        previousText: message.text,
+        ...((format || message.format) && { format, previousFormat: message.format || '' }),
+      },
     );
     if (current !== generation || channel !== textChannel.value) return;
     ++messageSequence;

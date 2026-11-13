@@ -203,6 +203,7 @@ func (s *workspaceStore) uploadFile(w http.ResponseWriter, r *http.Request, acto
 	}()
 	var text, clientID, replyTo string
 	var mentions []chatMention
+	var format string
 	var size int64
 	seen := map[string]bool{}
 	for {
@@ -254,9 +255,11 @@ func (s *workspaceStore) uploadFile(w http.ResponseWriter, r *http.Request, acto
 			}
 			pending[len(pending)-1].attachment.Size = n
 			size += n
-		case "text", "clientId", "replyTo", "mentions":
+		case "text", "clientId", "replyTo", "mentions", "format":
 			limit := int64(32000)
-			if name != "text" && name != "mentions" {
+			if name == "format" {
+				limit = 16000
+			} else if name != "text" && name != "mentions" {
 				limit = 256
 			}
 			b, e := io.ReadAll(io.LimitReader(part, limit+1))
@@ -272,6 +275,8 @@ func (s *workspaceStore) uploadFile(w http.ResponseWriter, r *http.Request, acto
 				}
 			case "text":
 				text = string(b)
+			case "format":
+				format = string(b)
 			case "clientId":
 				clientID = string(b)
 			case "replyTo":
@@ -285,6 +290,11 @@ func (s *workspaceStore) uploadFile(w http.ResponseWriter, r *http.Request, acto
 	}
 	if len(pending) == 0 || !validKey(clientID) || !utf8.ValidString(text) || utf8.RuneCountInString(text) > 8000 || strings.IndexFunc(text, func(r rune) bool { return unicode.IsControl(r) && r != '\n' && r != '\t' }) >= 0 {
 		reject(w, 400, "Некорректное сообщение с файлом")
+		return
+	}
+	format, formatErr := messageFormat(text, format, 0)
+	if formatErr != nil {
+		report(w, formatErr)
 		return
 	}
 	scanned := false
@@ -354,6 +364,7 @@ func (s *workspaceStore) uploadFile(w http.ResponseWriter, r *http.Request, acto
 		if err != nil {
 			return err
 		}
+		result.Format = format
 		result.Mentions = resolved
 		result.MentionUnread = replyRecipients(d, d.Messages[ch], actor, replyTo, recipients)
 		d.Messages[ch] = append(d.Messages[ch], result)

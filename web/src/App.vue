@@ -22,6 +22,7 @@ import EnrollmentPage from './components/EnrollmentPage.vue';
 import ServerSwitcher from './components/ServerSwitcher.vue';
 import FileSettings from './components/FileSettings.vue';
 import AntivirusSettings from './components/AntivirusSettings.vue';
+import ServerUpdates from './components/ServerUpdates.vue';
 import StorageSettings from './components/StorageSettings.vue';
 import HotkeySettings from './components/HotkeySettings.vue';
 import { useHotkeys, type Bindings } from './composables/useHotkeys';
@@ -35,9 +36,11 @@ import MemberMenu from './components/MemberMenu.vue';
 import PasswordInput from './components/PasswordInput.vue';
 import AppIcon from './components/AppIcon.vue';
 import { firstSidebarChannel } from './composables/firstChannel';
+import type { ChatDraft } from './composables/chatFormat';
 import ChatPanel from './components/ChatPanel.vue';
 import ChatNotificationToggle from './components/ChatNotificationToggle.vue';
 import { useMentionAlerts } from './composables/useMentionAlerts';
+import { useUnreadChannels } from './composables/useUnreadChannels';
 import type { Mention } from './composables/mentions';
 import WorkspaceSettings from './components/WorkspaceSettings.vue';
 import CallStage from './components/CallStage.vue';
@@ -258,6 +261,13 @@ const firstChannel = computed(() =>
   firstSidebarChannel(rooms.value, workspace.sectionOrder.value, workspace.sections.value),
 );
 const selectedId = ref('');
+const homeScrollRequest = ref(0);
+const { unread, markRead } = useUnreadChannels(
+  activeServer,
+  workspace.selfId,
+  workspace.ready,
+  workspace.chatActivity,
+);
 const selectedChannel = computed(() => rooms.value.find((r) => r.id === selectedId.value));
 const voiceRooms = computed(() => rooms.value.filter((r) => r.kind === 'voice'));
 const textRooms = computed(() => rooms.value.filter((r) => r.kind === 'text'));
@@ -366,16 +376,14 @@ const invitationUrl = computed(
   () => activeServer.value + '/?room=' + encodeURIComponent(selectedId.value),
 );
 const configController = new AbortController();
-const drafts = reactive<Record<string, string>>({}),
+const drafts = reactive<Record<string, ChatDraft>>({}),
   chatList = ref<HTMLElement | null>(null);
 const serverFileDrafts = reactive<Record<string, Record<string, File[]>>>({});
 const activeFileDrafts = computed(
   () => serverFileDrafts[activeServer.value] ?? (serverFileDrafts[activeServer.value] = {}),
 );
-const draft = computed({
-  get: () => drafts[activeServer.value + '|' + selectedId.value] || '',
-  set: (value: string) => (drafts[activeServer.value + '|' + selectedId.value] = value),
-});
+const draftKey = computed(() => activeServer.value + '|' + selectedId.value);
+const draft = computed(() => drafts[draftKey.value] || { text: '', format: '' });
 function initials(name: string) {
   return name.trim().slice(0, 2).toUpperCase() || 'Н';
 }
@@ -388,6 +396,7 @@ function openHome() {
   navigate('/room');
   if (!first) return;
   selectedId.value = first.id;
+  homeScrollRequest.value++;
   void workspace.selectText(first.kind === 'text' ? first.id : '');
 }
 const enrollmentPage = location.hash.startsWith('#/enroll/');
@@ -991,6 +1000,16 @@ watch(workspace.ready, async (ready) => {
 });
 let changingRoom = false;
 const pendingRoom = ref('');
+const showJoinProgress = ref(false);
+watch(
+  () => joining.value && !connected.value,
+  (waiting, _, onCleanup) => {
+    showJoinProgress.value = false;
+    if (!waiting) return;
+    const timer = setTimeout(() => (showJoinProgress.value = true), 500);
+    onCleanup(() => clearTimeout(timer));
+  },
+);
 function leaveRoom() {
   clearResume();
   reportVoice('left');
@@ -1046,7 +1065,7 @@ async function chooseRoom(id: string) {
   }
 }
 function peopleIn(id: string) {
-  if (!pendingRoom.value && connected.value && id === localVoiceRoom.value)
+  if (connected.value && id === localVoiceRoom.value)
     return participants.value.map((p) => ({ ...p, pending: false, reconnecting: false }));
   const others = (presenceAvailable.value ? presence.value[id]?.people || [] : [])
     .filter((p) => !call.isOwnConnection(activeServer.value, p.identity))
@@ -1111,9 +1130,16 @@ watch(selectedId, async () => {
 
 async function sendMessage(replyTo = '', mentions: Mention[] = [], files?: File[]) {
   const id = activeServer.value + '|' + selectedId.value,
-    text = draft.value;
-  const accepted = await workspace.send(text, replyTo, mentions, files);
-  if (accepted && drafts[id] === text) drafts[id] = '';
+    snapshot = draft.value;
+  const accepted = await workspace.send(
+    snapshot.text,
+    replyTo,
+    mentions,
+    files,
+    undefined,
+    snapshot.format,
+  );
+  if (accepted && drafts[id] === snapshot) delete drafts[id];
   return accepted;
 }
 function timeLabel(value: number) {
@@ -1485,7 +1511,7 @@ onBeforeUnmount(() => {
                     :key="person.identity"
                     :class="{
                       speaking: person.speaking,
-                      pending: person.pending,
+                      pending: person.pending && showJoinProgress,
                       reconnecting: person.reconnecting,
                     }"
                     @contextmenu.prevent="openVolume(person, $event)"
@@ -1497,7 +1523,7 @@ onBeforeUnmount(() => {
                       ></span
                     ><span
                       >{{ person.name }}{{ isOwnProfile(person) ? ' · вы' : ''
-                      }}<small v-if="person.pending">Подключение…</small
+                      }}<small v-if="person.pending && showJoinProgress">Подключение…</small
                       ><small v-else-if="person.reconnecting">Переподключается…</small></span
                     ><span class="person-media-hints"
                       ><AppIcon
@@ -1535,7 +1561,15 @@ onBeforeUnmount(() => {
                 :class="{ selected: selectedId === room.id }"
                 @click="chooseRoom(room.id)"
               >
-                <AppIcon :name="room.icon || 'hash'" :size="18" /><span>{{ room.name }}</span
+                <span class="text-channel-icon">
+                  <AppIcon :name="room.icon || 'hash'" :size="18" />
+                  <span
+                    v-if="unread.has(room.id)"
+                    class="channel-unread-dot"
+                    role="img"
+                    aria-label="Есть непрочитанные сообщения"
+                  ></span> </span
+                ><span>{{ room.name }}</span
                 ><small
                   v-if="workspace.notifications.value.some((n) => n.channel === room.id)"
                   class="channel-mention"
@@ -1627,7 +1661,9 @@ onBeforeUnmount(() => {
                 </article>
                 <button class="join-person" :disabled="joining" @click="chooseRoom(selectedId)">
                   <span class="avatar"><AppIcon name="plus" :size="24" /></span
-                  ><span>{{ joining ? 'Подключение…' : 'Присоединиться' }}</span>
+                  ><span>{{
+                    showJoinProgress && viewingCall ? 'Подключение…' : 'Присоединиться'
+                  }}</span>
                 </button>
               </div>
               <button
@@ -1639,13 +1675,18 @@ onBeforeUnmount(() => {
                 @click="chooseRoom(selectedId)"
               >
                 <strong>{{
-                  joining ? 'Подключаемся к разговору…' : 'Присоединяйтесь к разговору.'
+                  showJoinProgress && viewingCall
+                    ? 'Подключаемся к разговору…'
+                    : 'Присоединяйтесь к разговору.'
                 }}</strong>
               </button>
               <div v-show="connected && viewingCall">
                 <CallStage
                   :follow-remote-screen="foreignVoice"
                   @leave="leaveRoom"
+                  :muted-screens="call.mutedScreens.value"
+                  :audible-screens="call.audibleScreens.value"
+                  @toggle-screen-playback="call.toggleScreenPlayback"
                   :screen-audio="call.screenAudio.value"
                   :screen-audio-available="call.screenAudioAvailable.value"
                   :screen-audio-busy="!!call.pending.value"
@@ -1676,6 +1717,7 @@ onBeforeUnmount(() => {
             </section>
           </div>
           <ChatPanel
+            :scroll-request="homeScrollRequest"
             :file-drafts="activeFileDrafts"
             :key="activeServer"
             :pending-messages="
@@ -1693,11 +1735,17 @@ onBeforeUnmount(() => {
             :members="members"
             :roles="workspace.roles.value"
             :active="page === '/room' && isText"
+            :unread-message="
+              unread.has(selectedId) ? workspace.chatActivity.value[selectedId]?.id : undefined
+            "
+            @read-messages="markRead(selectedId, $event)"
             :unread-mentions="
               workspace.notifications.value.filter((n) => n.channel === selectedId).map((n) => n.id)
             "
             @read-mentions="workspace.readMentions"
-            v-model="draft"
+            :model-value="draft.text"
+            :format="draft.format"
+            @draft-change="drafts[draftKey] = $event"
             :messages="messages"
             :can-moderate="workspace.can('manage_chat')"
             :muted-until="workspace.chatMutedUntil.value"
@@ -1744,6 +1792,10 @@ onBeforeUnmount(() => {
                 v-if="section === 'general' && self?.role === 'owner'"
                 :request="workspace.mutate"
               /><AntivirusSettings
+                :key="activeServer"
+                v-if="section === 'general' && self?.role === 'owner'"
+                :request="workspace.request"
+              /><ServerUpdates
                 :key="activeServer"
                 v-if="section === 'general' && self?.role === 'owner'"
                 :request="workspace.request"
@@ -2026,7 +2078,9 @@ onBeforeUnmount(() => {
               :active="locked"
               :activity="pending"
               :message="
-                status && !/^(Вы в комнате|Связь восстановлена)/.test(status)
+                status &&
+                (!joining || showJoinProgress) &&
+                !/^(Вы в комнате|Связь восстановлена)/.test(status)
                   ? status
                   : qualityNote && (camera || screen)
                     ? qualityNote

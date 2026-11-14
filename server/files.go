@@ -103,6 +103,7 @@ func fileAccess(d *workspaceData, actor, ch string, write bool) error {
 }
 func (s *workspaceStore) registerFiles(handle func(string, func(http.ResponseWriter, *http.Request, string))) {
 	s.registerAntivirus(handle)
+	handle("POST /api/media-cache/sync", s.syncMediaCache)
 	handle("GET /api/channels/{id}/files", func(w http.ResponseWriter, r *http.Request, actor string) {
 		s.mu.Lock()
 		defer s.mu.Unlock()

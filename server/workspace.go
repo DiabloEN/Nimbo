@@ -85,10 +85,12 @@ type workspaceData struct {
 // One API process owns this store. A committed write replaces the complete file;
 // failed writes leave both the previous file and the in-memory state intact.
 type workspaceStore struct {
-	mu       sync.Mutex
-	path     string
-	ownerKey string
-	data     workspaceData
+	mediaRevision string
+	mediaChanged  chan struct{}
+	mu            sync.Mutex
+	path          string
+	ownerKey      string
+	data          workspaceData
 }
 type apiError struct {
 	code    int
@@ -194,6 +196,13 @@ func (s *workspaceStore) updateLocked(fn func(*workspaceData) error) error {
 	}
 	if err := s.persist(next); err != nil {
 		return err
+	}
+	if removedChatContent(&s.data, &next) {
+		s.mediaRevision = randomKey()
+		if s.mediaChanged != nil {
+			close(s.mediaChanged)
+			s.mediaChanged = nil
+		}
 	}
 	s.removeUnusedFiles(&s.data, &next)
 	s.data = next

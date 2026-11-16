@@ -1,0 +1,71 @@
+name: Release server and web client
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NIMBO_SERVER_VERSION: server-v0.5.${{ github.run_number }}
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - run: npm ci
+        working-directory: web
+      - run: npm test
+        working-directory: web
+      - run: go test ./...
+        working-directory: server
+      - run: python3 -m unittest discover -s deploy/selfhost
+      - run: node scripts/package-selfhost.mjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: server-package
+          path: artifacts/selfhost/package-*/nimbo-server-linux-amd64.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: server-package
+      - name: Publish the verified package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          asset=$(find . -type f -name nimbo-server-linux-amd64.tar.gz)
+          test -f "$asset"
+          state=$(gh release view "$NIMBO_SERVER_VERSION" --json isDraft --jq .isDraft 2>/dev/null || true)
+          if [[ "$state" == false ]]; then exit 0; fi
+          if [[ -z "$state" ]]; then
+            gh release create "$NIMBO_SERVER_VERSION" --draft --target "$GITHUB_SHA" \
+              --title "Nimbo. $NIMBO_SERVER_VERSION" --generate-notes
+          fi
+          gh release upload "$NIMBO_SERVER_VERSION" "$asset" --clobber
+          digest=$(sha256sum "$asset" | cut -d' ' -f1)
+          url=$(gh release view "$NIMBO_SERVER_VERSION" --json apiUrl --jq .apiUrl)
+          gh api "$url/assets" --jq '.[] | select(.name == "nimbo-server-linux-amd64.tar.gz") | .digest' | grep -Fx "sha256:$digest"
+          gh release edit "$NIMBO_SERVER_VERSION" --draft=false

@@ -188,6 +188,10 @@ def main():
                 with binary.open("rb") as stream:
                     digest = hashlib.file_digest(stream, "sha256").hexdigest()
                 inventory.write(f"{digest}  {binary.relative_to(stage).as_posix()}\n")
+        # Used only to discard a verified, unmodified backup after a successful update.
+        receipt = {p.relative_to(stage).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+                   for p in sorted(stage.rglob("*")) if p.is_file()}
+        (stage/"licenses/windows-files.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")
         out=dist/f"Nimbo-{VERSION}-Setup.exe"
         build_installer(args.nsis,work,stage,out)
         # The ZIP also permits a clean extracted-runtime test without an existing installation.

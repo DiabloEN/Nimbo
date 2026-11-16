@@ -19,6 +19,35 @@ $canRestart = $false
 function Start-Client {
     Start-Process -FilePath (Join-Path $target 'NimboDesktop.exe') -WorkingDirectory $target -ArgumentList ('--data-dir "' + $ProfileDir.TrimEnd('\') + '"') -PassThru
 }
+function Remove-PristineBackup {
+    $path=[IO.Path]::GetFullPath($backup)
+    if ([IO.Path]::GetDirectoryName($path) -ne $parentDir.FullName -or $path -ne "$originalTarget.previous-$id") { return }
+    $receipt=Join-Path $path 'licenses\windows-files.json'
+    if (!(Test-Path -LiteralPath $receipt -PathType Leaf)) { return }
+    $inventory=Get-Content -Raw -Encoding UTF8 -LiteralPath $receipt | ConvertFrom-Json
+    $dirs=@{}
+    foreach ($entry in $inventory.PSObject.Properties.Name) {
+        while ($entry.Contains('/')) { $entry=$entry.Substring(0,$entry.LastIndexOf('/')); $dirs[$entry]=$true }
+    }
+    $pending=New-Object 'System.Collections.Generic.Stack[string]'
+    $pending.Push($path)
+    while ($pending.Count) {
+        $folder=$pending.Pop()
+        if ((Get-Item -Force -LiteralPath $folder).Attributes -band [IO.FileAttributes]::ReparsePoint) { return }
+        foreach ($file in Get-ChildItem -Force -LiteralPath $folder) {
+            if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) { return }
+            $name=$file.FullName.Substring($path.Length+1).Replace('\','/')
+            if ($file.PSIsContainer) {
+                if (!$dirs.ContainsKey($name)) { return }
+                $pending.Push($file.FullName)
+            } elseif ($name -notin @('Uninstall.exe','licenses/windows-files.json')) {
+                $expected=$inventory.PSObject.Properties[$name]
+                if (!$expected -or (Get-FileHash -LiteralPath $file.FullName).Hash -ne $expected.Value) { return }
+            }
+        }
+    }
+    Remove-Item -LiteralPath $path -Recurse -Force
+}
 try {
     $exe = Join-Path $target 'NimboDesktop.exe'
     if (!(Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'The existing installation was not found.' }
@@ -36,29 +65,54 @@ try {
     }
     $installKey = 'HKCU:\Software\Nimbo\DesktopPreview'
     $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\NimboDesktopPreview'
-    $installed = (Get-ItemProperty -LiteralPath $installKey -ErrorAction SilentlyContinue).InstallDir -eq $target -and
-                 (Test-Path -LiteralPath (Join-Path $target 'Uninstall.exe') -PathType Leaf)
+    # Setup installs an uninstaller; the Portable ZIP never contains it. Update the
+    # launched installation in place even when this shell cannot see its registration.
+    $installed = Test-Path -LiteralPath (Join-Path $target 'Uninstall.exe') -PathType Leaf
+    $registeredDir = (Get-ItemProperty -LiteralPath $installKey -ErrorAction SilentlyContinue).InstallDir
+    $registeredHere = $registeredDir -and ([IO.Path]::GetFullPath($registeredDir).TrimEnd('\') -eq $target)
+    $installed = $installed -or $registeredHere
+    $newExe = Join-Path $stage 'NimboDesktop.exe'
+    if ([Diagnostics.FileVersionInfo]::GetVersionInfo($newExe).FileVersion -ne $Version) {
+        throw 'The executable version does not match the requested release.'
+    }
+    $expectedExeHash = (Get-FileHash -LiteralPath $newExe -Algorithm SHA256).Hash
     if ($installed) {
         $profilePath = [IO.Path]::GetFullPath($ProfileDir).TrimEnd('\')
         if ($profilePath.StartsWith($target+'\',[StringComparison]::OrdinalIgnoreCase) -or $profilePath -eq $target) {
             throw 'The profile is inside the installation. Update manually to keep it in place.'
         }
-        Copy-Item -LiteralPath (Join-Path $target 'Uninstall.exe') -Destination $stage
+        $uninstaller = Join-Path $target 'Uninstall.exe'
+        if (!(Test-Path -LiteralPath $uninstaller -PathType Leaf)) { $uninstaller = Join-Path $stage 'uninstall-update.bin' }
+        Copy-Item -LiteralPath $uninstaller -Destination (Join-Path $stage 'Uninstall.exe')
         [IO.Directory]::Move($target,$backup)
         $oldMoved = $true
     } else {
         # Keep the previous portable directory and any personal files in their original location.
         $target = Join-Path $parentDir.FullName "Nimbo-Desktop-$Version-portable"
-        if (Test-Path -LiteralPath $target) { throw 'The destination version already exists. Open it or move it before updating.' }
+        if (Test-Path -LiteralPath $target) {
+            # The existing directory may contain personal files or a different build.
+            $target = "$target-$id"
+        }
     }
     [IO.Directory]::Move($stage,$target)
     $newInstalled = $true
     $client = Start-Client
     if ($client.WaitForExit(5000)) { throw 'The updated client exited during startup.' }
-    if ($installed) {
+    $runningExe = $client.MainModule.FileName
+    if ($runningExe -ne (Join-Path $target 'NimboDesktop.exe') -or
+        (Get-FileHash -LiteralPath $runningExe -Algorithm SHA256).Hash -ne $expectedExeHash) {
+        $null = $client.CloseMainWindow()
+        if (!$client.WaitForExit(5000)) { throw 'The new client could not be verified or closed.' }
+        throw 'The running executable does not match the downloaded release.'
+    }
+    if ($installed -and $registeredHere) {
         Set-ItemProperty -LiteralPath $uninstallKey -Name DisplayVersion -Value $Version -ErrorAction SilentlyContinue
     }
     Remove-Item -LiteralPath $archive -ErrorAction SilentlyContinue
+    if ($oldMoved) {
+        # Cleanup failure must never roll back a running, verified new release.
+        try { Remove-PristineBackup } catch { Write-Warning $_.Exception.Message }
+    }
 } catch {
     $reason = $_.Exception.Message
     if ($newInstalled) { [IO.Directory]::Move($target,$stage) }

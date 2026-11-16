@@ -8,7 +8,7 @@ $base=(Resolve-Path -LiteralPath (Join-Path $root 'artifacts/native-desktop')).P
 $work=Join-Path $base ('update-test-'+[guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $work | Out-Null
 try {
-    foreach($mode in @('portable','installed')){
+    foreach($mode in @('portable','occupied-portable','installed','installed-no-registry','registered-no-uninstaller')){
         $run=New-Item -ItemType Directory -Path (Join-Path $work $mode)
         $old=Join-Path $run.FullName 'previous-client'
         Copy-Item -LiteralPath $source -Destination $old -Recurse
@@ -22,14 +22,25 @@ try {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'update-desktop.ps1') -Destination $helper
         $destination=Join-Path $run.FullName ("Nimbo-Desktop-"+$manifest.version+"-portable")
         $registration=@{}
-        if($mode -eq 'installed'){
+        $occupied = $destination
+        if($mode -in @('occupied-portable','installed-no-registry')){
+            $null=New-Item -ItemType Directory -Path $occupied
+            [IO.File]::WriteAllText((Join-Path $occupied 'keep.txt'),'personal')
+        }
+        if($mode -in @('installed','installed-no-registry','registered-no-uninstaller')){
             $destination=$old
-            [IO.File]::WriteAllText((Join-Path $old 'Uninstall.exe'),'QA uninstaller marker')
+            if($mode -ne 'registered-no-uninstaller'){[IO.File]::WriteAllText((Join-Path $old 'Uninstall.exe'),'QA uninstaller marker')}
+            $receipt=@{}
+            foreach($file in Get-ChildItem -Recurse -File -LiteralPath $old){
+                $receipt[$file.FullName.Substring($old.Length+1).Replace('\','/')]=(Get-FileHash -LiteralPath $file.FullName).Hash
+            }
+            $receipt | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $old 'licenses/windows-files.json') -Encoding UTF8
+            if($mode -eq 'installed-no-registry'){[IO.File]::WriteAllText((Join-Path $old 'personal.txt'),'keep')}
         }
         # Exercise both installation layouts without editing the user's Windows registration.
         function Get-ItemProperty {param($LiteralPath,$ErrorAction)
             if($LiteralPath -ne 'HKCU:\Software\Nimbo\DesktopPreview'){throw 'Unexpected registry read'}
-            if($mode -eq 'installed'){@{InstallDir=$old}}
+            if($mode -in @('installed','registered-no-uninstaller')){@{InstallDir=$old}}
         }
         function Set-ItemProperty {param($LiteralPath,$Name,$Value,$ErrorAction)
             if($Name -ne 'DisplayVersion' -or !$LiteralPath.EndsWith('\Uninstall\NimboDesktopPreview')){throw 'Unexpected registry write'}
@@ -42,6 +53,14 @@ try {
             $library=Join-Path $profile.FullName 'profiles.dpapi'
             $libraryBefore=(Get-FileHash -LiteralPath $library).Hash
             & $helper -InstallDir $old -ProfileDir $profile.FullName -ParentId $previous.Id -Version $manifest.version -Digest $manifest.sha256
+            if($mode -in @('occupied-portable','installed-no-registry')){
+                if([IO.File]::ReadAllText((Join-Path $occupied 'keep.txt')) -ne 'personal'){throw 'Occupied directory changed'}
+            }
+            if($mode -eq 'occupied-portable'){
+                $alternate=@(Get-ChildItem -LiteralPath $run.FullName -Directory | Where-Object Name -like "Nimbo-Desktop-*-portable-*")
+                if($alternate.Count -ne 1){throw 'Expected exactly one fresh portable directory'}
+                $destination=$alternate[0].FullName
+            }
             $expected=(Join-Path $destination 'NimboDesktop.exe')
             $running=@(Get-Process -Name NimboDesktop -ErrorAction SilentlyContinue | Where-Object Path -eq $expected)
             if($running.Count -ne 1){throw "Expected exactly one updated client in $destination"}
@@ -49,6 +68,10 @@ try {
             if((Get-FileHash -LiteralPath $profileState).Hash -ne $before){throw 'Profile changed during update'}
             if((Get-FileHash -LiteralPath $library).Hash -ne $libraryBefore){throw 'Profile library changed during update'}
             if($mode -eq 'installed' -and ($registration.DisplayVersion -ne $manifest.version -or !(Test-Path -LiteralPath (Join-Path $destination 'Uninstall.exe')))){throw 'Installed registration or uninstaller missing'}
+            $backups=@(Get-ChildItem -Directory -LiteralPath $run.FullName -Filter 'previous-client.previous-*')
+            if($mode -eq 'installed-no-registry'){
+                if($backups.Count -ne 1 -or [IO.File]::ReadAllText((Join-Path $backups[0].FullName 'personal.txt')) -ne 'keep'){throw 'Custom files were lost'}
+            }elseif($backups.Count){throw 'Verified temporary backup remained'}
             Write-Output "$mode verified: new executable running, profile preserved"
         } finally {
             if(!$previous.HasExited){$previous.Kill();$previous.WaitForExit()}

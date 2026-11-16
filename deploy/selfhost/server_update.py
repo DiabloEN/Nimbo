@@ -131,6 +131,7 @@ class Instance:
         self.pending = self.share/"requests/install"
         self.cache = root/"private/update-cache.json"
         self.journal = root/"private/update-transaction.json"
+        self.rollback_file = root/"private/previous-release.json"
         self.gate = self.share/"maintenance"
         self.config = read_json(root/"installation.json")
         self.composefile = root/self.config.get("composeFile","compose.json")
@@ -145,9 +146,17 @@ class Instance:
         call("docker","compose","--project-directory",str(self.root),"-f",str(self.composefile),*args)
 
     def status(self, phase, detail="", install=False):
+        previous = self.previous_release()
         write_json(self.share/"status.json", {"phase":phase,"detail":detail,"installed":self.current,
                    "available":self.release["tag"] if self.release else "", "canInstall":install,
+                   "previous":previous["previous"] if previous else "",
                    "checkedAt":self.checked_at}, 0o644)
+
+    def previous_release(self):
+        record = read_json(self.rollback_file)
+        if record and record["installed"] == self.current and Path(record["binary"]).is_file():
+            return record
+        return None
 
     def running_version(self):
         with urllib.request.urlopen(self.health,timeout=3) as response:
@@ -183,6 +192,8 @@ class Instance:
         atomic(self.root/"nimbo-server",(backup/"nimbo-server").read_bytes(),0o755)
         self.compose("up","-d","--no-deps","--no-build","nimbo")
         self.ready(tx["previous"])
+        if "rollbackBefore" in tx:
+            self.set_previous(tx["rollbackBefore"])
         self.finish()
         self.current=tx["previous"]
         self.status("restored")
@@ -192,8 +203,16 @@ class Instance:
         self.journal.unlink(missing_ok=True)
         self.gate.unlink(missing_ok=True)
 
-    def install(self, stage):
-        expected=self.release["tag"]
+    def set_previous(self, record):
+        if record:
+            write_json(self.rollback_file, record)
+        else:
+            self.rollback_file.unlink(missing_ok=True)
+
+    def install(self, stage, expected=None):
+        rolling_back = expected is not None
+        if not rolling_back:
+            expected = self.release["tag"]
         image=self.config["project"]+"-api:update-"+expected
         # The trusted host supplies the Dockerfile; the release supplies a single binary.
         build=stage/"image"; build.mkdir()
@@ -208,7 +227,8 @@ class Instance:
         for name in ("nimbo-server",self.composefile.name):
             shutil.copy2(self.root/name,backup/name)
         if not self.compose_format_json: shutil.copy2(self.root/".env",backup/".env")
-        tx=dict(backup=str(backup),snapshot=False,previous=self.current)
+        tx=dict(backup=str(backup),snapshot=False,previous=self.current,
+                rollbackBefore=read_json(self.rollback_file))
         write_json(self.journal,tx)
         atomic(self.gate,b"1",0o644)
         try:
@@ -231,12 +251,15 @@ class Instance:
             if self.compose_format_json: write_json(self.composefile,config)
             self.compose("up","-d","--no-deps","--no-build","nimbo")
             self.ready(expected)
+            prior = backup/"nimbo-server"
+            self.set_previous(None if rolling_back else dict(installed=expected, previous=self.current,
+                              binary=str(prior), sha256=hashlib.sha256(prior.read_bytes()).hexdigest()))
         except Exception:
             self.restore(tx)
             return
         self.finish()
         self.current=expected
-        self.status("current")
+        self.status("restored" if rolling_back else "current")
 
     def tick(self):
         if self.journal.exists():
@@ -247,6 +270,27 @@ class Instance:
         cached=read_json(self.cache,{})
         self.checked_at = int(cached.get("time", 0))
         self.release = cached.get("release")
+        if requested:
+            fd=os.open(self.pending,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+            with os.fdopen(fd,"rb") as f:
+                if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                    raise ValueError("Invalid update request")
+                tag=f.read(96).decode("ascii")
+            if tag.startswith("rollback:"):
+                record = self.previous_release()
+                if not record or tag != "rollback:"+record["previous"]:
+                    self.pending.unlink()
+                    self.status("error","Предыдущая версия больше недоступна.")
+                    return
+                with tempfile.TemporaryDirectory(dir=self.root/"private") as work:
+                    stage = Path(work)
+                    binary = stage/"nimbo-server"
+                    shutil.copy2(record["binary"], binary)
+                    if hashlib.sha256(binary.read_bytes()).hexdigest() != record["sha256"]:
+                        raise ValueError("Previous binary digest mismatch")
+                    binary.chmod(0o555)
+                    self.install(stage, record["previous"])
+                return
         check = self.share / "requests/check"
         retry_due = time.time() >= cached.get("retryAfter", 0)
         if check.exists() or (retry_due and time.time() - self.checked_at > 21600):
@@ -268,11 +312,6 @@ class Instance:
         can=bool(release and release["trusted"] and (version(self.current) is None or version(self.current)<version(release["tag"])))
         if requested:
             # The only writable container input is an opaque tag, never a URL, executable or path.
-            fd=os.open(self.pending,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
-            with os.fdopen(fd,"rb") as f:
-                if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-                    raise ValueError("Invalid update request")
-                tag=f.read(96).decode("ascii")
             if not can or tag!=release["tag"]:
                 self.pending.unlink(); self.status("error","Выбранный релиз больше недоступен."); return
             if find_release()!=release:

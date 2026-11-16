@@ -377,7 +377,7 @@ def configuration(a):
                 host.bind("./storage/antivirus-db", "/var/lib/clamav"),
                 "./antivirus/run:/run/nimbo-antivirus",
             ],
-            "tmpfs": ["/tmp:size=128m,mode=1777"],
+            "tmpfs": ["/tmp:size=384m,mode=1777"],
             "mem_limit": "3g",
             "memswap_limit": "3g",
             "cpus": round(a.cpus * 0.25, 4),

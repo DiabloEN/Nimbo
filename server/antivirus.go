@@ -91,7 +91,7 @@ func (s *workspaceStore) registerAntivirus(handle func(string, func(http.Respons
 		}
 		s.mu.Unlock()
 		version, err := antivirusVersion(r.Context())
-		data := map[string]any{"enabled": enabled, "name": "ClamAV", "configured": os.Getenv("NIMBO_CLAMD_ADDRESS") != "", "available": err == nil, "version": version, "updateConfigured": os.Getenv("NIMBO_ANTIVIRUS_MANAGER_SOCKET") != ""}
+		data := map[string]any{"enabled": enabled, "scanLimitBytes": scanLimit, "name": "ClamAV", "configured": os.Getenv("NIMBO_CLAMD_ADDRESS") != "", "available": err == nil, "version": version, "updateConfigured": os.Getenv("NIMBO_ANTIVIRUS_MANAGER_SOCKET") != ""}
 		if updater, e := antivirusManager(r.Context(), "GET"); e == nil {
 			data["updater"] = updater
 		}

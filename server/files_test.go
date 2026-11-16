@@ -15,6 +15,8 @@ import (
 	"testing"
 )
 
+const maxFileBytes = 20 * mib // Fixture boundary, independent of the production default.
+
 func fileRequest(t *testing.T, h http.Handler, token, name, content, client string) *httptest.ResponseRecorder {
 	t.Helper()
 	var b bytes.Buffer
@@ -43,6 +45,7 @@ func TestFileUploadAuthorizationQuotaAndDeletion(t *testing.T) {
 	if e = s.assignOwner(owner.ID, false); e != nil {
 		t.Fatal(e)
 	}
+	s.data.Files = map[string]filePolicy{"general": {Enabled: false, Scan: true}}
 	endpoint := "/api/channels/general/files"
 	mustStatus(t, fileRequest(t, h, token, "a.txt", "hello", randomKey()), 403)
 	mustStatus(t, apiCall(h, "PATCH", endpoint, token, filePolicy{Enabled: true}), 403)
@@ -74,6 +77,7 @@ func TestFileUploadAuthorizationQuotaAndDeletion(t *testing.T) {
 	if w.Header().Get("Content-Type") != "application/octet-stream" || !strings.HasPrefix(w.Header().Get("Content-Disposition"), "attachment;") || w.Header().Get("X-Content-Type-Options") != "nosniff" {
 		t.Fatal("unsafe download headers")
 	}
+	s.data.Storage.LimitBytes = 25 * mib
 	mustStatus(t, fileRequest(t, h, token, "big.bin", strings.Repeat("a", int(maxFileBytes+1)), randomKey()), 413)
 	// The exact advertised boundary is accepted and participates in storage accounting.
 	w = fileRequest(t, h, token, "boundary.bin", strings.Repeat("b", int(maxFileBytes)), randomKey())
@@ -145,5 +149,36 @@ func TestFileScanOnlyAcceptsExplicitCleanVerdict(t *testing.T) {
 	t.Setenv("NIMBO_CLAMD_ADDRESS", "192.0.2.1:3310")
 	if scanFile(context.Background(), path) == nil {
 		t.Fatal("accepted remote scanner")
+	}
+}
+
+func TestStorageFileLimitAndLegacyClient(t *testing.T) {
+	s, err := openWorkspace(filepath.Join(t.TempDir(), "workspace.json"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newWorkspaceHandler(testConfig(), s, nil)
+	owner, token, _ := appLogin(t, h, "Owner", "")
+	if err = s.assignOwner(owner.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	s.data.FilesByDefault = false // Workspace created before global attachment settings.
+	if policyForFiles(&s.data, "general").Enabled {
+		t.Fatal("legacy channel enabled before the owner saved")
+	}
+	const quota = 100 * mib
+	for _, limit := range []int64{0, 80*mib + 1} {
+		mustStatus(t, apiCall(h, "PATCH", "/api/storage", token, map[string]int64{"limitBytes": quota, "maxFileBytes": limit}), 400)
+	}
+	if s.data.Storage.MaxFileBytes != 0 {
+		t.Fatal("invalid settings were persisted")
+	}
+	mustStatus(t, apiCall(h, "PATCH", "/api/storage", token, map[string]int64{"limitBytes": quota, "maxFileBytes": 80 * mib}), 200)
+	if !policyForFiles(&s.data, "general").Enabled {
+		t.Fatal("global settings did not enable the channel")
+	}
+	mustStatus(t, apiCall(h, "PATCH", "/api/storage", token, map[string]int64{"limitBytes": 2 * quota}), 200)
+	if s.policyFor(&s.data).MaxFileBytes != 80*mib {
+		t.Fatal("quota-only client lost the per-file limit")
 	}
 }

@@ -115,11 +115,6 @@ watch(
 async function attachFiles(files: File[]) {
   if (!writingAllowed() || !files.length || !props.active || props.mutedUntil || props.sending)
     return;
-  const error = fileSelectionError([...attached.value, ...files]);
-  if (error) {
-    fileError.value = error;
-    return;
-  }
   const channel = props.channel,
     version = ++policyVersion;
   fileError.value = '';
@@ -135,12 +130,11 @@ async function attachFiles(files: File[]) {
     )
       return;
     if (!result.policy.enabled) {
-      fileError.value =
-        'Файлы в этом канале выключены. Владелец может включить их в настройках каналов.';
+      fileError.value = 'Вложения в этом канале выключены владельцем.';
       return;
     }
     const combined = [...(fileDrafts.value[channel] || []), ...files];
-    const error = fileSelectionError(combined);
+    const error = fileSelectionError(combined, result.maxBytes, result.maxBatchBytes);
     if (error) {
       fileError.value = error;
       return;
@@ -573,7 +567,7 @@ function time(value: number) {
   <section ref="panel" class="chat-panel" aria-label="Текстовый чат">
     <div v-if="dragging" class="file-drop-overlay">
       <AppIcon name="paperclip" :size="28" /><strong>Прикрепить файл</strong
-      ><span>До 10 файлов · всего до 20 МБ · отправятся вместе с сообщением</span>
+      ><span>До 10 файлов · отправятся вместе с сообщением</span>
     </div>
     <div
       ref="list"
@@ -674,6 +668,7 @@ function time(value: number) {
                 :gallery="
                   visualAttachments(message).map((f) => ({
                     name: f.name,
+                    size: f.size,
                     src: remoteServer() ? '' : '/api/session/media/' + encodeURIComponent(f.id),
                     load: loadFile ? () => loadFile!(f) : undefined,
                   }))
@@ -934,8 +929,8 @@ function time(value: number) {
           type="button"
           class="icon-button"
           :disabled="canWrite === false || !!mutedUntil || sending"
-          aria-label="Прикрепить файл до 20 МБ"
-          title="Прикрепить файл до 20 МБ"
+          aria-label="Прикрепить файл"
+          title="Прикрепить файл"
           @click="fileInput?.click()"
         >
           <AppIcon name="paperclip" :size="20" /></button

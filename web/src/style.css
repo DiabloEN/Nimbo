@@ -12,6 +12,7 @@
   --muted: #a0a0a0;
   --quiet: #737373;
   --text: #ededed;
+  --compact-control-height: 38px;
 }
 * {
   box-sizing: border-box;
@@ -957,7 +958,8 @@ strong {
   font-size: 10px;
   color: var(--quiet);
 }
-.chat-message p, .chat-message .formatted-message :is(ul, ol) {
+.chat-message p,
+.chat-message .formatted-message :is(ul, ol) {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-size: 13px;
@@ -1639,11 +1641,12 @@ strong {
 }
 .app-select > button {
   width: 100%;
-  min-height: 45px;
+  height: var(--compact-control-height);
+  align-items: center;
   display: flex;
   justify-content: space-between;
   gap: 18px;
-  padding: 14px 17px;
+  padding: 0 17px;
   text-align: left;
   background: var(--raised);
   border-radius: 10px;
@@ -3009,8 +3012,16 @@ textarea:focus-visible {
   padding-right: var(--room-gutter);
 }
 
+.general-settings {
+  --settings-accent: #66aaf0;
+}
 .general-settings > .storage-settings {
   margin-top: 32px;
+}
+.general-settings > .antivirus-settings,
+.general-settings > .server-updates {
+  margin-top: 32px;
+  min-height: 0;
 }
 
 .channel-label {
@@ -3089,27 +3100,10 @@ textarea:focus-visible {
 }
 
 .audio-lab {
-  border: 1px solid #303030;
-  border-radius: 12px;
-  padding: 16px;
-  margin: 20px 0;
+  margin: 24px 0;
 }
-.audio-lab legend,
-.audio-diagnostics summary {
-  font-size: 12px;
-  color: #999;
-}
-.audio-lab label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.audio-lab input[type='checkbox'] {
-  width: auto;
-  margin: 0;
-}
-.audio-diagnostics {
-  margin: 16px 0;
+.audio-lab h3 {
+  margin: 0 0 12px;
 }
 
 /* Chat calls stay in the header; composer keeps the full available width. */

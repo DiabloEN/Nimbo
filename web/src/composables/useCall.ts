@@ -28,7 +28,6 @@ import {
 import { startScreenShare } from './shareScreen';
 import { useCameraEffects } from './useCameraEffects';
 
-import { audioDiagnostic } from './audioDiagnostics';
 import { createSpeakingMeter } from './speakingMeter';
 import joinSound from '../assets/sounds/voice-join.wav';
 import leaveSound from '../assets/sounds/voice-leave.wav';
@@ -63,7 +62,7 @@ const screenUnavailable =
 type Devices = {
   runInput?: <T>(op: () => Promise<T>) => Promise<T | undefined>;
   applyCaptureOptions?: () => Promise<void>;
-  auditInput?: (event?: string) => Promise<void>;
+  refreshActualInput?: () => void;
   captureOptions?: () => {
     echoCancellation: boolean;
     noiseSuppression: boolean;
@@ -508,7 +507,6 @@ export function useCall(
     });
   }
   async function leave(message = 'Вы вышли из комнаты.') {
-    audioDiagnostic('call-leave');
     mutedScreens.value.clear();
     speakingMeter.stop();
     linkQuality.value = 'unknown';
@@ -790,7 +788,7 @@ export function useCall(
             const result = await active.localParticipant.setMicrophoneEnabled(true, micOptions());
             if (current === generation) {
               await devices.applyCaptureOptions?.();
-              await devices.auditInput?.('join-microphone');
+              devices.refreshActualInput?.();
             }
             return result;
           });
@@ -863,7 +861,7 @@ export function useCall(
           );
           if (room === current) {
             await devices.applyCaptureOptions?.();
-            await devices.auditInput?.('toggle-microphone');
+            devices.refreshActualInput?.();
           }
           return result;
         });

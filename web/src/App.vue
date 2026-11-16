@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SoftButton from './components/SoftButton.vue';
 import {
   computed,
   defineAsyncComponent,
@@ -20,7 +21,6 @@ import {
 } from './composables/serverConnection';
 import EnrollmentPage from './components/EnrollmentPage.vue';
 import ServerSwitcher from './components/ServerSwitcher.vue';
-import FileSettings from './components/FileSettings.vue';
 import AntivirusSettings from './components/AntivirusSettings.vue';
 import ServerUpdates from './components/ServerUpdates.vue';
 import StorageSettings from './components/StorageSettings.vue';
@@ -49,7 +49,6 @@ const AudioLabPanel =
   import.meta.env.VITE_AUDIO_LAB !== '0'
     ? defineAsyncComponent(() => import('./components/AudioLabPanel.vue'))
     : null;
-import { downloadAudioDiagnostics } from './composables/audioDiagnostics';
 import AudioTests from './components/AudioTests.vue';
 import ProfilePanel from './components/ProfilePanel.vue';
 import SessionRecovery from './components/SessionRecovery.vue';
@@ -335,7 +334,7 @@ const hotkeys = useHotkeys(workspace.selfId, (id) => {
     return;
   }
   if (id === 'settings') {
-    navigate('/settings/audio');
+    navigate('/settings/general');
     return;
   }
   if (!connected.value || pending.value || joining.value) return;
@@ -1595,7 +1594,7 @@ onBeforeUnmount(() => {
             class="icon-button"
             aria-label="Настройки"
             title="Настройки"
-            @click="navigate('/settings/audio')"
+            @click="navigate('/settings/general')"
           >
             <AppIcon name="settings" :size="19" />
           </button>
@@ -1818,26 +1817,17 @@ onBeforeUnmount(() => {
                 :options="outputOptions"
                 :disabled="!supportsOutput || busy || joining"
                 @update:model-value="devices.selectOutput"
-              /><button
-                class="text-button refresh-devices"
+              /><SoftButton
+                class="refresh-devices"
                 :disabled="busy || joining"
                 @click="devices.refresh(true)"
               >
                 {{ busy ? 'Проверяем устройства…' : 'Обновить список устройств' }}
-              </button>
+              </SoftButton>
               <p v-if="note" class="field-help" role="status">{{ note }}</p>
               <p v-if="locked" class="field-help">
                 Фактический источник: {{ devices.actualInput.value }}
               </p>
-              <details class="audio-diagnostics">
-                <summary>Диагностика устройств</summary>
-                <p class="field-help">
-                  Последние переключения в этой вкладке. Без записи звука и отправки на сервер.
-                </p>
-                <button class="text-button" @click="downloadAudioDiagnostics">
-                  Скачать журнал
-                </button>
-              </details>
               <AudioLabPanel
                 v-if="AudioLabPanel"
                 :devices="devices"
@@ -1947,12 +1937,6 @@ onBeforeUnmount(() => {
               :self="self"
               :owner-exists="ownerExists"
               :mutate="workspace.mutate"
-            />
-            <FileSettings
-              :key="activeServer"
-              v-if="section === 'channels' && self?.role === 'owner'"
-              :channels="rooms"
-              :request="workspace.request"
             />
           </div>
         </div>

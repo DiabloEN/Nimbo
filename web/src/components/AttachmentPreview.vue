@@ -5,7 +5,7 @@ import AudioAttachment from './AudioAttachment.vue';
 import { attachmentMedia, validMediaHeader } from '../composables/attachmentMedia';
 const props = defineProps<{
   name: string;
-  gallery?: { name: string; src: string; load?: () => Promise<Blob> }[];
+  gallery?: { size?: number; name: string; src: string; load?: () => Promise<Blob> }[];
   galleryIndex?: number;
   src?: string;
   compact?: boolean;
@@ -58,6 +58,7 @@ watch([expanded, viewIndex], async () => {
       name: props.name,
       src: url.value,
       load: props.load,
+      size: props.size,
     };
   if (item.src) {
     viewSource.value = item.src;
@@ -68,6 +69,7 @@ watch([expanded, viewIndex], async () => {
     return;
   }
   try {
+    if ((item.size ?? 0) > 20 * 1024 ** 2) throw Error();
     const blob = await item.load?.();
     if (run !== viewGeneration) return;
     if (!blob || blob.size > 20 * 1024 * 1024 || !(await validMediaHeader(blob, item.name)))
@@ -148,6 +150,7 @@ async function prepare() {
     return;
   }
   try {
+    if ((props.size ?? props.file?.size ?? 0) > 20 * 1024 ** 2) throw Error();
     const blob = props.file || (await props.load?.());
     if (version !== generation || !blob) return;
     if (blob.size > 20 * 1024 * 1024 || !(await validMediaHeader(blob, props.name))) throw Error();
@@ -325,6 +328,9 @@ function failed() {
         </button>
         <p v-if="error" class="field-help">{{ error }}</p>
       </template>
+      <small v-if="(size ?? 0) > 80 * 1024 ** 2 && !scanned && media && !error" class="field-help"
+        >Без проверки антивирусом</small
+      >
     </template>
   </div>
   <Teleport to="body"

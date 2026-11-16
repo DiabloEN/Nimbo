@@ -86,6 +86,7 @@ func TestBatchFilesAtomicRetryPersistenceAndDeletion(t *testing.T) {
 		t.Fatal(e)
 	}
 	mustStatus(t, apiCall(h, "PATCH", "/api/channels/general/files", token, filePolicy{Enabled: true}), 200)
+	s.data.Storage.LimitBytes = 25 * mib // 20 MiB per batch.
 	client := randomKey()
 	w := batchFileRequest(t, h, token, client, []string{"first", "second"})
 	mustStatus(t, w, 200)

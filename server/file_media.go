@@ -73,7 +73,7 @@ func (s *workspaceStore) registerFileMedia(mux *http.ServeMux, c config) {
 		}
 		defer f.Close()
 		info, err := f.Stat()
-		if err != nil || info.Size() > maxFileBytes || info.Size() <= 0 {
+		if err != nil || info.Size() <= 0 {
 			reject(w, 415, "Предпросмотр недоступен")
 			return
 		}
@@ -91,7 +91,7 @@ func (s *workspaceStore) registerFileMedia(mux *http.ServeMux, c config) {
 		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Cache-Control", "private, no-store")
-		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(120 * time.Second))
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Hour))
 		http.ServeContent(w, r, found.Name, time.Time{}, f)
 	})
 }

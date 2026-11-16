@@ -1,6 +1,6 @@
 import { activeServer, apiURL, serverFetch } from './serverConnection';
 import { computed, ref } from 'vue';
-import { uploadForm } from './uploadForm';
+import { uploadForm, TRANSFER_TIMEOUT_MS } from './uploadForm';
 import { canWriteChannel } from './channelPosting';
 import { permitted } from './roles';
 import type { Mention, MentionNotice } from './mentions';
@@ -156,8 +156,8 @@ export function useWorkspace(session: { value: string }, renewSession?: () => Pr
             body,
             session.value,
             signal
-              ? AbortSignal.any([signal, AbortSignal.timeout(240000)])
-              : AbortSignal.timeout(240000),
+              ? AbortSignal.any([signal, AbortSignal.timeout(TRANSFER_TIMEOUT_MS)])
+              : AbortSignal.timeout(TRANSFER_TIMEOUT_MS),
             progress,
           );
         return await serverFetch(origin, path, {
@@ -171,9 +171,9 @@ export function useWorkspace(session: { value: string }, renewSession?: () => Pr
           signal: signal
             ? AbortSignal.any([
                 signal,
-                AbortSignal.timeout(body instanceof FormData ? 240000 : 10000),
+                AbortSignal.timeout(body instanceof FormData ? TRANSFER_TIMEOUT_MS : 10000),
               ])
-            : AbortSignal.timeout(body instanceof FormData ? 240000 : 10000),
+            : AbortSignal.timeout(body instanceof FormData ? TRANSFER_TIMEOUT_MS : 10000),
         });
       } catch {
         throw new Error('Сервер не отвечает. Пробуем восстановить соединение…');
@@ -621,7 +621,7 @@ export function useWorkspace(session: { value: string }, renewSession?: () => Pr
         headers: { Authorization: 'Bearer ' + session.value },
         signal: AbortSignal.any([
           controller?.signal || new AbortController().signal,
-          AbortSignal.timeout(120000),
+          AbortSignal.timeout(TRANSFER_TIMEOUT_MS),
         ]),
       });
     };

@@ -22,8 +22,8 @@ async function select(value: string) {
 }
 </script>
 <template>
-  <fieldset class="audio-lab">
-    <legend>Обработка микрофона · эксперимент</legend>
+  <div class="audio-lab">
+    <h3>Обработка микрофона</h3>
     <label for="noise-engine">Шумоподавление</label>
     <AppSelect
       id="noise-engine"
@@ -33,8 +33,5 @@ async function select(value: string) {
       :disabled="disabled"
       @update:model-value="select"
     />
-    <p class="field-help">
-      Сравните режимы через «Проверить микрофон». Обработка выполняется на вашем устройстве.
-    </p>
-  </fieldset>
+  </div>
 </template>

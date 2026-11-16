@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount } from 'vue';
 import AppIcon from './AppIcon.vue';
+import SoftButton from './SoftButton.vue';
 import {
   hotkeyActions,
   modifierKey,
@@ -135,11 +136,12 @@ onBeforeUnmount(() => {
         </button>
       </li>
     </ul>
-    <p class="field-help">
-      Нажмите любую клавишу, сочетание или боковую кнопку мыши. Отдельные Ctrl, Alt и Shift
-      назначаются при отпускании. Крестик убирает назначение.
-    </p>
     <p v-if="hint || note" class="form-error" role="alert">{{ hint || note }}</p>
-    <button class="soft-button" @click="reset">Вернуть стандартные</button>
+    <SoftButton class="hotkey-reset" @click="reset">Вернуть стандартные</SoftButton>
   </section>
 </template>
+<style scoped>
+.hotkey-reset {
+  margin-block-start: 16px;
+}
+</style>

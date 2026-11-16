@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SoftButton from './SoftButton.vue';
 import { ref, watch, onBeforeUnmount } from 'vue';
 import type { LocalNoiseEngine } from '../composables/audioLab';
 const props = defineProps<{
@@ -158,16 +159,11 @@ onBeforeUnmount(stop);
 <template>
   <div class="audio-tests">
     <div class="button-row">
-      <button
-        type="button"
-        class="soft-button"
-        :disabled="inCall || mode === 'sound'"
-        @click="start('mic')"
-      >
-        {{ mode === 'mic' ? 'Остановить проверку' : 'Проверить микрофон' }}</button
-      ><button type="button" class="soft-button" :disabled="mode === 'mic'" @click="start('sound')">
+      <SoftButton :disabled="inCall || mode === 'sound'" @click="start('mic')">
+        {{ mode === 'mic' ? 'Остановить проверку' : 'Проверить микрофон' }}</SoftButton
+      ><SoftButton :disabled="mode === 'mic'" @click="start('sound')">
         {{ mode === 'sound' ? 'Остановить звук' : 'Проверить звук' }}
-      </button>
+      </SoftButton>
     </div>
     <progress
       v-if="mode === 'mic'"
@@ -178,7 +174,6 @@ onBeforeUnmount(stop);
     <p v-if="inCall" class="field-help">
       Для прослушивания своего микрофона выйдите из голосовой комнаты.
     </p>
-    <p v-else class="field-help">Микрофон лучше проверять в наушниках.</p>
     <p v-if="note" class="field-help" role="status">{{ note }}</p>
   </div>
 </template>

@@ -17,6 +17,7 @@ var releaseTag = regexp.MustCompile(`^(server-)?v[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1
 type updateStatus struct {
 	Installed  string `json:"installed"`
 	Available  string `json:"available"`
+	Previous   string `json:"previous,omitempty"`
 	Phase      string `json:"phase"`
 	Detail     string `json:"detail,omitempty"`
 	CanInstall bool   `json:"canInstall"`
@@ -41,6 +42,9 @@ func (s *workspaceStore) registerServerUpdates(handle func(string, func(http.Res
 			if err != nil || json.Unmarshal(raw, &state) != nil {
 				reject(w, 503, "Служба обновлений пока недоступна")
 				return
+			}
+			if state.Installed != serverVersion {
+				state.Previous = ""
 			}
 			state.Installed = serverVersion
 			if marker, err := os.Stat(checkPath); err == nil {
@@ -78,14 +82,23 @@ func (s *workspaceStore) registerServerUpdates(handle func(string, func(http.Res
 				state.Phase, state.CanInstall, state.Detail = "checking", false, ""
 			}
 		}
-		if r.Method == "POST" && r.URL.Path == "/api/server-update" {
+		rollback := r.URL.Path == "/api/server-update/rollback"
+		if r.Method == "POST" && (r.URL.Path == "/api/server-update" || rollback) {
 			var request struct {
 				Tag string `json:"tag"`
 			}
 			if !decodeRequest(w, r, &request) {
 				return
 			}
-			if !state.CanInstall || !releaseTag.MatchString(request.Tag) || request.Tag != state.Available {
+			choice := request.Tag
+			if rollback {
+				if dir == "" || state.Previous == "" || request.Tag != state.Previous ||
+					state.Phase == "installing" || state.Phase == "queued" || state.Phase == "checking" || state.Phase == "waiting" {
+					reject(w, 409, "Предыдущая версия сейчас недоступна")
+					return
+				}
+				choice = "rollback:" + state.Previous
+			} else if !state.CanInstall || !releaseTag.MatchString(request.Tag) || request.Tag != state.Available {
 				reject(w, 409, "Обновите сведения о релизе")
 				return
 			}
@@ -97,7 +110,7 @@ func (s *workspaceStore) registerServerUpdates(handle func(string, func(http.Res
 				return
 			}
 			defer os.Remove(tmp.Name())
-			_, err = tmp.WriteString(request.Tag)
+			_, err = tmp.WriteString(choice)
 			closeErr := tmp.Close()
 			if err == nil && closeErr == nil {
 				err = os.Link(tmp.Name(), filepath.Join(inbox, "install"))
@@ -119,4 +132,5 @@ func (s *workspaceStore) registerServerUpdates(handle func(string, func(http.Res
 	handle("GET /api/server-update", serve)
 	handle("POST /api/server-update", serve)
 	handle("POST /api/server-update/check", serve)
+	handle("POST /api/server-update/rollback", serve)
 }

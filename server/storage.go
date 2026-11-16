@@ -11,8 +11,14 @@ import (
 const mib = int64(1024 * 1024)
 
 type storagePolicy struct {
-	LimitBytes  int64 `json:"limitBytes"`
-	AutoCleanup bool  `json:"autoCleanup"`
+	LimitBytes   int64 `json:"limitBytes"`
+	MaxFileBytes int64 `json:"maxFileBytes,omitempty"`
+	AutoCleanup  bool  `json:"autoCleanup"`
+}
+
+// Keep a single upload below the 90% history-cleanup threshold.
+func maxUploadBytes(quota int64) int64 {
+	return min(1536*mib, quota*8/10/mib*mib)
 }
 
 func (s *workspaceStore) policyFor(d *workspaceData) storagePolicy {
@@ -23,6 +29,10 @@ func (s *workspaceStore) policyFor(d *workspaceData) storagePolicy {
 		} else {
 			p.LimitBytes = 256 * mib
 		}
+	}
+	cap := maxUploadBytes(p.LimitBytes)
+	if p.MaxFileBytes <= 0 || p.MaxFileBytes > cap {
+		p.MaxFileBytes = cap
 	}
 	p.AutoCleanup = true
 	return p
@@ -142,12 +152,25 @@ func (s *workspaceStore) storageStatus(w http.ResponseWriter, r *http.Request, a
 	if err == nil && s.path != "" {
 		disk = map[string]uint64{"freeBytes": free, "totalBytes": total}
 	}
-	jsonReply(w, 200, map[string]any{"policy": s.policyFor(&s.data), "usedBytes": dataSize(&s.data), "breakdown": storageBreakdown(&s.data), "messages": count, "disk": disk})
+	legacyDisabled := false
+	if s.data.Storage.MaxFileBytes == 0 {
+		for _, ch := range s.data.Channels {
+			if ch.Kind == "text" && !policyForFiles(&s.data, ch.ID).Enabled {
+				legacyDisabled = true
+				break
+			}
+		}
+	}
+	jsonReply(w, 200, map[string]any{"legacyDisabledFiles": legacyDisabled, "policy": s.policyFor(&s.data), "usedBytes": dataSize(&s.data), "breakdown": storageBreakdown(&s.data), "messages": count, "disk": disk})
 }
 func (s *workspaceStore) registerStorage(handle func(string, func(http.ResponseWriter, *http.Request, string))) {
 	handle("GET /api/storage", s.storageStatus)
 	handle("PATCH /api/storage", func(w http.ResponseWriter, r *http.Request, actor string) {
-		var req storagePolicy
+		var req struct {
+			LimitBytes   int64  `json:"limitBytes"`
+			MaxFileBytes *int64 `json:"maxFileBytes"`
+			AutoCleanup  bool   `json:"autoCleanup"`
+		}
 		if !decodeRequest(w, r, &req) {
 			return
 		}
@@ -162,8 +185,17 @@ func (s *workspaceStore) registerStorage(handle func(string, func(http.ResponseW
 			if _, total, err := diskSpace(filepath.Dir(s.path)); err == nil && s.path != "" && uint64(req.LimitBytes) > total {
 				return fail(400, "Лимит не может превышать объём диска")
 			}
-			req.AutoCleanup = true
-			d.Storage = req
+			cap := maxUploadBytes(req.LimitBytes)
+			if req.MaxFileBytes != nil {
+				if *req.MaxFileBytes < mib || *req.MaxFileBytes > cap {
+					return fail(400, "Размер файла должен быть от 1 МБ до 80% лимита хранения, максимум 1536 МБ")
+				}
+				d.Storage.MaxFileBytes = *req.MaxFileBytes
+			} else if d.Storage.MaxFileBytes > cap {
+				d.Storage.MaxFileBytes = cap
+			}
+			d.Storage.LimitBytes = req.LimitBytes
+			d.Storage.AutoCleanup = true
 			return nil
 		})
 		if err != nil {

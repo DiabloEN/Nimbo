@@ -95,4 +95,22 @@ func TestUpdateQueueOwnerAndVersion(t *testing.T) {
 	if err != nil || string(tag) != body["tag"] {
 		t.Fatal(string(tag), err)
 	}
+	if err := os.Remove(filepath.Join(dir, "requests", "install")); err != nil {
+		t.Fatal(err)
+	}
+	const previous = "web-0.4.4-73"
+	rollback := map[string]string{"tag": previous}
+	mustStatus(t, apiCall(h, "POST", path+"/rollback", session, rollback), 409)
+	data, _ = json.Marshal(updateStatus{Installed: serverVersion, Previous: previous, Phase: "current"})
+	if err := os.WriteFile(filepath.Join(dir, "status.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	mustStatus(t, apiCall(h, "POST", path+"/rollback", guest, rollback), 403)
+	mustStatus(t, apiCall(h, "POST", path+"/rollback", session, body), 409)
+	mustStatus(t, apiCall(h, "POST", path+"/rollback", session, rollback), 200)
+	mustStatus(t, apiCall(h, "POST", path+"/rollback", session, rollback), 409)
+	tag, err = os.ReadFile(filepath.Join(dir, "requests", "install"))
+	if err != nil || string(tag) != "rollback:"+previous {
+		t.Fatal("wrong rollback target", err)
+	}
 }

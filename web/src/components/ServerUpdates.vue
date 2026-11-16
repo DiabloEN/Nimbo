@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SoftButton from './SoftButton.vue';
 import { ref, onMounted, onBeforeUnmount } from 'vue';
 const props = defineProps<{
   request: (path: string, method?: string, body?: unknown) => Promise<any>;
@@ -6,6 +7,7 @@ const props = defineProps<{
 type State = {
   installed: string;
   available: string;
+  previous?: string;
   phase: string;
   canInstall: boolean;
   checkedAt?: number;
@@ -48,16 +50,15 @@ async function refresh() {
     if (started === revision) scheduleRefresh();
   }
 }
-async function submit(action: 'check' | 'install') {
+async function submit(action: 'check' | 'install' | 'rollback') {
   if (!status.value || sending.value) return;
   sending.value = true;
   clearTimeout(timer);
   revision++;
   try {
-    status.value =
-      action === 'check'
-        ? await props.request('/api/server-update/check', 'POST', {})
-        : await props.request('/api/server-update', 'POST', { tag: status.value.available });
+    const path = action === 'install' ? '/api/server-update' : '/api/server-update/' + action;
+    const tag = action === 'rollback' ? status.value.previous : status.value.available;
+    status.value = await props.request(path, 'POST', action === 'check' ? {} : { tag });
     error.value = '';
   } catch (e) {
     error.value = (e as Error).message;
@@ -74,8 +75,8 @@ onBeforeUnmount(() => {
 });
 </script>
 <template>
-  <section class="editor-fill server-updates" aria-label="Обновления сервера">
-    <h3>Обновления сервера</h3>
+  <section class="server-updates" aria-labelledby="server-updates-heading">
+    <h3 id="server-updates-heading">Обновление</h3>
     <template v-if="status">
       <p>Установлено · {{ status.installed }}</p>
       <p v-if="status.available && status.available !== status.installed">
@@ -96,34 +97,32 @@ onBeforeUnmount(() => {
         >
       </p>
       <div v-if="status.phase !== 'unmanaged'" class="button-row">
-        <button
-          type="button"
-          class="soft-button"
+        <SoftButton
           :disabled="
             sending || ['checking', 'queued', 'waiting', 'installing'].includes(status.phase)
           "
           @click="submit('check')"
         >
           Проверить обновления
-        </button>
-        <button
-          v-if="status.canInstall"
-          type="button"
-          class="soft-button"
-          :disabled="sending"
-          @click="submit('install')"
+        </SoftButton>
+        <SoftButton v-if="status.canInstall" :disabled="sending" @click="submit('install')">
+          Обновить сервер и веб-клиент
+        </SoftButton>
+        <SoftButton
+          v-if="status.previous"
+          :disabled="
+            sending || ['checking', 'queued', 'waiting', 'installing'].includes(status.phase)
+          "
+          @click="submit('rollback')"
         >
-          Обновить сервер
-        </button>
+          Откатиться на {{ status.previous }}
+        </SoftButton>
       </div>
     </template>
     <p v-if="error" class="field-help" role="status">{{ error }}</p>
   </section>
 </template>
 <style scoped>
-.server-updates {
-  min-height: 0;
-}
 .server-updates > h3,
 .server-updates > p {
   margin: 0 0 8px;

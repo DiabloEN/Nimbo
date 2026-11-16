@@ -1,3 +1,5 @@
+export const TRANSFER_TIMEOUT_MS = 65 * 60 * 1000;
+
 /** Progress describes transfer; 100% means the server is still validating/scanning. */
 export function uploadForm(
   url: string,
@@ -14,7 +16,7 @@ export function uploadForm(
     if (url.startsWith('https://') || url.startsWith('http://'))
       xhr.setRequestHeader('X-Nimbo-Client', '1');
     xhr.setRequestHeader('Authorization', 'Bearer ' + token);
-    xhr.timeout = 240000;
+    xhr.timeout = TRANSFER_TIMEOUT_MS;
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) progress(Math.min(100, Math.round((e.loaded / e.total) * 100)));
     };

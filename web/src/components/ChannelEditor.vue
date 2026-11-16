@@ -615,7 +615,7 @@ function keyboard(e: KeyboardEvent, kind: 'section' | 'channel', id: string, gro
 .section-create > input,
 .section-create > button[type='submit'],
 .section-create :deep(.app-select > button) {
-  height: 40px;
+  height: var(--compact-control-height);
   margin: 0;
   padding: 8px 12px;
   border-radius: 9px;

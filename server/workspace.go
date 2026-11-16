@@ -61,6 +61,7 @@ type chatMessage struct {
 }
 type workspaceData struct {
 	AntivirusScan    *bool                        `json:"antivirusScan,omitempty"`
+	FilesByDefault   bool                         `json:"filesByDefault,omitempty"`
 	Files            map[string]filePolicy        `json:"files,omitempty"`
 	OwnerBootstrap   *ownerBootstrap              `json:"ownerBootstrap,omitempty"`
 	InvitationsReady bool                         `json:"invitationsReady,omitempty"`
@@ -134,10 +135,12 @@ func openWorkspace(path, ownerKey string) (*workspaceStore, error) {
 		},
 		Members: []member{}, Messages: map[string][]chatMessage{}}}
 	if path == "" {
+		s.data.FilesByDefault = true
 		return s, nil
 	}
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
+		s.data.FilesByDefault = true
 		err = s.persist(s.data)
 		return s, err
 	}

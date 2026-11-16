@@ -95,6 +95,10 @@ ol {
 ul,
 ol {
   padding-inline-start: 1.75em;
+  line-height: 1.46;
+}
+li + li {
+  margin-top: 2px;
 }
 ul {
   list-style-type: disc;

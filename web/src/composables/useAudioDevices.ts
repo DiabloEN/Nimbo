@@ -1,7 +1,6 @@
 import { ref } from 'vue';
 import { Track, type LocalAudioTrack, type Room, type RoomEvent } from 'livekit-client';
 import { isLocalNoiseEngine, useAudioLab } from './audioLab';
-import { audioDiagnostic } from './audioDiagnostics';
 
 export interface AudioDeviceOption {
   deviceId: string;
@@ -88,7 +87,7 @@ export function useAudioDevices() {
       localStorage.setItem('nimbo-output-device', outputId.value);
     } catch {}
   }
-  async function auditInput(event = 'microphone-state') {
+  function refreshActualInput() {
     const current = room,
       track = current?.localParticipant?.getTrackPublication(Track.Source.Microphone)?.track;
     const raw = track?.mediaStreamTrack;
@@ -100,17 +99,6 @@ export function useAudioDevices() {
       raw?.readyState === 'live'
         ? label || raw.label || 'Микрофон активен'
         : 'Микрофон не захватывается';
-    audioDiagnostic(event, {
-      selected:
-        inputs.value.find((d) => d.deviceId === inputId.value)?.label || 'Выбранное устройство',
-      actual: actualInput.value,
-      muted: track?.isMuted,
-      readyState: raw?.readyState,
-      echoCancellation: settings?.echoCancellation,
-      noiseSuppression: settings?.noiseSuppression,
-      autoGainControl: settings?.autoGainControl,
-      sampleRate: settings?.sampleRate,
-    });
   }
   function bindRoom(next: Room | null) {
     if (disposed) return;
@@ -121,10 +109,10 @@ export function useAudioDevices() {
     // a delayed event from an earlier capture must not overwrite the selected input.
     const version = bindingVersion;
     activeListener = () => {
-      if (version === bindingVersion && !disposed) void auditInput('sdk-device-event');
+      if (version === bindingVersion && !disposed) refreshActualInput();
     };
     room?.on(activeDeviceChanged, activeListener);
-    void auditInput(next ? 'room-bound' : 'room-unbound');
+    refreshActualInput();
   }
   function runInput<T>(operation: () => Promise<T>): Promise<T | undefined> {
     const version = bindingVersion;
@@ -198,7 +186,7 @@ export function useAudioDevices() {
       }
     }
     configured.set(track, key);
-    await auditInput('processing-applied');
+    refreshActualInput();
   }
   async function updateProcessing() {
     lab.save();
@@ -230,12 +218,6 @@ export function useAudioDevices() {
       }
       switching[kind]++;
       const before = currentId(kind).value;
-      audioDiagnostic('switch-start', {
-        kind,
-        selected:
-          (kind === 'audioinput' ? inputs : outputs).value.find((d) => d.deviceId === deviceId)
-            ?.label || 'Выбранное устройство',
-      });
       try {
         const changed = await targetRoom.switchActiveDevice(kind, deviceId);
         if (disposed || version !== bindingVersion) return false;
@@ -254,19 +236,16 @@ export function useAudioDevices() {
         remember();
         if (kind === 'audioinput') {
           await applyCaptureOptions();
-          await auditInput('switch-complete');
+          refreshActualInput();
         }
         note.value = '';
         return true;
       } catch {
         if (!disposed && version === bindingVersion) {
-          audioDiagnostic('switch-failed', { kind });
           try {
             await targetRoom.switchActiveDevice(kind, before);
-          } catch {
-            audioDiagnostic('switch-rollback-failed', { kind });
-          }
-          if (kind === 'audioinput') await auditInput('switch-rollback');
+          } catch {}
+          if (kind === 'audioinput') refreshActualInput();
         }
         if (!disposed && version === bindingVersion) {
           note.value =
@@ -397,7 +376,7 @@ export function useAudioDevices() {
     cameras,
     actualInput,
     runInput,
-    auditInput,
+    refreshActualInput,
     inputs,
     outputs,
     inputId,

@@ -18,7 +18,8 @@ import (
 	"unicode/utf8"
 )
 
-const maxFileBytes int64 = 20 * 1024 * 1024
+const scanLimit = 80 * mib
+const archiveExpandedLimit = scanLimit
 
 var fileSlots = make(chan struct{}, 2)
 
@@ -36,7 +37,10 @@ type fileAttachment struct {
 func policyForFiles(d *workspaceData, ch string) filePolicy {
 	p, ok := d.Files[ch]
 	if !ok {
-		p = filePolicy{Scan: true}
+		p = filePolicy{Enabled: d.FilesByDefault, Scan: true}
+	}
+	if d.Storage.MaxFileBytes != 0 {
+		p = filePolicy{Enabled: true, Scan: true}
 	}
 	if d.AntivirusScan != nil {
 		p.Scan = *d.AntivirusScan
@@ -111,7 +115,8 @@ func (s *workspaceStore) registerFiles(handle func(string, func(http.ResponseWri
 			report(w, err)
 			return
 		}
-		jsonReply(w, 200, map[string]any{"policy": policyForFiles(&s.data, r.PathValue("id")), "scannerConfigured": os.Getenv("NIMBO_CLAMD_ADDRESS") != "", "maxBytes": maxFileBytes})
+		storage := s.policyFor(&s.data)
+		jsonReply(w, 200, map[string]any{"policy": policyForFiles(&s.data, r.PathValue("id")), "scannerConfigured": os.Getenv("NIMBO_CLAMD_ADDRESS") != "", "maxBytes": storage.MaxFileBytes, "maxBatchBytes": maxUploadBytes(storage.LimitBytes)})
 	})
 	handle("PATCH /api/channels/{id}/files", func(w http.ResponseWriter, r *http.Request, actor string) {
 		var p filePolicy
@@ -124,6 +129,9 @@ func (s *workspaceStore) registerFiles(handle func(string, func(http.ResponseWri
 			}
 			if err := fileAccess(d, actor, r.PathValue("id"), false); err != nil {
 				return err
+			}
+			if !p.Enabled && d.Storage.MaxFileBytes != 0 {
+				return fail(409, "Вложениями управляют в общих настройках сервера")
 			}
 			if p.Enabled && s.path == "" {
 				return fail(503, "Файловое хранилище не настроено")
@@ -165,20 +173,18 @@ func (s *workspaceStore) uploadFile(w http.ResponseWriter, r *http.Request, acto
 	s.mu.Lock()
 	err := fileAccess(&s.data, actor, ch, true)
 	policy := policyForFiles(&s.data, ch)
+	storage := s.policyFor(&s.data)
+	batchLimit := maxUploadBytes(storage.LimitBytes)
 	s.mu.Unlock()
 	if err != nil {
 		report(w, err)
 		return
 	}
-	if policy.Scan && os.Getenv("NIMBO_CLAMD_ADDRESS") == "" {
-		reject(w, 503, "Антивирус недоступен. Файл не опубликован.")
-		return
-	}
 	// Upload/scan need longer deadlines than ordinary small API requests.
 	rc := http.NewResponseController(w)
-	_ = rc.SetReadDeadline(time.Now().Add(120 * time.Second))
-	_ = rc.SetWriteDeadline(time.Now().Add(240 * time.Second))
-	r.Body = http.MaxBytesReader(w, r.Body, maxFileBytes+65536)
+	_ = rc.SetReadDeadline(time.Now().Add(time.Hour))
+	_ = rc.SetWriteDeadline(time.Now().Add(time.Hour + 5*time.Minute))
+	r.Body = http.MaxBytesReader(w, r.Body, batchLimit+256*1024)
 	reader, e := r.MultipartReader()
 	if e != nil {
 		reject(w, 400, "Нужна загрузка файла")
@@ -213,7 +219,7 @@ func (s *workspaceStore) uploadFile(w http.ResponseWriter, r *http.Request, acto
 			break
 		}
 		if e != nil {
-			reject(w, 413, "Не удалось прочитать файл. Лимит — 20 МБ.")
+			reject(w, 413, "Не удалось прочитать файл. Проверьте размер вложений.")
 			return
 		}
 		name := part.FormName()
@@ -239,11 +245,16 @@ func (s *workspaceStore) uploadFile(w http.ResponseWriter, r *http.Request, acto
 				return
 			}
 			pending = append(pending, pendingFile{path: temp.Name(), attachment: fileAttachment{ID: randomKey(), Name: filename}})
-			n, copyErr := io.Copy(temp, io.LimitReader(part, maxFileBytes-size+1))
+			limit := min(storage.MaxFileBytes, batchLimit-size)
+			n, copyErr := copyUpload(temp, io.LimitReader(part, limit+1))
 			syncErr := temp.Sync()
 			closeErr := temp.Close()
-			if copyErr != nil || n == 0 || n > maxFileBytes-size {
-				reject(w, 413, "Общий размер непустых вложений — до 20 МБ")
+			if copyErr != nil {
+				report(w, copyErr)
+				return
+			}
+			if n == 0 || n > limit {
+				reject(w, 413, "Пустой файл или превышен лимит вложений сервера")
 				return
 			}
 			if syncErr != nil {
@@ -298,22 +309,24 @@ func (s *workspaceStore) uploadFile(w http.ResponseWriter, r *http.Request, acto
 		report(w, formatErr)
 		return
 	}
-	scanned := false
 	if policy.Scan {
-		scanContext, cancelScan := context.WithTimeout(r.Context(), 90*time.Second)
+		scanContext, cancelScan := context.WithTimeout(r.Context(), 4*time.Minute)
 		defer cancelScan()
-		for _, f := range pending {
+		for i := range pending {
+			f := &pending[i]
+			if f.attachment.Size > scanLimit {
+				continue
+			}
 			if e = scanFile(scanContext, f.path); e != nil {
 				report(w, e)
 				return
 			}
+			f.attachment.Scanned = true
 		}
-		scanned = true
 	}
 	attachments := make([]fileAttachment, 0, len(pending))
 	for i := range pending {
 		f := &pending[i]
-		f.attachment.Scanned = scanned
 		destination := s.filePath(f.attachment.ID)
 		if e = os.Rename(f.path, destination); e != nil {
 			report(w, e)
@@ -326,9 +339,6 @@ func (s *workspaceStore) uploadFile(w http.ResponseWriter, r *http.Request, acto
 	e = s.update(func(d *workspaceData) error {
 		if err := fileAccess(d, actor, ch, true); err != nil {
 			return err
-		}
-		if policyForFiles(d, ch).Scan && !scanned {
-			return fail(409, "Владелец включил проверку. Загрузите файл ещё раз.")
 		}
 		for _, m := range d.Messages[ch] {
 			if m.AuthorID == actor && m.ClientID == clientID {
@@ -346,6 +356,15 @@ func (s *workspaceStore) uploadFile(w http.ResponseWriter, r *http.Request, acto
 			}
 			if !found {
 				return fail(400, "Сообщение для ответа недоступно")
+			}
+		}
+		current := s.policyFor(d)
+		for _, a := range attachments {
+			if a.Size > current.MaxFileBytes || size > maxUploadBytes(current.LimitBytes) {
+				return fail(413, "Лимит вложений изменился")
+			}
+			if policyForFiles(d, ch).Scan && a.Size <= scanLimit && !a.Scanned {
+				return fail(409, "Владелец включил проверку. Загрузите файл ещё раз.")
 			}
 		}
 		// Do not silently evict history to make room for an upload.
@@ -419,8 +438,31 @@ func (s *workspaceStore) downloadFile(w http.ResponseWriter, r *http.Request, ac
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
 	w.Header().Set("Cache-Control", "private, no-store")
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(120 * time.Second))
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Hour))
 	http.ServeContent(w, r, found.Name, time.Time{}, f)
+}
+
+// Keep disk space for metadata while the two upload slots write temporary files.
+func copyUpload(dst *os.File, src io.Reader) (int64, error) {
+	const chunk = 8 * mib
+	var total int64
+	for {
+		free, _, err := diskSpace(filepath.Dir(dst.Name()))
+		if err != nil {
+			return total, err
+		}
+		if free < uint64(64*mib+2*chunk) {
+			return total, fail(507, "На диске мало свободного места")
+		}
+		n, err := io.CopyN(dst, src, chunk)
+		total += n
+		if err == io.EOF {
+			return total, nil
+		}
+		if err != nil {
+			return total, err
+		}
+	}
 }
 
 // Stream to a local clamd. Never shell out using a user's filename, or send files
@@ -447,7 +489,7 @@ func scanFile(ctx context.Context, path string) error {
 	defer conn.Close()
 	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stopCancel()
-	deadline := time.Now().Add(65 * time.Second)
+	deadline := time.Now().Add(2 * time.Minute)
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
 	}
@@ -535,8 +577,8 @@ func checkArchiveLimits(path string) error {
 		if entry.Flags&1 != 0 {
 			return fail(422, "Зашифрованный архив нельзя проверить антивирусом.")
 		}
-		if entry.UncompressedSize64 > uint64(maxFileBytes) || entry.UncompressedSize64 > uint64(maxFileBytes)-total {
-			return fail(422, "Распакованный архив превышает лимит 20 МБ.")
+		if entry.UncompressedSize64 > uint64(archiveExpandedLimit) || entry.UncompressedSize64 > uint64(archiveExpandedLimit)-total {
+			return fail(422, "Распакованный архив превышает лимит 80 МБ.")
 		}
 		total += entry.UncompressedSize64
 		ext := strings.ToLower(filepath.Ext(entry.Name))

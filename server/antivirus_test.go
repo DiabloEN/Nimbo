@@ -43,7 +43,7 @@ func TestRealScannerFileUpload(t *testing.T) {
 	var b bytes.Buffer
 	z := zip.NewWriter(&b)
 	entry, _ := z.Create("oversized.txt")
-	_, _ = entry.Write([]byte(strings.Repeat("x", 21*1024*1024)))
+	_, _ = entry.Write([]byte(strings.Repeat("x", int(scanLimit+1))))
 	_ = z.Close()
 	mustStatus(t, fileRequest(t, h, token, "oversized.zip", b.String(), randomKey()), 422)
 	if len(s.data.Messages["general"]) != 1 {
@@ -64,7 +64,7 @@ func TestArchiveLimitsWithoutExtraction(t *testing.T) {
 		name   string
 		size   int
 		wantOK bool
-	}{{"notes.txt", 100, true}, {"large.txt", 21 * 1024 * 1024, false}, {"nested.zip", 100, false}} {
+	}{{"notes.txt", 100, true}, {"large.txt", int(scanLimit + 1), false}, {"nested.zip", 100, false}} {
 		p := filepath.Join(t.TempDir(), "test.zip")
 		f, e := os.Create(p)
 		if e != nil {

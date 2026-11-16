@@ -1,0 +1,26 @@
+[
+  {
+    "name": "qtmultimedia-Windows-Windows_10_22H2-Mingw-Windows-Windows_10_22H2-X86_64.7z",
+    "path": "online/qtsdkrepository/windows_x86/desktop/qt6_683/qt6_683/qt.qt6.683.addons.qtmultimedia.win64_mingw/6.8.3-0-202503201308qtmultimedia-Windows-Windows_10_22H2-Mingw-Windows-Windows_10_22H2-X86_64.7z",
+    "sha1": "e110805c5a16b10ea771f8138b1927eb7ac2a09c",
+    "sha256": "043704cb7d5c6584637b45710d035d09a247dd1fafac9429a3bd668ea55c8ed6"
+  },
+  {
+    "name": "qtbase-Windows-Windows_10_22H2-Mingw-Windows-Windows_10_22H2-X86_64.7z",
+    "path": "online/qtsdkrepository/windows_x86/desktop/qt6_683/qt6_683/qt.qt6.683.win64_mingw/6.8.3-0-202503201308qtbase-Windows-Windows_10_22H2-Mingw-Windows-Windows_10_22H2-X86_64.7z",
+    "sha1": "7c46c743f5747369f205a4364e365953af12530a",
+    "sha256": "a2cd09053e907b161d84696ec5f1c316cfc089482c5b04de9141b949fa19acd1"
+  },
+  {
+    "name": "qttools-Windows-Windows_10_22H2-Mingw-Windows-Windows_10_22H2-X86_64.7z",
+    "path": "online/qtsdkrepository/windows_x86/desktop/qt6_683/qt6_683/qt.qt6.683.win64_mingw/6.8.3-0-202503201308qttools-Windows-Windows_10_22H2-Mingw-Windows-Windows_10_22H2-X86_64.7z",
+    "sha1": "fcbc6e221ad9921a336e6320717655aa3b6ec216",
+    "sha256": "fe14b579d8ae4ed91cbcc4fd8f9476cf12d2690fdab07b56f2924743066026c2"
+  },
+  {
+    "name": "mingw1310.7z",
+    "path": "online/qtsdkrepository/windows_x86/desktop/tools_mingw1310/qt.tools.win64_mingw1310/13.1.0-202407240918mingw1310.7z",
+    "sha1": "23c4bdecc1a2d2588f1b32b3e6cbf64d2a7ee852",
+    "sha256": "a7b502294a903b64fccd4a41ba39f48d3f6c9a5ece167f0cfaeac920d15b344f"
+  }
+]

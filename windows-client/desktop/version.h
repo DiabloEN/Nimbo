@@ -1,0 +1,3 @@
+#pragma once
+#define NIMBO_DESKTOP_VERSION "0.3.34"
+#define NIMBO_DESKTOP_FILEVERSION 0,3,34,0

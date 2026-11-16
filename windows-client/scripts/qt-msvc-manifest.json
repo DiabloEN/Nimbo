@@ -1,0 +1,20 @@
+[
+  {
+    "path": "online/qtsdkrepository/windows_x86/desktop/qt6_683/qt6_683/qt.qt6.683.win64_msvc2022_64/6.8.3-0-202503201308qtbase-Windows-Windows_11_23H2-MSVC2022-Windows-Windows_11_23H2-X86_64.7z",
+    "name": "qtbase-Windows-Windows_11_23H2-MSVC2022-Windows-Windows_11_23H2-X86_64.7z",
+    "sha1": "ab0bd2551618f7128ef30c6d74fe45b6a76e2296",
+    "sha256": "41688269fac0565db956c66d9eecae777d16197e0c02cd81b88640c1f5d73d3f"
+  },
+  {
+    "path": "online/qtsdkrepository/windows_x86/desktop/qt6_683/qt6_683/qt.qt6.683.win64_msvc2022_64/6.8.3-0-202503201308qttools-Windows-Windows_11_23H2-MSVC2022-Windows-Windows_11_23H2-X86_64.7z",
+    "name": "qttools-Windows-Windows_11_23H2-MSVC2022-Windows-Windows_11_23H2-X86_64.7z",
+    "sha1": "25956e4f72a3b054235a2c6a00c88ba7e7927971",
+    "sha256": "76ac7b8c86ca72b6608f1d41ee848aeab19663536990b4968ce52db8ec980bc3"
+  },
+  {
+    "path": "online/qtsdkrepository/windows_x86/desktop/qt6_683/qt6_683/qt.qt6.683.addons.qtmultimedia.win64_msvc2022_64/6.8.3-0-202503201308qtmultimedia-Windows-Windows_11_23H2-MSVC2022-Windows-Windows_11_23H2-X86_64.7z",
+    "name": "qtmultimedia-Windows-Windows_11_23H2-MSVC2022-Windows-Windows_11_23H2-X86_64.7z",
+    "sha1": "78ed66303d98ba070547662734d1a0290feac9c2",
+    "sha256": "607afd11b22079bc8d6bb1b6df08a9b44f5d15d1b87089a1cb00902dfa0a4340"
+  }
+]

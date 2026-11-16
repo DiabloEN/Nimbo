@@ -91,11 +91,11 @@ onBeforeUnmount(() => clearInterval(timer));
     </p>
     <div v-if="data" class="antivirus-details">
       <div>
-        <p>
+        <p class="settings-detail">
           Версия ClamAV ·
           {{ data.version?.split('/')[0].replace(/^ClamAV\s+/i, '') || 'нет данных' }}
         </p>
-        <p>
+        <p class="settings-detail">
           Последняя проверка баз ·
           {{ data.updater?.lastCheck ? date(data.updater.lastCheck) : 'нет данных' }}
         </p>
@@ -124,8 +124,6 @@ onBeforeUnmount(() => clearInterval(timer));
 }
 .antivirus-details p {
   margin: 4px 0;
-  color: #aaa;
-  font-size: 12px;
 }
 .antivirus-details button {
   margin-top: 8px;

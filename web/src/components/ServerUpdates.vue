@@ -101,8 +101,12 @@ onBeforeUnmount(() => {
       Обновление <i v-if="notice.available.value" class="update-dot" aria-hidden="true"></i>
     </h3>
     <template v-if="status">
-      <p>Установлено · {{ status.installed }}</p>
-      <p v-if="status.available && status.available !== status.installed" ref="releaseLine">
+      <p class="settings-detail">Установлено · {{ status.installed }}</p>
+      <p
+        v-if="status.available && status.available !== status.installed"
+        ref="releaseLine"
+        class="settings-detail"
+      >
         Последний релиз · {{ status.available }}
       </p>
       <p class="field-help" role="status">
@@ -129,7 +133,7 @@ onBeforeUnmount(() => {
           Проверить обновления
         </SoftButton>
         <SoftButton v-if="status.canInstall" :disabled="sending" @click="submit('install')">
-          Обновить сервер и веб-клиент
+          Обновить
         </SoftButton>
         <SoftButton
           v-if="status.previous"

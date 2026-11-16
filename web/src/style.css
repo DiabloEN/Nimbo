@@ -2828,20 +2828,30 @@ textarea:focus-visible {
   }
 }
 
+.settings-icon,
 .text-channel-icon {
   position: relative;
   display: inline-flex;
   flex: none;
 }
-.channel-unread-dot {
-  position: absolute;
-  right: -1px;
-  bottom: -1px;
+.channel-unread-dot,
+.update-dot {
+  display: inline-block;
   width: 5px;
   height: 5px;
   border-radius: 50%;
   background: #81bc96;
+}
+.settings-icon .update-dot,
+.channel-unread-dot {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
   box-shadow: 0 0 0 1px var(--panel, #101010);
+}
+.server-updates h3 .update-dot {
+  margin-inline-start: 3px;
+  vertical-align: middle;
 }
 .channel-mention {
   margin-left: auto;

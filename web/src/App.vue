@@ -23,6 +23,7 @@ import EnrollmentPage from './components/EnrollmentPage.vue';
 import ServerSwitcher from './components/ServerSwitcher.vue';
 import AntivirusSettings from './components/AntivirusSettings.vue';
 import ServerUpdates from './components/ServerUpdates.vue';
+import { useUpdateNotice } from './composables/useUpdateNotice';
 import StorageSettings from './components/StorageSettings.vue';
 import HotkeySettings from './components/HotkeySettings.vue';
 import { useHotkeys, type Bindings } from './composables/useHotkeys';
@@ -317,6 +318,19 @@ const page = computed(() =>
 const settingsOpen = computed(() => page.value.startsWith('/settings/'));
 const section = computed(() =>
   page.value === '/settings/roles' ? 'workspace' : page.value.split('/').at(-1),
+);
+const updateNoticeKey = computed(() =>
+  authenticated.value &&
+  workspace.ready.value &&
+  !switchingServer.value &&
+  self.value?.role === 'owner'
+    ? 'nimbo-seen-update:' + JSON.stringify([activeServer.value, self.value.id])
+    : '',
+);
+const updateNotice = useUpdateNotice(
+  updateNoticeKey,
+  computed(() => page.value === '/settings/general'),
+  (signal) => workspace.request('/api/server-update', 'GET', undefined, signal),
 );
 const sections = [
   { id: 'general', name: 'Общие', icon: 'settings' },
@@ -1593,10 +1607,14 @@ onBeforeUnmount(() => {
           ><button
             class="icon-button"
             aria-label="Настройки"
-            title="Настройки"
+            :aria-description="updateNotice.unread.value ? 'Доступно обновление' : undefined"
+            :title="updateNotice.unread.value ? 'Настройки · Доступно обновление' : 'Настройки'"
             @click="navigate('/settings/general')"
           >
-            <AppIcon name="settings" :size="19" />
+            <span class="settings-icon">
+              <AppIcon name="settings" :size="19" />
+              <i v-if="updateNotice.unread.value" class="update-dot" aria-hidden="true"></i>
+            </span>
           </button>
         </div>
       </div>
@@ -1795,8 +1813,9 @@ onBeforeUnmount(() => {
                 v-if="section === 'general' && self?.role === 'owner'"
                 :request="workspace.request"
               /><ServerUpdates
-                :key="activeServer"
-                v-if="section === 'general' && self?.role === 'owner'"
+                :key="updateNoticeKey"
+                v-if="section === 'general' && updateNoticeKey"
+                :notice="updateNotice"
                 :request="workspace.request"
               />
             </section>

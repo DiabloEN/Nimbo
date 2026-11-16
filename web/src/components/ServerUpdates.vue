@@ -1,19 +1,40 @@
 <script setup lang="ts">
 import SoftButton from './SoftButton.vue';
-import { ref, onMounted, onBeforeUnmount } from 'vue';
+import { ref, watch, onMounted, onBeforeUnmount } from 'vue';
+import type { ServerUpdateStatus, useUpdateNotice } from '../composables/useUpdateNotice';
 const props = defineProps<{
   request: (path: string, method?: string, body?: unknown) => Promise<any>;
+  notice: ReturnType<typeof useUpdateNotice>;
 }>();
-type State = {
-  installed: string;
-  available: string;
-  previous?: string;
-  phase: string;
-  canInstall: boolean;
-  checkedAt?: number;
-  detail?: string;
-};
-const status = ref<State>();
+const status = ref<ServerUpdateStatus>();
+const releaseLine = ref<HTMLElement>();
+watch(status, (value) => {
+  if (value && !disposed) props.notice.accept(value);
+});
+watch(
+  [releaseLine, props.notice.available, props.notice.visible],
+  ([line, tag, visible], _, cleanup) => {
+    if (!line || !tag || !visible) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (
+          !disposed &&
+          releaseLine.value === line &&
+          status.value?.available === tag &&
+          entry?.isIntersecting &&
+          entry.intersectionRatio >= 0.5 &&
+          document.visibilityState === 'visible'
+        ) {
+          props.notice.markSeen(tag);
+        }
+      },
+      { threshold: 0.5 },
+    );
+    observer.observe(line);
+    cleanup(() => observer.disconnect());
+  },
+  { flush: 'post' },
+);
 const error = ref('');
 const sending = ref(false);
 const labels: Record<string, string> = {
@@ -76,10 +97,12 @@ onBeforeUnmount(() => {
 </script>
 <template>
   <section class="server-updates" aria-labelledby="server-updates-heading">
-    <h3 id="server-updates-heading">Обновление</h3>
+    <h3 id="server-updates-heading">
+      Обновление <i v-if="notice.available.value" class="update-dot" aria-hidden="true"></i>
+    </h3>
     <template v-if="status">
       <p>Установлено · {{ status.installed }}</p>
-      <p v-if="status.available && status.available !== status.installed">
+      <p v-if="status.available && status.available !== status.installed" ref="releaseLine">
         Последний релиз · {{ status.available }}
       </p>
       <p class="field-help" role="status">

@@ -16,6 +16,7 @@ import xml.etree.ElementTree as ET
 from fontTools.merge import Merger
 from fontTools.ttLib import TTFont
 from resvg_py import svg_to_bytes
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = re.search(r'NIMBO_DESKTOP_VERSION "(\d+\.\d+\.\d+)"', (ROOT/"desktop/version.h").read_text()).group(1)
@@ -96,12 +97,21 @@ def build_installer(compiler, work, stage, output):
     def path_value(path):
         return str(path).replace("$", "$$").replace('"', '$\\"')
 
+    # NSIS copies the directory entries verbatim. Windows shell image lists
+    # also need bitmap frames when extracting a small icon from its PE stub.
+    installer_ico = work/"setup.ico"
+    with Image.open(stage/"assets/nimbo.ico") as source:
+        frames = [source.ico.getimage(size).convert("RGBA") for size in sorted(source.ico.sizes())]
+        frames[-1].save(installer_ico, format="ICO", sizes=[f.size for f in frames],
+                        append_images=frames[:-1], bitmap_format="bmp")
+    icon = path_value(installer_ico)
+    mui_icons = [f'!define MUI_ICON "{icon}"', f'!define MUI_UNICON "{icon}"']
     lines = [
         "Unicode true", "RequestExecutionLevel user", "SetCompressor /SOLID lzma",
         '!include "MUI2.nsh"', 'Name "Nimbo"',
         f'OutFile "{path_value(output)}"', r'InstallDir "$LOCALAPPDATA\Programs\Nimbo"',
         r'InstallDirRegKey HKCU "Software\Nimbo\DesktopPreview" "InstallDir"',
-        f'Icon "{path_value(stage/"assets/nimbo.ico")}"',
+        *mui_icons,
         '!insertmacro MUI_PAGE_WELCOME', '!insertmacro MUI_PAGE_INSTFILES', '!define MUI_FINISHPAGE_RUN "$INSTDIR\\NimboDesktop.exe"',
         '!insertmacro MUI_PAGE_FINISH', '!insertmacro MUI_UNPAGE_CONFIRM', '!insertmacro MUI_UNPAGE_INSTFILES',
         '!insertmacro MUI_LANGUAGE "Russian"', '!insertmacro MUI_LANGUAGE "English"', f'VIProductVersion "{VERSION}.0"',
@@ -134,7 +144,7 @@ def build_installer(compiler, work, stage, output):
     emitter = work/"emit-uninstaller.exe"
     export = ['Unicode true', 'RequestExecutionLevel user', 'SilentInstall silent',
               '!include "MUI2.nsh"', 'Name "Nimbo"', f'OutFile "{path_value(emitter)}"',
-              f'Icon "{path_value(stage/"assets/nimbo.ico")}"',
+              *mui_icons,
               '!insertmacro MUI_UNPAGE_CONFIRM', '!insertmacro MUI_UNPAGE_INSTFILES',
               '!insertmacro MUI_LANGUAGE "Russian"', '!insertmacro MUI_LANGUAGE "English"',
               'Section', f'WriteUninstaller "{path_value(stage/"uninstall-update.bin")}"', 'SectionEnd']

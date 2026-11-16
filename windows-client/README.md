@@ -1,6 +1,6 @@
 # Nimbo для Windows x64
 
-[Установить Nimbo 0.3.34](https://github.com/DiabloEN/Nimbo/releases/download/desktop-v0.3.34/Nimbo-0.3.34-Setup.exe)
+[Установить Nimbo 0.3.35](https://github.com/DiabloEN/Nimbo/releases/download/desktop-v0.3.35/Nimbo-0.3.35-Setup.exe)
 
 Запустите Setup под своей учётной записью Windows. Мастер добавит приложение в меню «Пуск». Последующие версии устанавливаются в «Настройки → Общие → Обновление». Когда клиент обновится, он сам откроется с прежним профилем. [Порядок выпуска и проверки обновлений](updates/README.md)
 
@@ -14,7 +14,7 @@ cd windows-client
 .\scripts\bootstrap-media.ps1
 .\.tools\python\Scripts\python.exe scripts/setup-native-effects.py
 .\scripts\build-media.ps1
-.\.tools\python\Scripts\python.exe -m pip install resvg-py==0.5.0 fonttools==4.68.0 brotli==1.2.0
+.\.tools\python\Scripts\python.exe -m pip install resvg-py==0.5.0 fonttools==4.68.0 brotli==1.2.0 pillow==13.0.0
 .\.tools\python\Scripts\python.exe scripts/package-native-desktop.py --web ../web --nsis 'C:\Program Files (x86)\NSIS\makensis.exe'
 ```
 

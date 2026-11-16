@@ -70,7 +70,7 @@ private:
         const auto phase=state["phase"].toString();
         const QHash<QString,QString> labels{
                 {"unmanaged",UiText::UpdatesFromThisPanelHaveNotBeen()},{"checking",UiText::CheckingGithubReleases()},
-                {"empty",UiText::NoUpdatesAvailable()},{"current",UiText::YouHaveTheLatestVersion()},{"available",UiText::AnUpdateIsAvailable()},
+                {"empty",UiText::NoUpdatesAvailable()},{"available",UiText::AnUpdateIsAvailable()},
                 {"queued",UiText::UpdateQueued()},{"waiting",UiText::WaitingForInstallation()},{"installing",UiText::InstallingUpdate()},
                 {"restored",UiText::PreviousVersionRestored()},{"error",UiText::CouldNotCompleteTheOperation()}};
 

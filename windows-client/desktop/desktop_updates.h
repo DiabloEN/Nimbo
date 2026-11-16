@@ -34,7 +34,10 @@ public:
     QString offeredVersion()const{return available()?version:QString();}
     bool available()const{return !asset.isEmpty();}
     bool active()const{return working;}
-    QString status()const{return UiText::WindowsApp()+QCoreApplication::applicationVersion()+" · "+QString::fromUtf8(UiText::value(message))+
+    QString status()const{
+        const auto installed=UiText::WindowsApp()+QCoreApplication::applicationVersion();
+        if(message==UiText::Id::YouHaveTheLatestVersion)return installed;
+        return installed+" · "+QString::fromUtf8(UiText::value(message))+
         (message==UiText::Id::VersionAvailable?version+".":message==UiText::Id::DownloadingVersion?version+"…":QString());}
     void observe(QObject* owner,std::function<void()> callback){
         observer=owner;changed=std::move(callback);

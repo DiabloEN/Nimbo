@@ -1328,6 +1328,9 @@ private slots:
                 if(!socket->peek(socket->bytesAvailable()).contains("\r\n\r\n"))return;
                 const auto request=socket->readAll();
                 if(request.startsWith("POST /api/antivirus/update ")){pending=socket;return;}
+                if(request.startsWith("GET /api/server-update ")){
+                    reply(socket,{{"phase","current"},{"installed","server-v1.2.3"}});return;
+                }
                 if(request.startsWith("GET /api/antivirus ")){
                     reply(socket,{{"enabled",true},{"version","ClamAV 1.5.4"},{"scanLimitBytes",80*1048576},
                         {"updateConfigured",true},{"updater",QJsonObject{{"busy",updating}}}});
@@ -1338,6 +1341,16 @@ private slots:
         win.setAttribute(Qt::WA_DontShowOnScreen);win.resize(1150,600);win.show();
         win.api.server=QUrl("http://127.0.0.1:"+QString::number(server.serverPort()));
         win.pages->setCurrentIndex(1);win.self["role"]="owner";win.openView("general");
+        auto* releases=win.detailPage->findChild<QWidget*>("serverUpdates");QVERIFY(releases);
+        auto releaseText=[&]{
+            QStringList lines;
+            for(auto* label:releases->findChildren<QLabel*>())if(label->isVisibleTo(releases))lines<<label->text();
+            return lines.join('\n');
+        };
+        QTRY_VERIFY(releaseText().contains("server-v1.2.3"));
+        win.updates->finish(UiText::Id::YouHaveTheLatestVersion);
+        QCOMPARE(win.updates->status(),UiText::WindowsApp()+QCoreApplication::applicationVersion());
+        QVERIFY(!releaseText().contains(UiText::YouHaveTheLatestVersion()));
         auto* scroll=win.detailPage->findChild<QScrollArea*>("settingsScroll");
         auto* nav=win.detailPage->findChild<QWidget*>("settingsNavPanel");
         auto* antivirus=win.detailPage->findChild<QWidget*>("antivirusSettings");

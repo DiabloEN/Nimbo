@@ -20,7 +20,7 @@ class QStackedWidget; class QVBoxLayout;
 class QHBoxLayout; class QGridLayout; class QCompleter; class QStringListModel; class QPropertyAnimation; class QVariantAnimation;
 class DesktopWindow final : public QMainWindow {
 public:
-    explicit DesktopWindow(QString dataPath, bool generatedMedia = false);
+    explicit DesktopWindow(QString dataPath, bool generatedMedia = false, QJsonObject restartView = {}, bool legacyInstalledUpdate = false);
     ~DesktopWindow() override;
 protected:
     void showEvent(QShowEvent* event) override;
@@ -31,6 +31,9 @@ private:
     QString updateProfile,updateServer,serverOffer,seenDesktopOffer,seenServerOffer;
     QElapsedTimer serverOfferChecked;
     void syncUpdateContext();
+    QJsonObject captureUpdateView() const;
+    void restoreUpdateServer(const QJsonObject& route);
+    QJsonObject pendingUpdateView;
     void recordServerOffer(const QJsonObject& state);
     void refreshUpdateBadge();
     void markOffersRead(const QString& desktopTag,const QString& serverTag);

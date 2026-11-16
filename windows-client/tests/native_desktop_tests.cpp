@@ -1426,6 +1426,34 @@ private slots:
             if(room["kind"]=="text")textChannel=i;else if(room["kind"]=="voice")voiceChannel=i;
         }
         QVERIFY(textChannel>=0&&voiceChannel>=0);
+        {
+            channels->setCurrentRow(voiceChannel);
+            const auto channel=win.selected;
+            win.openView("general");
+            auto* scroll=win.detailLayout->itemAt(0)->widget()->findChild<QScrollArea*>("settingsScroll");
+            QVERIFY(scroll);
+            QTRY_VERIFY(scroll->verticalScrollBar()->maximum()>0);
+            scroll->verticalScrollBar()->setValue(75);
+            auto route=win.updates->restartView();
+            QCOMPARE(route["scroll"].toInt(),75);
+            DesktopWindow reopened(directory.path(),false,route);
+            reopened.setAttribute(Qt::WA_DontShowOnScreen);reopened.show();
+            QTRY_COMPARE(reopened.view,QString("general"));
+            QCOMPARE(reopened.api.server,win.api.server);
+            QCOMPARE(reopened.selected,channel);
+            auto* settings=reopened.detailLayout->itemAt(0)->widget()->findChild<QScrollArea*>("settingsScroll");
+            QVERIFY(settings);
+            QTRY_COMPARE(settings->verticalScrollBar()->value(),75);
+            reopened.backButton->click();
+            QCOMPARE(reopened.selected,channel);
+            QCOMPARE(reopened.view,QString("room"));
+            QVERIFY(!reopened.joining && !reopened.inCall);
+            route["profile"]="different-profile";
+            DesktopWindow different(directory.path(),false,route);
+            QCOMPARE(different.pages->currentWidget(),different.localHome);
+            QVERIFY(different.switchTarget.isEmpty());
+            win.openView("room");
+        }
         channels->setCurrentRow(textChannel);
         auto* edit=win.findChild<QPlainTextEdit*>("messageText");
         edit->setPlainText("Проверка нативного клиента");edit->selectAll();

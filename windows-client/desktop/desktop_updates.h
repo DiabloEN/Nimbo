@@ -31,6 +31,7 @@ public:
         QTimer::singleShot(1500,this,[this]{check();});
     }
     std::function<void()> availabilityChanged;
+    std::function<QJsonObject()> restartView;
     QString offeredVersion()const{return available()?version:QString();}
     bool available()const{return !asset.isEmpty();}
     bool active()const{return working;}
@@ -114,7 +115,14 @@ public:
             QStringList args={"-NoLogo","-NoProfile","-NonInteractive","-WindowStyle","Hidden","-ExecutionPolicy","RemoteSigned","-File",script,
                 "-InstallDir",QCoreApplication::applicationDirPath(),"-ProfileDir",profileDir,
                 "-ParentId",QString::number(QCoreApplication::applicationPid()),"-Version",version,"-Digest",digest};
-            if(!QProcess::startDetached(shell,args,temp->path())){finish(UiText::Id::CouldNotStartTheInstaller);return;}
+            QProcess installer;
+            installer.setProgram(shell);
+            installer.setArguments(args);
+            installer.setWorkingDirectory(temp->path());
+            auto environment=QProcessEnvironment::systemEnvironment();
+            if(restartView)environment.insert("NIMBO_UPDATE_VIEW",QString::fromUtf8(QJsonDocument(restartView()).toJson(QJsonDocument::Compact)));
+            installer.setProcessEnvironment(environment);
+            if(!installer.startDetached()){finish(UiText::Id::CouldNotStartTheInstaller);return;}
             temp->setAutoRemove(false);QCoreApplication::quit();
         });
     }

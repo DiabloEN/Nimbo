@@ -896,6 +896,7 @@ void DesktopWindow::showSwitchNotice(QString message,bool busy){
     switchNotice->adjustSize();switchNotice->move((width()-switchNotice->width())/2,16);switchNotice->show();switchNotice->raise();
 }
 void DesktopWindow::finishServerSwitch(const QString& error){
+    pendingUpdateView={};
     if(switchProbe){
         auto* probe=switchProbe.data();
         auto it=preparedServers.find(probe->server);
@@ -1008,6 +1009,7 @@ void DesktopWindow::usePreparedServer(const QUrl& target,QJsonObject entry){
     const auto data=ready.workspace;
     const auto session=ready.token;
     const auto returnIdentity=switchReturnIdentity;
+    const auto route=pendingUpdateView;
     finishServerSwitch();
     if(!api.token.isEmpty() && !workspace.isEmpty()){
         auto& old=preparedServers[api.server];
@@ -1034,6 +1036,7 @@ void DesktopWindow::usePreparedServer(const QUrl& target,QJsonObject entry){
     ++channelGeneration;loadingMessages=false;loadingOlder=false;refreshing=false;sending=false;selected.clear();
     clearMessageActions();outbox.clear();outboxOrder.clear();drafts.clear();draftFormats.clear();fileDrafts.clear();mentionDrafts.clear();replyId.clear();sendSignature.clear();rooms={};workspace={};lastMessages={};avatars.clear();avatarVersions.clear();
     if(!returnIdentity.isEmpty() && inCall && callIdentity==returnIdentity && callOrigin==target.toString())selected=activeVoice;
+    if(!route.isEmpty())selected=route["channel"].toString();
     clearChatHistory();compose->clear();stageSignature.clear();note({});renderWorkspace(data,WorkspaceRefresh::All);openView("room");
     if(fromHome){
         pages->setCurrentIndex(1);
@@ -1041,6 +1044,29 @@ void DesktopWindow::usePreparedServer(const QUrl& target,QJsonObject entry){
         bindMute();timer.start(3000);
     }
     workspaceReceived=ready.received;
+    const auto section=route["view"].toString();
+    if(QStringList{"general","audio","video","roles","keys","profile"}.contains(section) ||
+       (section=="channels" && (allowed("manage_server") || allowed("manage_channels")))){
+        openView(section);
+        auto* current=detailLayout->itemAt(0)->widget();
+        if(auto* scroll=current->findChild<QScrollArea*>("settingsScroll")){
+            const bool bottom=route["bottom"].toBool();
+            const int position=route["scroll"].toInt();
+            auto* bar=scroll->verticalScrollBar();
+            if(bottom || position>0){
+                // Storage and update responses can expand this page after its first layout.
+                auto* anchor=new QObject(bar);
+                auto restore=[bar,anchor,bottom,position]{
+                    bar->setValue(bottom?bar->maximum():position);
+                    if(!bottom && bar->maximum()>=position)anchor->deleteLater();
+                };
+                connect(bar,&QScrollBar::rangeChanged,anchor,restore);
+                connect(bar,&QScrollBar::actionTriggered,anchor,&QObject::deleteLater);
+                connect(bar,&QScrollBar::sliderPressed,anchor,&QObject::deleteLater);
+                QTimer::singleShot(0,anchor,restore);
+            }
+        }
+    }
     if(workspaceReceived.elapsed()>500)QTimer::singleShot(0,this,&DesktopWindow::refresh);
     QTimer::singleShot(0,this,&DesktopWindow::warmSavedServers);
 }

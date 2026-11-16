@@ -44,10 +44,11 @@ bool writeFile(QString path,QByteArray data) {
     return file.open(QIODevice::WriteOnly) && file.write(data)==data.size() && file.commit();
 }
 }
-DesktopWindow::DesktopWindow(QString directory,bool generated) : generatedMedia(generated),dataPath(std::move(directory)) {
+DesktopWindow::DesktopWindow(QString directory,bool generated,QJsonObject restartView,bool legacyInstalledUpdate) : generatedMedia(generated),dataPath(std::move(directory)) {
     UiText::setLanguage({});
     configureMediaSync();
     updates=new DesktopUpdates(this,dataPath,[this]{return inCall||joining;});
+    updates->restartView=[this]{return captureUpdateView();};
     api.activeProfileKey=[this]{
         for(auto value:profile["servers"].toArray()){
             const auto entry=value.toObject();
@@ -93,6 +94,35 @@ DesktopWindow::DesktopWindow(QString directory,bool generated) : generatedMedia(
     connect(&timer,&QTimer::timeout,this,&DesktopWindow::refresh);
     mentionClock.start();mentionTimer.setInterval(175);
     connect(&mentionTimer,&QTimer::timeout,this,&DesktopWindow::acknowledgeVisibleMentions);
+    if(legacyInstalledUpdate)
+        restartView={{"profile",localId},{"server",prefs.value("lastServer").toString()},{"view","general"},{"bottom",true}};
+    restoreUpdateServer(restartView);
+}
+
+QJsonObject DesktopWindow::captureUpdateView() const {
+    if(pages->currentIndex()!=1 || api.token.isEmpty() || localId.isEmpty())return {};
+    QJsonObject route{{"profile",localId},{"server",api.server.toString()},{"channel",selected},{"view",view}};
+    if(detailLayout->count()){
+        auto* current=detailLayout->itemAt(0)->widget();
+        if(auto* scroll=current->findChild<QScrollArea*>("settingsScroll")){
+            auto* bar=scroll->verticalScrollBar();
+            route["scroll"]=bar->value();
+            route["bottom"]=bar->maximum()>0 && bar->value()==bar->maximum();
+        }
+    }
+    return route;
+}
+
+void DesktopWindow::restoreUpdateServer(const QJsonObject& route){
+    if(localId.isEmpty() || localId!=route["profile"].toString())return;
+    for(const auto value:profile["servers"].toArray()){
+        const auto entry=value.toObject();
+        const auto origin=DesktopProfile::origin(entry["url"].toString());
+        if(origin.isEmpty() || origin.toString()!=route["server"].toString())continue;
+        pendingUpdateView=route;
+        switchServer(entry);
+        return;
+    }
 }
 // Register only static interface labels, before any profile or server data is loaded.
 QList<DesktopWindow::ChromeText> DesktopWindow::authoredChrome(QWidget* root) {

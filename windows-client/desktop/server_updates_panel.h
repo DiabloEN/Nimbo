@@ -28,12 +28,20 @@ public:
         check=new QPushButton(UiText::CheckForUpdates());install=new QPushButton(UiText::Update());rollback=new QPushButton(UiText::RollBack());
         auto* buttons=new WrapLayout;buttons->setSpacing(10);
         for(auto* b:{check,install,rollback}){Ui::compactButton(b);buttons->addWidget(b);}layout->addLayout(buttons);
+        progressBox=new QWidget;progressBox->setObjectName("desktopUpdateProgress");
+        auto* progressLayout=new QVBoxLayout(progressBox);progressLayout->setContentsMargins(0,2,0,0);progressLayout->setSpacing(6);
+        progressLabel=Ui::text("","color:#aaa;font-size:12px");progressLabel->setTextFormat(Qt::PlainText);
+        progressBar=new QProgressBar;progressBar->setObjectName("desktopUpdateProgressBar");progressBar->setRange(0,1000);progressBar->setTextVisible(false);progressBar->setFixedHeight(4);
+        progressBar->setStyleSheet("QProgressBar{border:0;background:#242424;border-radius:2px} QProgressBar::chunk{background:#66aaf0;border-radius:2px}");
+        progressHint=Ui::text(UiText::UpdateContinuesInBackground(),"color:#888;font-size:12px");progressHint->setWordWrap(true);
+        progressLayout->addWidget(progressLabel);progressLayout->addWidget(progressBar);progressLayout->addWidget(progressHint);layout->addWidget(progressBox);
         timer.setSingleShot(true);
         connect(&timer,&QTimer::timeout,this,[this]{request("GET","/api/server-update",{});});
         connect(check,&QPushButton::clicked,this,[this]{clientCheck();});
         connect(install,&QPushButton::clicked,this,[this]{
-            if(serverReady())request("POST","/api/server-update",{{"tag",state["available"]}},this->client.available());
-            else this->client.install();
+            if(serverReady())request("POST","/api/server-update",{{"tag",state["available"]}});
+            // Client download belongs to the application, not this panel or the server session.
+            if(this->client.available())this->client.install();
         });
         connect(rollback,&QPushButton::clicked,this,[this]{request("POST","/api/server-update/rollback",{{"tag",state["previous"]}});});
         client.observe(this,[this]{render();});render();
@@ -61,6 +69,7 @@ private:
     }
     QJsonObject state;QTimer timer;QString error;
     QLabel *installed,*detail,*desktop;QPushButton *check,*install,*rollback;
+    QWidget* progressBox;QLabel *progressLabel,*progressHint;QProgressBar* progressBar;
     bool managed()const{return owner&&!state.isEmpty()&&state["phase"]!="unmanaged";}
     bool busy()const{return QStringList{"checking","queued","waiting","installing"}.contains(state["phase"].toString());}
     bool serverReady()const{return managed() && !busy() && state["canInstall"].toBool() && !state["available"].toString().isEmpty();}
@@ -83,7 +92,10 @@ private:
         if(msg.isEmpty())msg=labels.value(phase);
         if(serverReady())msg+=" "+state["available"].toString();
         detail->setText(msg);detail->setVisible(owner&&!msg.isEmpty());desktop->setText(client.status());
-        install->setVisible(serverReady()||client.available());install->setEnabled(!posting && !client.active() && (!owner || !state.isEmpty()));
+        progressBox->setVisible(client.installing());progressLabel->setText(client.progressText());progressHint->setText(UiText::UpdateContinuesInBackground());
+        progressBar->setValue(client.totalBytes()?int(client.downloadedBytes()*1000/client.totalBytes()):0);
+        progressBar->setAccessibleName(client.progressText());
+        install->setVisible(serverReady()||client.available());install->setEnabled(!posting && !client.active() && (client.available() || !owner || !state.isEmpty()));
         rollback->setText(UiText::RollBackTo()+state["previous"].toString());rollback->setVisible(managed()&&!state["previous"].toString().isEmpty());rollback->setEnabled(!posting&&!busy());
         check->setEnabled(!posting&&!client.active()&&!busy());
     }

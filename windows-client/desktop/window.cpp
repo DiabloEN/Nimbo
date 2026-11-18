@@ -47,8 +47,9 @@ bool writeFile(QString path,QByteArray data) {
 DesktopWindow::DesktopWindow(QString directory,bool generated,QJsonObject restartView,bool legacyInstalledUpdate) : generatedMedia(generated),dataPath(std::move(directory)) {
     UiText::setLanguage({});
     configureMediaSync();
-    updates=new DesktopUpdates(this,dataPath,[this]{return inCall||joining;});
+    updates=new DesktopUpdates(this,dataPath);
     updates->restartView=[this]{return captureUpdateView();};
+    updates->restartApplication=[this]{close();};
     api.activeProfileKey=[this]{
         for(auto value:profile["servers"].toArray()){
             const auto entry=value.toObject();

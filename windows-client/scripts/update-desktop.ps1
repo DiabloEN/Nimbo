@@ -3,9 +3,13 @@
     [Parameter(Mandatory)][string]$ProfileDir,
     [Parameter(Mandatory)][int]$ParentId,
     [Parameter(Mandatory)][ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version,
-    [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{64}$')][string]$Digest
+    [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{64}$')][string]$Digest,
+    [string]$ReadyFile = ''
 )
 $ErrorActionPreference = 'Stop'
+# Also support older clients that inherit PowerShell 7's module search path.
+# Only built-in modules are needed by this installer.
+$env:PSModulePath = [IO.Path]::Combine($PSHOME,'Modules')
 $target = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
 $parentDir = [IO.Directory]::GetParent($target)
 $archive = Join-Path $PSScriptRoot 'client.zip'
@@ -16,6 +20,31 @@ $oldMoved = $false
 $newInstalled = $false
 $originalTarget = $target
 $canRestart = $false
+$progressWindow = $null
+function Set-UpdateProgress([int]$value,[string]$text) {
+    if (!$ReadyFile) { return }
+    if (!$script:progressWindow) {
+        Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+        $script:progressWindow=New-Object Windows.Forms.Form
+        $script:progressWindow.Text='Nimbo'
+        $script:progressWindow.ClientSize=New-Object Drawing.Size(360,88)
+        $script:progressWindow.StartPosition='CenterScreen'
+        $script:progressWindow.FormBorderStyle='FixedDialog'
+        $script:progressWindow.ControlBox=$false
+        $script:progressWindow.BackColor=[Drawing.Color]::FromArgb(16,16,16)
+        $script:progressLabel=New-Object Windows.Forms.Label
+        $script:progressLabel.SetBounds(20,16,320,26)
+        $script:progressLabel.ForeColor=[Drawing.Color]::FromArgb(237,237,237)
+        $script:progressWindow.Controls.Add($script:progressLabel)
+        $script:progressBar=New-Object Windows.Forms.ProgressBar
+        $script:progressBar.SetBounds(20,52,320,6)
+        $script:progressWindow.Controls.Add($script:progressBar)
+        $script:progressWindow.Show()
+    }
+    $script:progressLabel.Text=$text
+    $script:progressBar.Value=$value
+    [Windows.Forms.Application]::DoEvents()
+}
 function Start-Client {
     Start-Process -FilePath (Join-Path $target 'NimboDesktop.exe') -WorkingDirectory $target -ArgumentList ('--data-dir "' + $ProfileDir.TrimEnd('\') + '"') -PassThru
 }
@@ -54,9 +83,7 @@ try {
     $parent = Get-Process -Id $ParentId -ErrorAction SilentlyContinue
     if ($parent) {
         if ($parent.Path -ne $exe) { throw 'The active client does not match this installation.' }
-        if (!$parent.WaitForExit(20000)) { throw 'Close Nimbo before updating.' }
     }
-    $canRestart = $true
     if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $Digest) { throw 'Release checksum mismatch.' }
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [IO.Compression.ZipFile]::ExtractToDirectory($archive,$stage)
@@ -71,11 +98,26 @@ try {
     $registeredDir = (Get-ItemProperty -LiteralPath $installKey -ErrorAction SilentlyContinue).InstallDir
     $registeredHere = $registeredDir -and ([IO.Path]::GetFullPath($registeredDir).TrimEnd('\') -eq $target)
     $installed = $installed -or $registeredHere
+    $installTarget=$target
+    $legacyPath=Join-Path $env:LOCALAPPDATA 'Programs\Nimbo Desktop Preview'
+    if ($registeredHere -and $target -eq $legacyPath) {
+        $installTarget=Join-Path $parentDir.FullName 'Nimbo'
+        if(Test-Path -LiteralPath $installTarget){throw 'The Nimbo destination already exists. Use Setup to repair this installation.'}
+    }
     $newExe = Join-Path $stage 'NimboDesktop.exe'
     if ([Diagnostics.FileVersionInfo]::GetVersionInfo($newExe).FileVersion -ne $Version) {
         throw 'The executable version does not match the requested release.'
     }
     $expectedExeHash = (Get-FileHash -LiteralPath $newExe -Algorithm SHA256).Hash
+    # Validate and unpack before asking the live client to close. A failed helper
+    # must not turn an otherwise usable client into a silent exit/relaunch loop.
+    if ($ReadyFile) {
+        if ([IO.Path]::GetFullPath($ReadyFile) -ne (Join-Path $PSScriptRoot 'ready')) { throw 'Invalid installer handshake path.' }
+        [IO.File]::WriteAllText($ReadyFile,'ready')
+    }
+    if ($parent -and !$parent.WaitForExit(20000)) { throw 'Close Nimbo before updating.' }
+    $canRestart = $true
+    Set-UpdateProgress 35 $(if($env:NIMBO_UPDATE_LANGUAGE -eq 'en'){'Installing update…'}else{'Устанавливаем обновление…'})
     if ($installed) {
         $profilePath = [IO.Path]::GetFullPath($ProfileDir).TrimEnd('\')
         if ($profilePath.StartsWith($target+'\',[StringComparison]::OrdinalIgnoreCase) -or $profilePath -eq $target) {
@@ -86,6 +128,7 @@ try {
         Copy-Item -LiteralPath $uninstaller -Destination (Join-Path $stage 'Uninstall.exe')
         [IO.Directory]::Move($target,$backup)
         $oldMoved = $true
+        $target=$installTarget
     } else {
         # Keep the previous portable directory and any personal files in their original location.
         $target = Join-Path $parentDir.FullName "Nimbo-Desktop-$Version-portable"
@@ -96,6 +139,10 @@ try {
     }
     [IO.Directory]::Move($stage,$target)
     $newInstalled = $true
+    if($registeredHere -and $target -ne $originalTarget){
+        Set-ItemProperty -LiteralPath $installKey -Name InstallDir -Value $target
+    }
+    Set-UpdateProgress 75 $(if($env:NIMBO_UPDATE_LANGUAGE -eq 'en'){'Starting Nimbo…'}else{'Запускаем Nimbo…'})
     $client = Start-Client
     if ($client.WaitForExit(5000)) { throw 'The updated client exited during startup.' }
     $runningExe = $client.MainModule.FileName
@@ -113,13 +160,18 @@ try {
         # Cleanup failure must never roll back a running, verified new release.
         try { Remove-PristineBackup } catch { Write-Warning $_.Exception.Message }
     }
+    Set-UpdateProgress 100 $(if($env:NIMBO_UPDATE_LANGUAGE -eq 'en'){'Update installed'}else{'Обновление установлено'})
 } catch {
     $reason = $_.Exception.Message
+    [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'failed'),$reason)
     if ($newInstalled) { [IO.Directory]::Move($target,$stage) }
-    if ($oldMoved) { [IO.Directory]::Move($backup,$target) }
+    if ($oldMoved) { [IO.Directory]::Move($backup,$originalTarget) }
     $target = $originalTarget
+    if($registeredHere -and $oldMoved){Set-ItemProperty -LiteralPath $installKey -Name InstallDir -Value $originalTarget}
     if ($canRestart) { Start-Client | Out-Null }
     Add-Type -AssemblyName PresentationFramework
     [System.Windows.MessageBox]::Show($reason,'Nimbo. — обновление') | Out-Null
     exit 1
+} finally {
+    if ($progressWindow) { $progressWindow.Close();$progressWindow.Dispose() }
 }

@@ -24,9 +24,14 @@ static bool finishInstalledUpdate() {
     QSettings listing("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NimboDesktopPreview", QSettings::NativeFormat);
     listing.setValue("DisplayName", "Nimbo");
     listing.setValue("DisplayVersion", QCoreApplication::applicationVersion());
+    listing.setValue("DisplayIcon",directory.filePath("assets/nimbo.ico"));
+    listing.setValue("UninstallString","\""+directory.filePath("Uninstall.exe")+"\"");
     const QDir menu(QStandardPaths::writableLocation(QStandardPaths::ApplicationsLocation));
     const QString link = menu.filePath("Nimbo.lnk");
     const auto exe = QCoreApplication::applicationFilePath();
+    const auto previousLink=QFileInfo(link).symLinkTarget();
+    if(previousLink.compare(exe,Qt::CaseInsensitive)!=0 && QFileInfo(previousLink).fileName().compare("NimboDesktop.exe",Qt::CaseInsensitive)==0)
+        QFile::remove(link);
     if (QFileInfo(link).symLinkTarget().compare(exe, Qt::CaseInsensitive) != 0 && !QFile::link(exe, link)) return false;
     for (const auto name : {"Nimbo Desktop.lnk", "Nimbo Desktop Preview.lnk"}) {
         const QString old = menu.filePath(name);

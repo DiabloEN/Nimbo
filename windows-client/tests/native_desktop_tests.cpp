@@ -6,6 +6,7 @@
 #include "message_text.h"
 #include "message_input.h"
 #include "desktop_updates.h"
+#include "server_updates_panel.h"
 #include "link_card.h"
 #include <QTcpServer>
 #include <QTcpSocket>
@@ -660,6 +661,56 @@ public:
         return true;
     }
 private slots:
+    void updateSurvivesSettingsAndCall_data(){
+        QTest::addColumn<bool>("disconnectFirst");
+        QTest::newRow("continuous")<<false;
+        QTest::newRow("connection-interrupted")<<true;
+    }
+    void updateSurvivesSettingsAndCall(){
+        QFETCH(bool,disconnectFirst);
+        QTcpServer source;QVERIFY(source.listen(QHostAddress::LocalHost));
+        int requests=0;
+        connect(&source,&QTcpServer::newConnection,&source,[&]{
+            auto* socket=source.nextPendingConnection();
+            connect(socket,&QTcpSocket::disconnected,socket,&QObject::deleteLater);
+            connect(socket,&QTcpSocket::readyRead,socket,[&,socket]{
+                if(socket->property("started").toBool()){socket->readAll();return;}
+                socket->readAll();socket->setProperty("started",true);++requests;
+                socket->setProperty("disconnectFirst",disconnectFirst && requests==1);
+                socket->write("HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\nConnection: close\r\n\r\n");
+                auto* chunks=new QTimer(socket);chunks->setInterval(100);
+                connect(chunks,&QTimer::timeout,socket,[socket,chunks]{
+                    socket->write(QByteArray(65536,'x'));
+                    const int n=socket->property("chunks").toInt()+1;socket->setProperty("chunks",n);
+                    if(n==3 && socket->property("disconnectFirst").toBool()){chunks->stop();socket->disconnectFromHost();return;}
+                    if(n==16){chunks->stop();socket->disconnectFromHost();}
+                });chunks->start();
+            });
+        });
+        QTemporaryDir profile;DesktopWindow win(profile.path(),true);win.inCall=true;
+        auto* update=win.updates;update->asset=QUrl(QString("http://127.0.0.1:%1/client.zip").arg(source.serverPort()));
+        update->version="9.9.9";update->expected=1048576;update->digest=QString(64,'0');
+        QWidget viewport;
+        auto panel=[&]{return new ServerUpdatesPanel(win.api,*update,false,&viewport,{},[](const QJsonObject&){return QString();},[](const QString&,const QString&){});};
+        auto* first=panel();update->install();QVERIFY(update->active());
+        QTRY_VERIFY(update->downloadedBytes()>0);
+        QVERIFY(first->findChild<QProgressBar*>("desktopUpdateProgressBar")->value()>0);
+        delete first;
+        const auto before=update->downloadedBytes();QTRY_VERIFY(update->downloadedBytes()>before);
+        auto* reopened=panel();QVERIFY(!reopened->findChild<QWidget*>("desktopUpdateProgress")->isHidden());
+        QVERIFY(reopened->findChild<QProgressBar*>("desktopUpdateProgressBar")->value()>0);
+        if(const auto out=qEnvironmentVariable("NIMBO_UPDATE_SHOTS");!out.isEmpty() && !disconnectFirst){
+            reopened->setStyleSheet(win.styleSheet());reopened->resize(620,210);reopened->show();QTest::qWait(100);
+            QVERIFY(reopened->grab().save(out+"/update-progress-ru.png"));
+            delete reopened;UiText::setLanguage("en");reopened=panel();reopened->setStyleSheet(win.styleSheet());reopened->resize(620,210);reopened->show();
+            QVERIFY(reopened->grab().save(out+"/update-progress-en.png"));UiText::setLanguage("ru");
+        }
+        win.api.reset();win.api.server=QUrl("http://127.0.0.1:1");
+        QTRY_VERIFY_WITH_TIMEOUT(!update->active(),7000);QCOMPARE(requests,disconnectFirst?2:1);
+        QCOMPARE(update->received,qint64(1048576));QCOMPARE(update->message,UiText::Id::TheReleaseChecksumDoesNotMatch);
+        QVERIFY(reopened->findChild<QWidget*>("desktopUpdateProgress")->isHidden());
+        delete reopened;win.inCall=false;
+    }
     void initTestCase() { QLocale::setDefault(QLocale(QLocale::Russian)); }
 
     void interfaceLanguage() {

@@ -33,8 +33,10 @@ private:
     };
     void paintEvent(QPaintEvent*) override;
     void closeEvent(QCloseEvent*) override;
+    void changeEvent(QEvent*) override;
     void place();
     int visibleRows() const;
+    QList<Person> visiblePeople() const;
     OverlayPreferences preferences;
     QWidget& mainWindow;
     void* foregroundHook=nullptr;

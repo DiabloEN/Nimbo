@@ -1381,6 +1381,41 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(visible(),4000);
         for(int i=0;i<15;++i){QTest::qWait(1000);QVERIFY(GetForegroundWindow()==game);QVERIFY(visible());}
     }
+    void gameOverlayNicknameWidth(){
+        QWidget parent;
+        GameOverlay hud(parent);
+        OverlayPreferences prefs; prefs.backgroundOpacity=70; prefs.opacity=100;
+        hud.configure(prefs);
+        QJsonObject local{{"identity","local"},{"name","he he"}};
+        QJsonObject peer{{"identity","peer"},{"micKnown",true},{"mic",true}};
+        auto nameWidth=[&](const QString& text){
+            return 8+28+8+qCeil(QFontMetricsF(hud.font(),&hud).horizontalAdvance(text))+8;
+        };
+        auto showPeer=[&](QString name){peer["name"]=name;hud.setPeople(local,{peer});};
+        const QString wide(25,'W');
+        showPeer(wide);hud.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&hud));
+        QCOMPARE(hud.width(),nameWidth(wide));
+        showPeer(wide+"tail");QCOMPARE(hud.width(),nameWidth(wide+QChar(0x2026)));
+        const QString graphemes=QString(24,'W')+QString::fromUtf8("👩‍💻");
+        showPeer(graphemes);QCOMPARE(hud.width(),nameWidth(graphemes));
+        showPeer(graphemes+"X");QCOMPARE(hud.width(),nameWidth(graphemes+QChar(0x2026)));
+        QJsonArray crowd;
+        for(int i=0;i<9;++i)crowd.append(QJsonObject{{"identity",QString::number(i)},{"name","A"}});
+        crowd.append(peer);hud.setPeople(local,crowd);
+        QCOMPARE(hud.width(),nameWidth("he he"));
+        peer["speaking"]=true;
+        crowd.replace(crowd.size()-1,peer);hud.setPeople(local,crowd);
+        QCOMPARE(hud.width(),nameWidth(graphemes+QChar(0x2026)));
+        const QString shortName=QString::fromUtf8("Десигнер");
+        showPeer(shortName);QCOMPARE(hud.width(),nameWidth(shortName));
+        if(const auto shot=qEnvironmentVariable("NIMBO_QA_OVERLAY_NAMES");!shot.isEmpty()){
+            ServerApi api;QHash<QString,QPixmap> portraits;
+            hud.syncPortraits(&portraits,api);
+            QVERIFY(hud.grab().save(shot));
+        }
+        hud.setPeople(local,{});QCOMPARE(hud.width(),nameWidth("he he"));
+    }
     void gameOverlayLifecycle(){
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
@@ -1513,9 +1548,13 @@ private slots:
         QCOMPARE(win.overlayPrefs.position,QPoint(100,100));
         const auto available=hud->screen()->availableGeometry();
         QCOMPARE(hud->geometry().bottomRight(),available.bottomRight()-QPoint(8,8));
-        QCOMPARE(hud->width(),8+28+8+hud->fontMetrics().horizontalAdvance("Local")+8);
+        auto nameWidth=[hud](const QString& text){
+            return 8+28+8+qCeil(QFontMetricsF(hud->font(),hud).horizontalAdvance(text))+8;
+        };
+        QCOMPARE(hud->width(),nameWidth("Local"));
         QCOMPARE(hud->height(),8+28+8);
-        win.overlayLocalName=QString(100,'W');win.syncGameOverlay();QCOMPARE(hud->width(),228);
+        win.overlayLocalName=QString(100,'W');win.syncGameOverlay();
+        QCOMPARE(hud->width(),nameWidth(QString(25,'W')+QChar(0x2026)));
         QCOMPARE(hud->geometry().right(),available.right()-8);
         background->setValue(43);
         QTest::keyClick(placement,Qt::Key_Left);

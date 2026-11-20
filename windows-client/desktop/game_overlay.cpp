@@ -3,6 +3,7 @@
 #include "window.h"
 #include "ui.h"
 #include <QtWidgets>
+#include <QTextBoundaryFinder>
 #include <algorithm>
 #include <windows.h>
 
@@ -19,6 +20,17 @@ void CALLBACK foregroundChanged(HWINEVENTHOOK hook,DWORD,HWND, LONG,LONG,DWORD,D
 constexpr int margin = 8, rowHeight = 36, avatarSize = 28, contentInset = 8;
 constexpr int rowInset = contentInset - (rowHeight - avatarSize) / 2;
 constexpr int textLeft = contentInset + avatarSize + 8;
+
+QString overlayNickname(const QString& name) {
+    constexpr int maxCharacters=25;
+    if(name.size()<=maxCharacters)return name;
+    QTextBoundaryFinder graphemes(QTextBoundaryFinder::Grapheme,name);
+    for(int i=0;i<maxCharacters;++i){
+        if(graphemes.toNextBoundary()<0)return name;
+    }
+    const auto end=graphemes.position();
+    return end<name.size() ? name.left(end)+QChar(0x2026) : name;
+}
 
 QPoint boundedPosition(QPoint p) {
     return {qBound(0, p.x(), 100), qBound(0, p.y(), 100)};
@@ -109,6 +121,11 @@ GameOverlay::~GameOverlay(){
 
 void GameOverlay::languageChanged() { setWindowTitle(UiText::GameOverlay()); update(); }
 
+void GameOverlay::changeEvent(QEvent* event) {
+    QWidget::changeEvent(event);
+    if(event->type()==QEvent::FontChange && target)place();
+}
+
 void GameOverlay::closeEvent(QCloseEvent* event) {
     // Windows can address the topmost unowned window when closing the process.
     // Let the main window perform its normal call departure before shutting down.
@@ -126,6 +143,20 @@ int GameOverlay::visibleRows() const {
     return target ? qBound(1,(target->availableGeometry().height()-2*margin-2*rowInset)/rowHeight,10) : 10;
 }
 
+QList<GameOverlay::Person> GameOverlay::visiblePeople() const {
+    const int limit=visibleRows();
+    if(people.size()<=limit)return people;
+    QList<Person> rows;
+    rows.reserve(limit);
+    for(bool speaking:{true,false}){
+        for(const auto& person:people){
+            if(person.speaking==speaking)rows.append(person);
+            if(rows.size()==limit)return rows;
+        }
+    }
+    return rows;
+}
+
 void GameOverlay::place() {
     auto* screen=QGuiApplication::primaryScreen();
     for (auto* candidate : QGuiApplication::screens())
@@ -138,12 +169,12 @@ void GameOverlay::place() {
         setScreen(screen);
     }
     const auto area=screen->availableGeometry().adjusted(margin,margin,-margin,-margin);
-    const int rows=qMax(1,qMin(int(people.size()),visibleRows()));
-    const auto metrics=fontMetrics();
-    int nameWidth=0;
-    for(const auto& person:people)nameWidth=qMax(nameWidth,metrics.horizontalAdvance(person.name));
-    const int width=qMin(qMin(area.width(),228),textLeft+nameWidth+contentInset);
-    const QSize size(width,2*rowInset+rows*rowHeight);
+    const auto rows=visiblePeople();
+    const QFontMetricsF metrics(font(),this);
+    qreal nameWidth=0;
+    for(const auto& person:rows)nameWidth=qMax(nameWidth,metrics.horizontalAdvance(person.name));
+    const int width=qMin(area.width(),textLeft+qCeil(nameWidth)+contentInset);
+    const QSize size(width,2*rowInset+qMax(1,int(rows.size()))*rowHeight);
     setGeometry({area.topLeft()+offset(area.size()-size,preferences.position),size});
 }
 
@@ -155,7 +186,7 @@ void GameOverlay::setPeople(const QJsonObject& local,const QJsonArray& peers) {
         if (id.isEmpty() || seen.contains(id)) return;
         seen.insert(id);
         const bool muted=person["micKnown"].toBool() && !person["mic"].toBool();
-        next.append({id,person["name"].toString(UiText::Member2()),person["speaking"].toBool() && !muted});
+        next.append({id,overlayNickname(person["name"].toString(UiText::Member2())),person["speaking"].toBool() && !muted});
     };
     append(local);
     for (auto peer : peers) append(peer.toObject());
@@ -165,7 +196,7 @@ void GameOverlay::setPeople(const QJsonObject& local,const QJsonArray& peers) {
     people=std::move(next);
     portraits.removeIf([&](auto it){ return !seen.contains(it.key()); });
     requested.intersect(seen);
-    if (resized) place();
+    if (resized || people.size()>visibleRows()) place();
     update();
 }
 
@@ -205,12 +236,8 @@ void GameOverlay::syncPortraits(const QHash<QString,QPixmap>* roomAvatars,const 
 
 void GameOverlay::paintEvent(QPaintEvent*) {
     QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
-    const int limit=visibleRows();
-    auto visible=people;
-    if (visible.size()>limit) {
-        std::stable_partition(visible.begin(),visible.end(),[](const Person& person){return person.speaking;});
-        visible.resize(limit);
-    }
+    const auto visible=visiblePeople();
+    const QFontMetricsF metrics(p.font(),p.device());
     p.setOpacity(preferences.opacity/100.);
     int y=rowInset;
     for (const auto& person : visible) {
@@ -226,7 +253,7 @@ void GameOverlay::paintEvent(QPaintEvent*) {
         }
         const QRect line(textLeft,y,width()-textLeft-contentInset,rowHeight);
         p.setPen(person.speaking?Qt::white:QColor("#b3b3b3"));
-        p.drawText(line,Qt::AlignLeft|Qt::AlignVCenter,p.fontMetrics().elidedText(person.name,Qt::ElideRight,line.width()));
+        p.drawText(line,Qt::AlignLeft|Qt::AlignVCenter,metrics.elidedText(person.name,Qt::ElideRight,line.width()));
         y+=rowHeight;
     }
     if(preferences.backgroundOpacity && !visible.isEmpty()){

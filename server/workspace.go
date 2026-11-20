@@ -637,7 +637,11 @@ func (s *workspaceStore) register(mux *http.ServeMux, c config, presence *presen
 	handle("PATCH /api/channels/{id}", mutateChannel)
 	handle("DELETE /api/channels/{id}", mutateChannel)
 	if presence != nil {
+		handle("POST /api/voice-watch", presence.watchVoice)
 		handle("POST /api/voice-state", presence.voiceState)
+		handle("POST /api/voice-control", presence.voiceControlPoll)
+		handle("POST /api/voice-move", presence.moveVoice)
+		handle("POST /api/voice-move/join", presence.joinVoiceMove)
 	}
 	handle("PATCH /api/channel-order", s.reorderChannels)
 	handle("GET /api/messages", s.chatHistory)

@@ -22,7 +22,11 @@ const sdk = vi.hoisted(() => {
         async (_enabled: boolean, _options?: unknown) => undefined as unknown,
       ),
       createScreenTracks: vi.fn(async () => [] as unknown[]),
-      publishTrack: vi.fn(async (_track: unknown) => ({})),
+      trackPublications: new Map<string, { track: any }>(),
+      publishTrack: vi.fn(async (track: any) => {
+        this.localParticipant.trackPublications.set(track.source, { track });
+        return { track };
+      }),
       setScreenShareEnabled: vi.fn(async () => undefined),
       getTrackPublication: vi.fn(() => undefined as { track: unknown } | undefined),
       unpublishTrack: vi.fn(async (_track: unknown, _stop: boolean) => undefined),
@@ -71,6 +75,7 @@ vi.mock('livekit-client', () => ({
   VideoQuality: { LOW: 0, MEDIUM: 1, HIGH: 2 },
   RoomEvent: Object.fromEntries(
     [
+      'DataReceived',
       'TrackPublished',
       'TrackUnpublished',
       'TrackSubscribed',
@@ -139,6 +144,56 @@ describe('useCall lifecycle and audio devices', () => {
     vi.unstubAllGlobals();
   });
 
+  it('accepts move wakeups only from the server', async () => {
+    const { call } = create();
+    await call.join(form);
+    const room = sdk.MockRoom.instances[0]!;
+    room.emit('DataReceived', new Uint8Array(), { identity: 'other' }, 0, 'nimbo.voice-move');
+    room.emit('DataReceived', new Uint8Array(), undefined, 0, 'other-topic');
+    expect(call.moveRequested.value).toBe(0);
+    room.emit('DataReceived', new Uint8Array(), undefined, 0, 'nimbo.voice-move');
+    expect(call.moveRequested.value).toBe(1);
+  });
+  it('retains captures without reopening devices when moved to another room', async () => {
+    const { call } = create();
+    await call.join(form);
+    const old = sdk.MockRoom.instances[0]!;
+    const track = { source: 'screen', mediaStreamTrack: { readyState: 'live' }, stop: vi.fn() };
+    old.localParticipant.trackPublications.set('screen', { track });
+    expect(await call.moveTo('other', 'https://chat.example.org', 'session')).toBe(true);
+    expect(old.disconnect).toHaveBeenCalledWith(false);
+    const next = sdk.MockRoom.instances[1]!;
+    expect(next.localParticipant.publishTrack).toHaveBeenCalledWith(track, { source: 'screen' });
+    expect(next.localParticipant.setMicrophoneEnabled).not.toHaveBeenCalled();
+    expect(track.stop).not.toHaveBeenCalled();
+    expect(fetch).toHaveBeenLastCalledWith(
+      'https://chat.example.org/api/join',
+      expect.objectContaining({ method: 'POST' }),
+    );
+  });
+  it('does not leave the old call when destination admission fails', async () => {
+    const { call } = create();
+    await call.join(form);
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: false,
+      json: async () => ({ error: 'Denied' }),
+    } as Response);
+    expect(await call.moveTo('other', 'https://chat.example.org', 'session')).toBe(false);
+    expect(sdk.MockRoom.instances[0]!.disconnect).not.toHaveBeenCalled();
+    expect(call.connected.value).toBe(true);
+  });
+  it('does not resurrect the call after leaving during transfer admission', async () => {
+    const { call } = create();
+    await call.join(form);
+    const admission = deferred<Response>();
+    vi.mocked(fetch).mockReturnValueOnce(admission.promise);
+    const move = call.moveTo('other', 'https://chat.example.org', 'session');
+    await call.leave();
+    admission.resolve(invitation as Response);
+    expect(await move).toBe(false);
+    expect(sdk.MockRoom.instances).toHaveLength(1);
+    expect(call.connected.value).toBe(false);
+  });
   it('keeps a successful room connection when output switching returns false', async () => {
     const { call, devices } = create();
     devices.selectOutput.mockResolvedValue(false);

@@ -60,7 +60,9 @@ type activity struct {
 	ObservedAt int64  `json:"observedAt"`
 }
 type presenceService struct {
+	watches  map[voiceWatchKey]*voiceWatch
 	hints    map[string]voiceHint
+	controls map[string]*voiceControl
 	mu       sync.Mutex
 	rooms    map[string]voicePresence
 	checked  time.Time
@@ -148,7 +150,11 @@ func (p *presenceService) poll(ctx context.Context) error {
 			m := findMember(&p.store.data, memberID)
 			exists := m != nil && !isBlocked(m)
 			p.store.mu.Unlock()
-			if !exists {
+			p.mu.Lock()
+			hint, hinted := p.hints[person.Identity]
+			left := hinted && hint.Left && hint.Room == room.Name && time.Now().Before(hint.Until)
+			p.mu.Unlock()
+			if !exists || left {
 				var removed map[string]any
 				_ = p.rpc(ctx, "RemoveParticipant", room.Name, &removed, person.Identity)
 				continue

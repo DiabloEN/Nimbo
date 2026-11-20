@@ -1,4 +1,4 @@
-import { activeServer, apiFetch } from './serverConnection';
+import { activeServer, serverFetch } from './serverConnection';
 import { computed, ref } from 'vue';
 import {
   ConnectionError,
@@ -13,6 +13,7 @@ import type {
   Participant,
   LocalParticipant,
   LocalTrackPublication,
+  LocalTrack,
   LocalVideoTrack,
   RemoteAudioTrack,
   RemoteTrackPublication,
@@ -146,6 +147,7 @@ export function useCall(
         | LocalVideoTrack
         | undefined,
   );
+  const moveRequested = ref(0);
   const volumes = ref<Record<string, number>>({});
   try {
     const saved = JSON.parse(localStorage.getItem('nimbo-participant-volumes') || '{}');
@@ -506,7 +508,12 @@ export function useCall(
       if (track.kind === 'audio' && attachments.has(track)) needsAudio.value = true;
     });
   }
-  async function leave(message = 'Вы вышли из комнаты.') {
+  let movingTracks: LocalTrack[] = [];
+  async function leave(message = 'Вы вышли из комнаты.', retainTracks = false) {
+    if (!retainTracks) {
+      for (const track of movingTracks) track.stop();
+      movingTracks = [];
+    }
     mutedScreens.value.clear();
     speakingMeter.stop();
     linkQuality.value = 'unknown';
@@ -527,9 +534,74 @@ export function useCall(
     sync();
     status.value = message;
     try {
-      if (previous) await previous.disconnect(true);
+      if (previous) await previous.disconnect(!retainTracks);
     } finally {
       if (previousContext && previousContext.state !== 'closed') await previousContext.close();
+    }
+  }
+  async function moveTo(
+    destination: string,
+    origin: string,
+    session: string,
+    command?: { identity: string; moveId: string },
+  ) {
+    const previous = room;
+    if (!previous || previous.state !== 'connected' || pending.value || joining.value) return false;
+    pending.value = 'move';
+    const guard = generation;
+    try {
+      // Obtain admission before leaving the old channel. No new device is opened.
+      const response = await serverFetch(origin, command ? '/api/voice-move/join' : '/api/join', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + session },
+        signal: AbortSignal.timeout(8000),
+        body: JSON.stringify(
+          command || {
+            room: destination,
+            name: previous.localParticipant.name || '',
+            password: '',
+          },
+        ),
+      });
+      const invitation = await response.json();
+      if (room !== previous || generation !== guard) return false;
+      if (!response.ok) {
+        status.value = invitation.error || 'Не удалось перейти в другой канал.';
+        return false;
+      }
+      const tracks = [...previous.localParticipant.trackPublications.values()].flatMap((p) =>
+        p.track ? [p.track] : [],
+      );
+      movingTracks = tracks;
+      await leave('Переходим в другой канал…', true);
+      if (generation !== guard + 1) return false;
+      await join(
+        {
+          name: previous.localParticipant.name || '',
+          password: '',
+          room: destination,
+          withMic: false,
+          origin,
+          session,
+        },
+        invitation,
+        tracks,
+      );
+      return !!room && connected.value;
+    } catch {
+      status.value = 'Не удалось перенести звонок. Попробуйте ещё раз.';
+      return false;
+    } finally {
+      for (const track of movingTracks) {
+        if (
+          ![...(room?.localParticipant.trackPublications.values() || [])].some(
+            (p) => p.track === track,
+          )
+        )
+          track.stop();
+      }
+      movingTracks = [];
+      if (pending.value === 'move') pending.value = '';
     }
   }
   function playAudio() {
@@ -545,13 +617,18 @@ export function useCall(
         if (room === current) needsAudio.value = true;
       });
   }
-  async function join(form: {
-    name: string;
-    password: string;
-    room: string;
-    withMic: boolean;
-    session?: string;
-  }) {
+  async function join(
+    form: {
+      name: string;
+      password: string;
+      room: string;
+      withMic: boolean;
+      session?: string;
+      origin?: string;
+    },
+    prepared?: { url: string; token: string; identity: string },
+    retained: LocalTrack[] = [],
+  ) {
     if (room || joining.value) return;
     if (!window.isSecureContext) {
       status.value = 'Для подключения нужен HTTPS или localhost.';
@@ -566,23 +643,31 @@ export function useCall(
     let candidate: Room | undefined;
     let connectingMedia = false;
     try {
-      const origin = activeServer.value;
-      const response = await apiFetch('/api/join', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(form.session ? { Authorization: `Bearer ${form.session}` } : {}),
-        },
-        signal: controller.signal,
-        body: JSON.stringify({ name: form.name.trim(), password: form.password, room: form.room }),
-      });
-      const invitation = await response.json();
-      clearTimeout(timeout);
-      if (current !== generation) return;
-      if (!response.ok) {
-        status.value = invitation.error || 'Вход недоступен.';
-        return;
+      const origin = form.origin || activeServer.value;
+      let invitation = prepared;
+      if (!invitation) {
+        const response = await serverFetch(origin, '/api/join', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(form.session ? { Authorization: `Bearer ${form.session}` } : {}),
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            name: form.name.trim(),
+            password: form.password,
+            room: form.room,
+          }),
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          status.value = result.error || 'Вход недоступен.';
+          return;
+        }
+        invitation = result;
       }
+      clearTimeout(timeout);
+      if (current !== generation || !invitation) return;
       if (invitation.identity) {
         ownConnections.value = [
           ...ownConnections.value.slice(-15),
@@ -606,6 +691,9 @@ export function useCall(
         audioCaptureDefaults: micOptions(),
       });
       const active = candidate;
+      active.on(RoomEvent.DataReceived, (_data, participant, _kind, topic) => {
+        if (room === active && !participant && topic === 'nimbo.voice-move') moveRequested.value++;
+      });
       room = active;
       sync();
       active.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
@@ -627,6 +715,7 @@ export function useCall(
         });
       });
       active.on(RoomEvent.LocalTrackUnpublished, (publication) => {
+        if (room !== active) return;
         trackMedia(active.localParticipant, publication.source, false);
         if (publication.track) removeTrack(publication.track);
         if (room === active) sync();
@@ -781,7 +870,15 @@ export function useCall(
       needsAudio.value = !active.canPlaybackAudio;
       playAudio();
       let micOK = true;
-      if (form.withMic) {
+      if (retained.length) {
+        for (const track of retained) {
+          if (current !== generation) return;
+          if (track.mediaStreamTrack.readyState === 'live') {
+            await active.localParticipant.publishTrack(track, { source: track.source });
+          }
+        }
+        await devices.applyCaptureOptions?.();
+      } else if (form.withMic) {
         try {
           const publication = await serialInput(async () => {
             if (current !== generation) return;
@@ -972,6 +1069,8 @@ export function useCall(
     selectReceiveQuality(sendQuality.value);
   }
   return {
+    moveTo,
+    moveRequested,
     linkQuality,
     isOwnConnection,
     effects,

@@ -3217,3 +3217,32 @@ textarea:focus-visible {
   padding-top: 8px;
   padding-bottom: 8px;
 }
+
+/* Voice moves: the destination uses the shared blue accent, never a border. */
+.channel-item.voice-drop-target .voice-channel-row {
+  background: #080808;
+}
+.channel-people li[draggable='true'] {
+  cursor: grab;
+  border-radius: 8px;
+}
+.channel-people li[draggable='true']:focus-visible {
+  outline: none;
+  background: #292929;
+}
+.channel-people li.voice-dragging {
+  opacity: 0.45;
+}
+.voice-move-notice {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 185;
+  max-width: min(480px, calc(100vw - 32px));
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: #252525;
+  box-shadow: 0 8px 24px #0006;
+  font-size: 12px;
+}

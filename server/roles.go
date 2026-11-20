@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-var allPermissions = []string{"manage_server", "manage_channels", "manage_chat", "kick_members", "ban_members", "manage_roles"}
+var allPermissions = []string{"manage_server", "manage_channels", "manage_chat", "move_members", "kick_members", "ban_members", "manage_roles"}
 
 type workspaceRole struct {
 	ID          string   `json:"id"`

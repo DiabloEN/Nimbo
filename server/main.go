@@ -99,9 +99,9 @@ func reject(w http.ResponseWriter, status int, message string) {
 	jsonReply(w, status, map[string]string{"error": message})
 }
 
-func makeToken(c config, identity, name, room string, now time.Time) (string, error) {
+func makeToken(c config, identity, name, room string, now time.Time, annotations bool) (string, error) {
 	claims := map[string]any{"iss": c.APIKey, "sub": identity, "name": name, "iat": now.Unix(), "nbf": now.Add(-30 * time.Second).Unix(), "exp": now.Add(10 * time.Minute).Unix(),
-		"video": map[string]any{"roomJoin": true, "room": room, "canPublish": true, "canSubscribe": true, "canPublishData": false}}
+		"video": map[string]any{"roomJoin": true, "room": room, "canPublish": true, "canSubscribe": true, "canPublishData": annotations}}
 	payload, err := json.Marshal(claims)
 	if err != nil {
 		return "", err
@@ -290,12 +290,13 @@ func newWorkspaceHandler(c config, store *workspaceStore, presence *presenceServ
 		}
 		identity := id + "." + base64.RawURLEncoding.EncodeToString(nonce)
 		request.Name = authName
-		token, err := makeToken(c, identity, request.Name, request.Room, time.Now())
+		annotations := r.URL.Query().Get("annotations") == "1"
+		token, err := makeToken(c, identity, request.Name, request.Room, time.Now(), annotations)
 		if err != nil {
 			reject(w, 500, "Не удалось создать сессию")
 			return
 		}
-		jsonReply(w, 200, map[string]any{"url": c.MediaURL, "token": token, "identity": identity, "expiresIn": 600})
+		jsonReply(w, 200, map[string]any{"url": c.MediaURL, "token": token, "identity": identity, "expiresIn": 600, "annotations": annotations})
 	}
 	mux.HandleFunc("POST /api/enroll", accessHandler)
 	mux.HandleFunc("POST /api/auth", accessHandler)

@@ -18,7 +18,11 @@ func testConfig() config {
 }
 
 func join(h http.Handler, body, origin string, session ...string) *httptest.ResponseRecorder {
-	r := httptest.NewRequest("POST", "/api/join", strings.NewReader(body))
+	return joinAt(h, "/api/join", body, origin, session...)
+}
+
+func joinAt(h http.Handler, path, body, origin string, session ...string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest("POST", path, strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Origin", origin)
 	if len(session) > 0 {
@@ -51,11 +55,19 @@ func TestJoinAuthorizationAndGrants(t *testing.T) {
 	}
 	identities := map[string]bool{}
 	for i := 0; i < 2; i++ {
-		w := join(h, `{"name":"Саша","room":"lounge"}`, c.Origin, session)
+		path := "/api/join"
+		if i == 1 {
+			path += "?annotations=1"
+			mustStatus(t, joinAt(h, path, `{"name":"Саша","room":"lounge"}`, c.Origin), 401)
+		}
+		w := joinAt(h, path, `{"name":"Саша","room":"lounge"}`, c.Origin, session)
 		if w.Code != 200 {
 			t.Fatal(w.Code, w.Body.String())
 		}
-		var response struct{ Token, Identity, URL string }
+		var response struct {
+			Token, Identity, URL string
+			Annotations          bool
+		}
 		_ = json.Unmarshal(w.Body.Bytes(), &response)
 		if identities[response.Identity] || response.Identity == "" {
 			t.Fatal("identity reused")
@@ -75,7 +87,7 @@ func TestJoinAuthorizationAndGrants(t *testing.T) {
 		var claims map[string]any
 		_ = json.Unmarshal(payload, &claims)
 		grant := claims["video"].(map[string]any)
-		if grant["room"] != "lounge" || grant["roomJoin"] != true || grant["canPublishData"] != false || grant["roomAdmin"] != nil {
+		if grant["room"] != "lounge" || grant["roomJoin"] != true || grant["canPublishData"] != (i == 1) || response.Annotations != (i == 1) || grant["roomAdmin"] != nil {
 			t.Fatal("incorrect scope", grant)
 		}
 		if claims["iss"] != c.APIKey || claims["sub"] != response.Identity || claims["exp"].(float64)-claims["iat"].(float64) != 600 {

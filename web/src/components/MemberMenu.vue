@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppIcon from './AppIcon.vue';
 import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import type { Member } from '../composables/useWorkspace';
 import { editableMember, permitted } from '../composables/roles';
@@ -100,10 +101,10 @@ onBeforeUnmount(() => {
           :disabled="busy"
           @click="run('unmute')"
         >
-          Разрешить писать</button
+          <AppIcon name="chat" :size="16" /><span>Разрешить писать</span></button
         ><template v-else
           ><button :disabled="busy" :aria-expanded="chooseMute" @click="chooseMute = !chooseMute">
-            Запретить писать
+            <AppIcon name="chat" :size="16" /><span>Запретить писать</span>
           </button>
           <div v-if="chooseMute" class="mute-durations">
             <button
@@ -121,7 +122,21 @@ onBeforeUnmount(() => {
             </button>
           </div></template
         ></template
-      ><button v-if="canVoice" :disabled="busy" @click="run('kick')">Отключить от голосовой</button>
+      >
+      <template v-if="canVoice">
+        <button :disabled="busy" @click="run('mute_mic')">
+          <AppIcon name="mic-off" :size="16" /><span>Выключить микрофон</span>
+        </button>
+        <button :disabled="busy" @click="run('mute_camera')">
+          <AppIcon name="camera-off" :size="16" /><span>Выключить камеру</span>
+        </button>
+        <button :disabled="busy" @click="run('mute_screen')">
+          <AppIcon name="screen" :size="16" /><span>Остановить показ экрана</span>
+        </button>
+        <button class="member-menu-danger" :disabled="busy" @click="run('kick')">
+          <AppIcon name="exit" :size="16" /><span>Отключить от голосовой</span>
+        </button>
+      </template>
       <p v-if="!voice && !canChat" class="field-help">Нет доступных действий</p>
       <p v-if="error" role="alert">{{ error }}</p>
     </section></Teleport
@@ -145,15 +160,30 @@ onBeforeUnmount(() => {
   padding: 4px 8px 12px;
 }
 .member-menu > button {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  min-height: 36px;
+  font: inherit;
+  font-size: 12px;
   width: 100%;
   text-align: left;
   background: transparent;
-  padding: 11px 8px;
+  padding: 8px;
   border-radius: 8px;
 }
-.member-menu > button:hover {
+.member-menu > button:hover,
+.member-menu > button:focus-visible {
+  outline: none;
   background: #353535;
+}
+.member-menu-danger {
+  color: #e3a5a5;
+}
+.member-menu button .app-icon {
+  flex-shrink: 0;
+  opacity: 0.8;
 }
 .member-menu label {
   padding: 8px;

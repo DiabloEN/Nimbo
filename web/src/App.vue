@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import SoftButton from './components/SoftButton.vue';
+import { createVoicePresenceWatch } from './composables/voicePresenceWatch';
 import {
   computed,
   defineAsyncComponent,
@@ -871,6 +872,203 @@ async function acceptImport() {
     transferNote.value = (e as Error).message;
   }
 }
+const moveNote = ref('');
+const optimisticMove = ref<{
+  origin: string;
+  identity: string;
+  from: string;
+  to: string;
+  person: ReturnType<typeof rawPeopleIn>[number];
+} | null>(null);
+let moveVisualTimer: ReturnType<typeof setTimeout> | undefined;
+function finishMoveVisual() {
+  clearTimeout(moveVisualTimer);
+  optimisticMove.value = null;
+}
+const moveBusy = ref(false);
+const dragPerson = ref<{ identity: string; from: string; origin: string } | null>(null);
+const dropRoom = ref('');
+let moveNoteTimer: ReturnType<typeof setTimeout> | undefined;
+function notifyMove(message: string) {
+  moveNote.value = message;
+  clearTimeout(moveNoteTimer);
+  moveNoteTimer = setTimeout(() => (moveNote.value = ''), 7000);
+}
+function canMovePerson(identity: string) {
+  const member = members.value.find((m) => m.id === identity.split('.')[0]);
+  return (
+    !!member &&
+    !member.blocked &&
+    workspace.can('move_members') &&
+    !moveBusy.value &&
+    !optimisticMove.value
+  );
+}
+function startPersonDrag(event: DragEvent, identity: string, from: string) {
+  if (!canMovePerson(identity) || !event.dataTransfer) {
+    event.preventDefault();
+    return;
+  }
+  dragPerson.value = { identity, from, origin: activeServer.value };
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('application/x-nimbo-voice', identity);
+}
+function endPersonDrag() {
+  dragPerson.value = null;
+  dropRoom.value = '';
+}
+function leaveDropRoom(event: DragEvent) {
+  if (!(event.currentTarget as HTMLElement).contains(event.relatedTarget as Node))
+    dropRoom.value = '';
+}
+function dragOverRoom(event: DragEvent, id: string) {
+  const person = dragPerson.value;
+  if (
+    !person ||
+    person.origin !== activeServer.value ||
+    person.from === id ||
+    !canMovePerson(person.identity)
+  )
+    return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+  dropRoom.value = id;
+}
+async function movePerson(identity: string, to: string, from: string) {
+  if (!from || !canMovePerson(identity)) return;
+  const person = rawPeopleIn(from).find((p) => p.identity === identity);
+  if (!person) return;
+  moveBusy.value = true;
+  const origin = activeServer.value;
+  optimisticMove.value = { origin, identity, from, to, person };
+  moveVisualTimer = setTimeout(() => {
+    const moved = optimisticMove.value;
+    if (!moved) return;
+    finishMoveVisual();
+    if (!rawPeopleIn(moved.to).some((p) => p.identity === moved.identity))
+      notifyMove('Перенос не завершён. Попробуйте ещё раз.');
+  }, 15000);
+  try {
+    const response = await serverFetch(origin, '/api/voice-move', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer ' + access.session.value,
+      },
+      signal: AbortSignal.timeout(8000),
+      body: JSON.stringify({ identity, from, to }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'Не удалось перенести участника.');
+  } catch (error) {
+    finishMoveVisual();
+    const message =
+      error instanceof Error && error.name !== 'TimeoutError'
+        ? error.message
+        : 'Сервер не ответил. Повторите перенос.';
+    if (activeServer.value === origin) notifyMove(message);
+    throw error;
+  } finally {
+    moveBusy.value = false;
+  }
+}
+function dropPerson(event: DragEvent, to: string) {
+  const person = dragPerson.value;
+  event.preventDefault();
+  endPersonDrag();
+  if (person?.origin === activeServer.value && person.from !== to)
+    void movePerson(person.identity, to, person.from).catch(() => {});
+}
+let controlTimer: ReturnType<typeof setInterval> | undefined;
+let controlRequest: AbortController | undefined;
+let lastMove = '';
+let controlWakePending = false;
+watch(call.moveRequested, () => {
+  controlWakePending = true;
+  if (!controlRequest) {
+    controlWakePending = false;
+    void pollVoiceControl();
+  }
+});
+async function pollVoiceControl() {
+  const location = voice.value;
+  const identity = participants.value.find((p) => p.local)?.identity;
+  if (!connected.value || !location || !identity || changingRoom || controlRequest || pending.value)
+    return;
+  const controller = new AbortController();
+  controlRequest = controller;
+  const timeout = setTimeout(() => controller.abort(), 6000);
+  try {
+    const session =
+      location.origin === activeServer.value && location.member === workspace.selfId.value
+        ? access.session.value
+        : location.session;
+    const response = await serverFetch(location.origin, '/api/voice-control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + session },
+      signal: controller.signal,
+      body: JSON.stringify({ identity, room: location.room }),
+    });
+    if (!response.ok) return;
+    const command = (await response.json()).move;
+    if (
+      !command ||
+      typeof command.id !== 'string' ||
+      typeof command.room !== 'string' ||
+      command.id === lastMove ||
+      voice.value !== location ||
+      !connected.value ||
+      changingRoom ||
+      pending.value ||
+      participants.value.find((p) => p.local)?.identity !== identity
+    )
+      return;
+    lastMove = command.id;
+    changingRoom = true;
+    try {
+      const moved = await call.moveTo(command.room, location.origin, session, {
+        identity,
+        moveId: command.id,
+      });
+      if (voice.value !== location) return;
+      if (moved) {
+        voice.value = { ...location, room: command.room, title: command.name };
+        if (activeServer.value === location.origin && selectedId.value === location.room)
+          selectedId.value = command.room;
+      } else if (!hasRoom.value) voice.value = undefined;
+    } finally {
+      changingRoom = false;
+      rememberRoom();
+    }
+  } catch {
+    /* A temporary poll failure must not interrupt the call. */
+  } finally {
+    clearTimeout(timeout);
+    if (controlRequest === controller) controlRequest = undefined;
+    if (controlWakePending) {
+      controlWakePending = false;
+      void pollVoiceControl();
+    }
+  }
+}
+watch(
+  [connected, () => participants.value.find((p) => p.local)?.identity],
+  () => void pollVoiceControl(),
+);
+watch(activeServer, () => {
+  endPersonDrag();
+  finishMoveVisual();
+  moveNote.value = '';
+});
+onMounted(() => {
+  controlTimer = setInterval(() => void pollVoiceControl(), 2000);
+});
+onBeforeUnmount(() => {
+  clearInterval(controlTimer);
+  clearTimeout(moveNoteTimer);
+  clearTimeout(moveVisualTimer);
+  controlRequest?.abort();
+});
 function openVolume(
   person: { identity: string; name: string; local?: boolean },
   event?: MouseEvent,
@@ -954,7 +1152,7 @@ function clearResume() {
 function rememberRoom() {
   const location = voice.value;
   const person = participants.value.find((p) => p.local);
-  if (!connected.value || !person || !location) return;
+  if (!connected.value || !person || !location || changingRoom) return;
   const saved: ResumeRoom = {
     origin: location.origin,
     room: location.room,
@@ -1012,6 +1210,22 @@ watch(workspace.ready, async (ready) => {
   if (voice.value?.room === saved.room) reportVoice('left', saved.identity, voice.value);
 });
 let changingRoom = false;
+const voicePresenceWatch = createVoicePresenceWatch();
+watch([connected, hasRoom, voice, participants, access.session], () => {
+  if (!hasRoom.value || !voice.value) {
+    voicePresenceWatch.stop();
+    return;
+  }
+  const identity = participants.value.find((p) => p.local)?.identity;
+  if (!connected.value || !identity) return;
+  const location = voice.value;
+  const session =
+    location.origin === activeServer.value && location.member === workspace.selfId.value
+      ? access.session.value
+      : location.session;
+  voicePresenceWatch.update({ origin: location.origin, room: location.room, identity, session });
+});
+onBeforeUnmount(() => voicePresenceWatch.stop());
 const pendingRoom = ref('');
 const showJoinProgress = ref(false);
 watch(
@@ -1077,11 +1291,20 @@ async function chooseRoom(id: string) {
     if (!hasRoom.value) voice.value = undefined;
   }
 }
-function peopleIn(id: string) {
+function rawPeopleIn(id: string) {
   if (connected.value && id === localVoiceRoom.value)
     return participants.value.map((p) => ({ ...p, pending: false, reconnecting: false }));
   const others = (presenceAvailable.value ? presence.value[id]?.people || [] : [])
-    .filter((p) => !call.isOwnConnection(activeServer.value, p.identity))
+    .filter(
+      (p) =>
+        !call.isOwnConnection(activeServer.value, p.identity) &&
+        !(
+          connected.value &&
+          localVoiceRoom.value &&
+          id !== localVoiceRoom.value &&
+          participants.value.some((peer) => peer.identity === p.identity)
+        ),
+    )
     .map((p) => ({
       ...p,
       local: false,
@@ -1107,6 +1330,24 @@ function peopleIn(id: string) {
     });
   return others;
 }
+function peopleIn(id: string) {
+  const move = optimisticMove.value;
+  const people = rawPeopleIn(id);
+  if (!move || move.origin !== activeServer.value) return people;
+  const filtered = people.filter((p) => p.identity !== move.identity);
+  if (id === move.to)
+    filtered.push(people.find((p) => p.identity === move.identity) || move.person);
+  return filtered;
+}
+watch([presence, participants, connected, localVoiceRoom], () => {
+  const move = optimisticMove.value;
+  if (
+    move &&
+    rawPeopleIn(move.to).some((p) => p.identity === move.identity) &&
+    !rawPeopleIn(move.from).some((p) => p.identity === move.identity)
+  )
+    finishMoveVisual();
+});
 watch(rooms, () => {
   if (!workspace.ready.value) return;
   if (
@@ -1177,6 +1418,10 @@ function openInvite() {
 }
 function beforeUnload() {
   rememberRoom();
+  // LiveKit also handles beforeunload and clears the local identity. Send the
+  // authenticated keepalive before that happens; pagehide remains a fallback.
+  pageLeaving = true;
+  reportVoice('left');
 }
 function pageHide() {
   rememberRoom();
@@ -1489,6 +1734,10 @@ onBeforeUnmount(() => {
                 v-for="room in voiceRooms.filter((c) => (c.section || c.kind) === group.id)"
                 :key="room.id"
                 class="channel-item"
+                :class="{ 'voice-drop-target': dropRoom === room.id }"
+                @dragover="dragOverRoom($event, room.id)"
+                @dragleave="leaveDropRoom"
+                @drop="dropPerson($event, room.id)"
               >
                 <div class="voice-channel-row" :class="{ selected: selectedId === room.id }">
                   <button
@@ -1523,10 +1772,18 @@ onBeforeUnmount(() => {
                     v-for="person in peopleIn(room.id)"
                     :key="person.identity"
                     :class="{
+                      'voice-dragging': dragPerson?.identity === person.identity,
                       speaking: person.speaking,
                       pending: person.pending && showJoinProgress,
                       reconnecting: person.reconnecting,
                     }"
+                    :draggable="
+                      canMovePerson(person.identity) && !person.pending && !person.reconnecting
+                    "
+                    :tabindex="canMovePerson(person.identity) ? 0 : undefined"
+                    @dragstart="startPersonDrag($event, person.identity, room.id)"
+                    @dragend="endPersonDrag"
+                    @keydown.shift.f10.prevent="openVolume(person)"
                     @contextmenu.prevent="openVolume(person, $event)"
                   >
                     <span class="avatar tiny"
@@ -2153,6 +2410,7 @@ onBeforeUnmount(() => {
     </aside>
   </div>
 
+  <div v-if="moveNote" class="voice-move-notice" role="status">{{ moveNote }}</div>
   <MemberMenu
     v-if="volumePerson"
     :key="volumePerson.identity + volumePerson.x + volumePerson.y"

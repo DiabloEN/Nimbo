@@ -896,7 +896,7 @@ void DesktopWindow::join() {
                 (share?screenMode:cameraMode)=mode;cameraButton->setEnabled(inCall);screenButton->setEnabled(inCall);
                 cameraButton->setText(cameraMode==2?UiText::TurnOffCamera():UiText::Camera());screenButton->setText(screenMode>=3?UiText::StopSharing():UiText::ScreenSharing());refreshDock();updateLocalPerson();note(error);
             });
-            connect(media.get(),&VoiceEvents::screenAudioChanged,this,[this](bool on,QString error){sharingSound=on;refreshDock();if(!error.isEmpty())note(error);});
+            connect(media.get(),&VoiceEvents::screenAudioChanged,this,[this](bool on,QString error){screenAudioPending=false;sharingSound=on;refreshDock();if(!error.isEmpty())note(error);});
             connect(media.get(),&VoiceEvents::effectFailed,this,[this]{QSettings(dataPath+"/desktop.ini",QSettings::IniFormat).setValue("blur",false);if(view=="video")renderView();note(UiText::CouldNotEnableBlurTheCameraIs());});
             connect(media.get(),&VoiceEvents::microphoneMuted,this,[this](bool off){
                 if(!inCall || muted==off)return;
@@ -971,7 +971,7 @@ void DesktopWindow::setCall(bool active) {
         const auto next=std::exchange(pendingVoiceRoom,QString{}),origin=std::exchange(pendingVoiceOrigin,QString{});
         if(!next.isEmpty())QTimer::singleShot(0,this,[this,next,origin]{if(selected==next && api.server.toString()==origin && kind=="voice" && !inCall && !joining)join();});
         leavingVoice=false;rosterSeeded=false;callQuality.clear();updateNetworkIndicator();}
-    inCall=active;joining=false;muted=false;localSpeaking=false;cameraMode=0;screenMode=0;sharingSound=false;if(!active){mutedStreams.clear();trackFrames.clear();liveRoster={};frameHosts.clear();}
+    inCall=active;joining=false;muted=false;localSpeaking=false;cameraMode=0;screenMode=0;sharingSound=false;screenAudioPending=false;if(!active){mutedStreams.clear();trackFrames.clear();liveRoster={};frameHosts.clear();}
     previewingOverlay=false;syncGameOverlay();
     if(!active)overlayLocalName.clear();
     removeKeys();

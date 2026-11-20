@@ -26,18 +26,19 @@ public:
     }
 };
 
-// Capture other applications only. Never fall back to a whole endpoint mix.
+// Bind capture to a process tree. Never fall back to a whole endpoint mix.
 class ScreenAudioCapture final {
 public:
-    explicit ScreenAudioCapture(DWORD applicationPid){
+    ScreenAudioCapture(DWORD process, PROCESS_LOOPBACK_MODE mode){
         const HRESULT apartment=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
         if(FAILED(apartment)&&apartment!=RPC_E_CHANGED_MODE)check(apartment);
         apartmentOwner=SUCCEEDED(apartment);
         try{
             AUDIOCLIENT_ACTIVATION_PARAMS params{};
             params.ActivationType=AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
-            params.ProcessLoopbackParams.TargetProcessId=applicationPid ? applicationPid : GetCurrentProcessId();
-            params.ProcessLoopbackParams.ProcessLoopbackMode=PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE;
+            if (!process) throw std::runtime_error("Missing audio target");
+            params.ProcessLoopbackParams.TargetProcessId=process;
+            params.ProcessLoopbackParams.ProcessLoopbackMode=mode;
             PROPVARIANT property{};
             property.vt=VT_BLOB;
             property.blob.cbSize=sizeof(params);

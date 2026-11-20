@@ -79,11 +79,9 @@ public:
         surface->frame=image;
         surface->update();
     }
-    void setSound(bool available,bool enabled){
+    void setSound(bool available,bool enabled,const QString& label){
         sound->setEnabled(available);sound->setIcon(Ui::icon(enabled?"sound":"sound-off"));
-        sound->setAccessibleName(own?(enabled?UiText::TurnOffSharedAudio():UiText::ShareSystemAudio()):
-            (enabled?UiText::MuteStreamForMe():UiText::UnmuteStreamForMe()));
-        sound->setToolTip(available?sound->accessibleName():UiText::AudioWasNotEnabledWhenTheScreen());
+        sound->setAccessibleName(label);sound->setToolTip(label);
     }
     void setMini(bool small,bool focus=false){
         mini=small;syncPen();
@@ -95,7 +93,7 @@ public:
             p.setPen(QPen(QColor("#ededed"),1.2,Qt::SolidLine,Qt::RoundCap));p.drawLine(QPointF(3.75,12.75),QPointF(14.25,12.75));p.end();mode->setIcon(QIcon(dash));
         }
         const int inset=small?8:10;layout->setContentsMargins(inset,inset,inset,inset);
-        sound->setVisible(!own || !small);grip->setVisible(small);grip->raise();
+        grip->setVisible(small);grip->raise();
         for(QWidget* target : QList<QWidget*>{title,surface})target->setCursor(small?Qt::OpenHandCursor:Qt::ArrowCursor);
         if(surface->drawing)surface->setCursor(Qt::CrossCursor);
         position(withMembers);

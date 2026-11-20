@@ -36,6 +36,7 @@ private:
     friend class NativeDesktopTests;
     QObject* workerContext() const;
     int activeEncoderQueues() const;
+    int activeScreenAudioResources() const;
     quint64 audibleTestBlocks() const;
     std::atomic<quint64> audibleBlocks_{0};
     void postFrame(const QString& member,bool screen,const QImage& frame);

@@ -104,6 +104,8 @@ private:
     QHash<QString,QPointer<VoiceCard>> frameHosts;
     void frameArrived(QString id,bool screen,const QImage& frame);
     void viewTrack(QString key,QString name,bool mini=false);
+    void toggleStreamSound(const QString& key);
+    void refreshStreamSound();
     void syncViewer(bool newScreen=false);
     QSet<QString> mutedStreams;
     StreamViewer* viewer=nullptr;
@@ -292,7 +294,7 @@ private:
     unsigned channelGeneration = 0, messageRevision=0;
     bool refreshing = false, loadingMessages = false, sending = false, inCall = false, joining = false, muted = false, keyBound = false;
     int cameraMode=0,screenMode=0;
-    bool sharingSound=false;
+    bool sharingSound=false, screenAudioPending=false;
     QPushButton* screenSoundButton;
     QComboBox *sendQuality,*loginProfiles;
     QLabel* loginProfilesLabel;

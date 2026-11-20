@@ -91,6 +91,9 @@ class MediaWorker final : public QObject, public livekit::RoomDelegate {
 public:
     explicit MediaWorker(MediaSession* owner) : owner_(owner) {}
     int activeEncoderQueues() const{return int(bool(cameraVideo_.encoder))+int(bool(shareVideo_.encoder));}
+    int activeScreenAudioResources() const{
+        return int(bool(loopback_))+int(bool(screenAudioTrack_))+int(bool(screenAudioSource_));
+    }
     void start(const MediaOptions& options, bool mayRetry = true) {
         stop(false); options_ = options; gains_=options.participantVolumes; muted_ = false; tx_ = rx_ = videoRx_ = 0; rms_ = 0; ticks_ = 0;
         ++generation_;
@@ -248,15 +251,31 @@ public:
     }
     void setScreenAudio(bool enabled){
         stopScreenAudio(true);
-        if(!enabled || !room_ || shareVideo_.mode!=3){emit owner_->screenAudioChanged(false,{});return;}
+        if(!enabled || !room_ || (shareVideo_.mode!=3 && shareVideo_.mode!=4)){emit owner_->screenAudioChanged(false,{});return;}
         try{
-            loopback_=std::make_unique<ScreenAudioCapture>(options_.applicationPid);
+            const DWORD ownPid=options_.applicationPid?options_.applicationPid:GetCurrentProcessId();
+            DWORD pid=ownPid;
+            auto scope=PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE;
+            if(shareVideo_.mode==4){
+                const auto* window=QCapturableWindowPrivate::handle(options_.window);
+                if(!window || !options_.window.isValid() ||
+                   !GetWindowThreadProcessId(reinterpret_cast<HWND>(window->id),&pid) || !pid)
+                    throw std::runtime_error("Window unavailable");
+                if(pid==ownPid || pid==GetCurrentProcessId()){
+                    emit owner_->screenAudioChanged(false,UiText::OwnWindowAudioUnavailable());return;
+                }
+                scope=PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
+            }
+            loopback_=std::make_unique<ScreenAudioCapture>(pid,scope);
             auto peer=room_->localParticipant().lock();if(!peer)throw std::runtime_error("Room unavailable");
             screenAudioSource_=std::make_shared<livekit::AudioSource>(48000,2,0);
             screenAudioTrack_=peer->publishAudioTrack("screen-audio",screenAudioSource_,livekit::TrackSource::SOURCE_SCREENSHARE_AUDIO);
             if(!screenAudioTrack_)throw std::runtime_error("Publication failed");
             emit owner_->screenAudioChanged(true,{});
-        }catch(const std::exception&){stopScreenAudio(true);emit owner_->screenAudioChanged(false,UiText::ScreenSharingContinuesWithoutAudioCapturingOther());}
+        }catch(const std::exception&){
+            stopScreenAudio(true);
+            emit owner_->screenAudioChanged(false,shareVideo_.mode==4?UiText::WindowAudioUnavailable():UiText::ScreenSharingContinuesWithoutAudioCapturingOther());
+        }
     }
     void selectAudioDevice(bool input,const QByteArray& id){
         if(!room_)return;
@@ -968,6 +987,11 @@ quint64 MediaSession::audibleTestBlocks() const {return audibleBlocks_.load();}
 int MediaSession::activeEncoderQueues() const {
     int count=0;
     QMetaObject::invokeMethod(worker_,[this,&count]{count=worker_->activeEncoderQueues();},Qt::BlockingQueuedConnection);
+    return count;
+}
+int MediaSession::activeScreenAudioResources() const {
+    int count=0;
+    QMetaObject::invokeMethod(worker_,[this,&count]{count=worker_->activeScreenAudioResources();},Qt::BlockingQueuedConnection);
     return count;
 }
 MediaSession::~MediaSession() {

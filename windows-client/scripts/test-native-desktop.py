@@ -22,6 +22,7 @@ def main():
     parser.add_argument("--platform",choices=["offscreen","windows","windows:fontengine=directwrite","windows:fontengine=freetype","direct2d"],default="offscreen")
     parser.add_argument("--online-youtube",action="store_true",help="Require an actual online YouTube clip to start with one click")
     parser.add_argument("--capture-window",action="store_true",help="Also capture the test's own colored Windows window and verify its pixels on a second client")
+    parser.add_argument("--windows-share-audio",action="store_true",help="Verify native window and monitor audio using Steam Streaming Speakers as a virtual endpoint")
     parser.add_argument("--local-devices",action="store_true",help="Exercise default microphone, output and camera in an empty disposable localhost room; do not save recordings")
     parser.add_argument("--browser-share-voice",type=Path,metavar="BROWSER",help="Run only the muted Chromium-to-Windows microphone test during five screen shares")
     parser.add_argument("--playwright-module",default="playwright",help="Node module name or path for the browser fixture")
@@ -30,8 +31,8 @@ def main():
     plugin=ROOT/"build-media/platforms"/("q"+args.platform.split(":")[0]+".dll")
     if not plugin.is_file():
         parser.error(f"Qt platform plugin missing from the test deployment: {plugin.name}")
-    if args.capture_window and not args.platform.startswith("windows"):
-        parser.error("--capture-window needs the Windows platform")
+    if (args.capture_window or args.windows_share_audio) and not args.platform.startswith("windows"):
+        parser.error("Real screen capture needs the Windows platform")
     server=args.server.resolve()
     out=ROOT/"artifacts/native-desktop";out.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(dir=out) as tmp:
@@ -40,7 +41,8 @@ def main():
         updates=temp/"qa-updates"
         (updates/"requests").mkdir(parents=True)
         (updates/"status.json").write_text(json.dumps({"phase":"available","available":"server-v1.2.3","canInstall":True}))
-        with isolated(ROOT,temp,server,suffixes=("", "2", "3", "4", "5") if args.local_devices else ("", "2", "3", "4"),update_dir=updates) as env:
+        suffixes=("",) if args.windows_share_audio else ("", "2", "3", "4", "5") if args.local_devices else ("", "2", "3", "4")
+        with isolated(ROOT,temp,server,suffixes=suffixes,update_dir=updates) as env:
             from urllib.request import urlopen
             with urlopen(env["NIMBO_NATIVE_TEST_URL"]+"/healthz",timeout=3) as r: installed=json.load(r)["version"]
             (updates/"status.json").write_text(json.dumps({"phase":"available","installed":installed,"available":"server-v1.2.3","previous":"server-v1.2.2","canInstall":True}))
@@ -48,6 +50,18 @@ def main():
             env["NIMBO_QA_UPDATE_INBOX"]=str(updates/"requests")
             env.update(NIMBO_WEB_FIXTURE=str(fixture), NIMBO_NATIVE_TEST_SCREENSHOT=str(out/"workspace.png"),QT_QPA_PLATFORM=args.platform)
             env["NIMBO_QA_SILENT_OUTPUT"]="1"
+            if args.windows_share_audio:
+                binary=ROOT/"build-media/nimbo_desktop_tests.exe"
+                sound=temp/"phrase.wav"
+                env["NIMBO_SHARE_AUDIO_TEST_WINDOW"]="Nimbo QA "+secrets.token_hex(6)
+                subprocess.run([binary,"--write-test-microphone",sound],env=env,check=True)
+                source=subprocess.Popen([binary,"--virtual-share-audio",sound],env=env)
+                try:
+                    subprocess.run([binary,"windowsShareSound","-o",str(out/"windows-share-audio.txt")+",txt"],env=env,check=True,timeout=150)
+                finally:
+                    source.terminate()
+                    source.wait(timeout=10)
+                return
             if args.browser_share_voice:
                 env.update(NIMBO_BROWSER_AUDIO_FIXTURE=str(temp),NIMBO_QA_BROWSER=str(args.browser_share_voice.resolve()),
                            NIMBO_PLAYWRIGHT=args.playwright_module)

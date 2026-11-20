@@ -285,7 +285,7 @@ void DesktopWindow::buildWorkspace() {
     muteButton=action("mic",UiText::MuteMicrophone(),40);cameraButton=action("camera",UiText::Camera(),40);screenButton=action("screen",UiText::ScreenSharing(),40);joinButton=action("exit",UiText::Disconnect(),40);
     for(auto* b:{muteButton,cameraButton,screenButton})controls->addWidget(b);
     screenSoundButton=action("sound-off",UiText::ShareSystemAudio(),32);controls->addWidget(screenSoundButton);screenSoundButton->hide();
-    connect(screenSoundButton,&QPushButton::clicked,this,[this]{if(media && screenMode==3){screenSoundButton->setEnabled(false);media->setScreenAudio(!sharingSound);}});
+    connect(screenSoundButton,&QPushButton::clicked,this,[this]{toggleStreamSound(callIdentity+"/screen");});
     sendQuality=Ui::select(UiText::CameraAndScreenSharingQuality());sendQuality->setStyleSheet("QComboBox{background:#242424;color:#ededed;border:0;border-radius:12px;padding:0 10px;font-size:12px} QComboBox::drop-down{width:0;border:0}");sendQuality->addItem(UiText::Auto(),1080);for(int h:{360,720,1080})sendQuality->addItem(QString::number(h)+"p",h);controls->addWidget(sendQuality);sendQuality->hide();
     quickEffects=action("sparkles",UiText::CameraEffects(),40);controls->addWidget(quickEffects);quickEffects->hide();
     connect(quickEffects,&QPushButton::clicked,this,&DesktopWindow::showCameraEffects);
@@ -784,9 +784,19 @@ void DesktopWindow::refreshStage(){
         if(canModerate && person["mic"].toBool())addMediaAction(tile,id,"mute_mic",UiText::MuteMicrophone2()+name,"mic-off");
         if(canModerate && cam)addMediaAction(tile,id,"mute_camera",UiText::TurnOffCamera2()+name,"camera-off");
         if(share){auto* group=new QWidget;group->setFixedWidth(groupW);group->setObjectName("shareGroup");group->setStyleSheet("QWidget#shareGroup{background:#15191b;border-radius:22px}");auto* duo=new QHBoxLayout(group);duo->setContentsMargins(6,6,6,6);duo->setSpacing(8);duo->addWidget(tile,0,Qt::AlignTop);
-            auto* shareCard=new VoiceCard(cardW,name,false,false,false,{},true,true,true);shareCard->setFrame(trackFrames[screen]);frameHosts[screen]=shareCard;auto* expand=action("expand",UiText::ExpandScreen()+name,32);shareCard->addOverlay(expand,true);if(canModerate)addMediaAction(shareCard,id,"mute_screen",UiText::StopScreenSharing()+name,"screen-off");connect(expand,&QPushButton::clicked,shareCard,[this,screen,name]{viewTrack(screen,name);});duo->addWidget(shareCard,0,Qt::AlignTop);place(group,groupW);}
+            auto* shareCard=new VoiceCard(cardW,name,false,false,false,{},true,true,true);
+            shareCard->setFrame(trackFrames[screen]);frameHosts[screen]=shareCard;
+            auto* expand=action("expand",UiText::ExpandScreen()+name,32);shareCard->addOverlay(expand,true);
+            auto* sound=action("sound-off",UiText::StreamAudio(),32);
+            sound->setObjectName("streamCardSound");shareCard->addOverlay(sound,true);
+            sound->move(expand->x()-sound->width()-5,expand->y());
+            connect(sound,&QPushButton::clicked,shareCard,[this,screen]{toggleStreamSound(screen);});
+            if(canModerate)addMediaAction(shareCard,id,"mute_screen",UiText::StopScreenSharing()+name,"screen-off");
+            connect(expand,&QPushButton::clicked,shareCard,[this,screen,name]{viewTrack(screen,name);});
+            duo->addWidget(shareCard,0,Qt::AlignTop);place(group,groupW);}
         else place(tile,cardW);
     }
+    refreshStreamSound();
     if(!local&&!people.isEmpty()){auto* enter=new QPushButton(showProgress?UiText::ConnectingToTheConversation():UiText::Join());enter->setEnabled(!connecting);enter->setIcon(icon("plus"));enter->setFixedSize(qMin(230,avail),190);place(enter,enter->width());connect(enter,&QPushButton::clicked,this,&DesktopWindow::join);}
 }
 bool DesktopWindow::eventFilter(QObject* o,QEvent* event){
@@ -836,16 +846,46 @@ void DesktopWindow::displayInk(const ScreenInk::Strokes& strokes){
     presenterInk->strokes=strokes;
     presenterInk->refresh();
 }
-void DesktopWindow::viewTrack(QString key,QString name,bool mini){
-    if(!trackFrames.contains(key))return;
-    if(!viewer)viewer=new StreamViewer(this,[this]{
-        if(viewer->track==callIdentity+"/screen"){screenSoundButton->click();return;}
-        if(!media)return;
-        const QString peer=viewer->track.chopped(7);
+void DesktopWindow::toggleStreamSound(const QString& key){
+    if(!media || !inCall)return;
+    if(key==callIdentity+"/screen"){
+        if((screenMode!=3 && screenMode!=4) || screenAudioPending)return;
+        screenAudioPending=true;
+        media->setScreenAudio(!sharingSound);
+    }else{
+        const QString peer=key.chopped(7);
         const bool mute=!mutedStreams.contains(peer);
         if(mute)mutedStreams.insert(peer);else mutedStreams.remove(peer);
-        media->muteStreamPlayback(peer,mute);viewer->setSound(true,!mute);
-    },[this]{
+        media->muteStreamPlayback(peer,mute);
+    }
+    refreshStreamSound();
+}
+void DesktopWindow::refreshStreamSound(){
+    const auto own=callIdentity+"/screen";
+    const bool available=inCall && (screenMode==3 || screenMode==4) && !screenAudioPending;
+    const QString ownAction=sharingSound?UiText::TurnOffSharedAudio():screenMode==4?UiText::ShareWindowAudio():UiText::ShareSystemAudio();
+    auto apply=[](QPushButton* button,bool enabled,bool on,const QString& label){
+        button->setEnabled(enabled);button->setIcon(icon(on?"sound":"sound-off"));
+        button->setAccessibleName(label);button->setToolTip(label);
+    };
+    apply(screenSoundButton,available,sharingSound,ownAction);
+    for(auto it=frameHosts.cbegin();it!=frameHosts.cend();++it){
+        if(!it.value() || !it.key().endsWith("/screen"))continue;
+        auto* button=it.value()->findChild<QPushButton*>("streamCardSound");
+        if(!button)continue;
+        const bool local=it.key()==own;
+        const bool on=local?sharingSound:!mutedStreams.contains(it.key().chopped(7));
+        apply(button,local?available:inCall,on,local?ownAction:on?UiText::MuteStreamForMe():UiText::UnmuteStreamForMe());
+    }
+    if(viewer && !viewer->track.isEmpty()){
+        const bool local=viewer->track==own;
+        const bool on=local?sharingSound:!mutedStreams.contains(viewer->track.chopped(7));
+        viewer->setSound(local?available:inCall,on,local?ownAction:on?UiText::MuteStreamForMe():UiText::UnmuteStreamForMe());
+    }
+}
+void DesktopWindow::viewTrack(QString key,QString name,bool mini){
+    if(!trackFrames.contains(key))return;
+    if(!viewer)viewer=new StreamViewer(this,[this]{toggleStreamSound(viewer->track);},[this]{
         QWidget* area=messages->isVisible()?messages->viewport():content->currentWidget();
         return QRect(area->mapTo(this,QPoint()),area->size());
     });
@@ -860,8 +900,7 @@ void DesktopWindow::viewTrack(QString key,QString name,bool mini){
     if(key==callIdentity+"/screen")viewer->setInkSession(ownInkSession,true);
     else if(media)media->sendInk(key.chopped(7),{{"type","query"}});
     viewer->position(view=="room" && expandedMembers);
-    if(viewer->track==callIdentity+"/screen")viewer->setSound(screenMode==3,sharingSound);
-    else viewer->setSound(true,!mutedStreams.contains(viewer->track.chopped(7)));
+    refreshStreamSound();
 }
 void DesktopWindow::syncViewer(bool newScreen){
     const bool watching=inCall && view=="room" && kind=="voice" && selected==activeVoice && callOrigin==api.server.toString();
@@ -879,8 +918,6 @@ void DesktopWindow::syncViewer(bool newScreen){
     wasViewingCall=watching;
     if(viewer && viewer->isVisible()){
         viewer->position(view=="room" && expandedMembers);
-        if(viewer->track==callIdentity+"/screen")viewer->setSound(screenMode==3,sharingSound);
-    else viewer->setSound(true,!mutedStreams.contains(viewer->track.chopped(7)));
     }
 }
 void DesktopWindow::relayoutChat(){
@@ -968,10 +1005,7 @@ void DesktopWindow::refreshDock(){
     sendQuality->setVisible(inCall&&(screenMode||cameraMode));
     quickEffects->setVisible(inCall&&cameraMode!=0);
     screenSoundButton->setVisible(inCall&&screenMode!=0);
-    screenSoundButton->setEnabled(inCall&&screenMode==3);
-    screenSoundButton->setIcon(icon(sharingSound?"sound":"sound-off"));
-    screenSoundButton->setAccessibleName(sharingSound?UiText::TurnOffSharedAudio():UiText::ShareSystemAudio());
-    screenSoundButton->setToolTip(screenMode==4?UiText::OnlyVideoIsAvailableForIndividualWindows():UiText::ShareAudioFromOtherAppsWithoutNimbo());
+    refreshStreamSound();
     sendQuality->setFixedSize(compact?54:72,42);
     auto* layout=static_cast<QHBoxLayout*>(dock->layout());
     layout->setContentsMargins(compact?10:24,compact?10:14,compact?10:24,compact?10:14);layout->setSpacing(compact?8:10);

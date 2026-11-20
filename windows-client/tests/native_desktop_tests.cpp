@@ -862,6 +862,86 @@ private slots:
         }
         QCOMPARE(moved,QStringList({"one.1","a","b"}));
     }
+    void windowsShareSound(){
+        const auto url=qEnvironmentVariable("NIMBO_NATIVE_TEST_URL");
+        const auto title=qEnvironmentVariable("NIMBO_SHARE_AUDIO_TEST_WINDOW");
+        if(title.isEmpty() || QUrl(url).host()!="127.0.0.1" || !qEnvironmentVariableIsSet("NIMBO_QA_SILENT_OUTPUT"))
+            QSKIP("Requires isolated call and separate virtual audio source");
+        QCapturableWindow source;
+        auto findSource=[&]{
+            for(const auto& w:QWindowCapture::capturableWindows())if(w.description()==title)source=w;
+            return source.isValid();
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(findSource(),8000);
+        QTemporaryDir hostDir,guestDir;
+        DesktopWindow host(hostDir.path(),true),guest(guestDir.path(),false);
+        auto join=[&](DesktopWindow& w,QString name,QString code){
+            w.setAttribute(Qt::WA_DontShowOnScreen);w.resize(1280,780);w.show();
+            w.address->setText(url);w.nickname->setText(name);w.password->setText(code);w.loginButton->click();
+            QTRY_VERIFY(!w.rooms.isEmpty());
+            for(int i=0;i<w.channels->count();++i){
+                if(w.channels->item(i)->data(Qt::UserRole).toJsonObject()["kind"]=="voice"){
+                    w.channels->setCurrentRow(i);break;
+                }
+            }
+            w.join();QTRY_VERIFY_WITH_TIMEOUT(w.inCall,12000);
+            if(!w.muted)w.toggleMute();
+        };
+        join(host,"Host",qEnvironmentVariable("NIMBO_NATIVE_TEST_CODE"));
+        QString invite;
+        host.api.request("POST","/api/invitations",{{"seconds",600},{"singleUse",true}},
+                         [&](QJsonObject data,QString){invite=data["code"].toString();});
+        QTRY_VERIFY(!invite.isEmpty());join(guest,"Guest",invite);
+        const auto key=host.callIdentity+"/screen";
+        auto card=[&](DesktopWindow& w)->QPushButton*{
+            auto tile=w.frameHosts.value(key);
+            return tile?tile->findChild<QPushButton*>("streamCardSound"):nullptr;
+        };
+        auto silence=[&]{
+            QTest::qWait(600);
+            auto before=guest.media->audibleTestBlocks();QTest::qWait(500);
+            QCOMPARE(guest.media->audibleTestBlocks(),before);
+        };
+        for(int mode:{4,3}){
+            host.media->changeVideo(true,mode,{},QGuiApplication::primaryScreen()->name(),source);
+            QTRY_VERIFY_WITH_TIMEOUT(card(host) && card(guest),15000);
+            QTRY_COMPARE(host.screenMode,mode);
+            QVERIFY(card(host)->isEnabled());silence();
+            host.viewTrack(key,"Host",true);
+            QPushButton* button=nullptr;
+            const QString action=mode==4?UiText::ShareWindowAudio():UiText::ShareSystemAudio();
+            for(auto* b:host.viewer->findChildren<QPushButton*>())if(b->accessibleName()==action)button=b;
+            QVERIFY(button && button->isVisible() && host.viewer->mini);
+            QSignalSpy state(host.media.get(),&VoiceEvents::screenAudioChanged);
+            QTest::mouseClick(mode==4?button:card(host),Qt::LeftButton);
+            QTRY_VERIFY_WITH_TIMEOUT(!state.isEmpty(),8000);
+            QVERIFY2(state.last().at(0).toBool(),qPrintable(state.last().at(1).toString()));
+            QCOMPARE(host.media->activeScreenAudioResources(),3);
+            auto before=guest.media->audibleTestBlocks();
+            QTRY_VERIFY_WITH_TIMEOUT(guest.media->audibleTestBlocks()>=before+12,12000);
+            qInfo()<<"screen mode"<<mode<<"received audible blocks"<<guest.media->audibleTestBlocks()-before;
+            QTest::mouseClick(card(guest),Qt::LeftButton);QVERIFY(guest.mutedStreams.contains(host.callIdentity));silence();
+            QTest::mouseClick(card(guest),Qt::LeftButton);before=guest.media->audibleTestBlocks();
+            QTRY_VERIFY_WITH_TIMEOUT(guest.media->audibleTestBlocks()>=before+12,12000);
+            QTest::mouseClick(card(host),Qt::LeftButton);QTRY_VERIFY(!host.sharingSound);silence();
+            QCOMPARE(host.media->activeScreenAudioResources(),0);
+            for(int cycle=2;cycle<=5;++cycle){
+                QTest::mouseClick(card(host),Qt::LeftButton);QTRY_VERIFY(host.sharingSound);
+                before=guest.media->audibleTestBlocks();
+                QTRY_VERIFY_WITH_TIMEOUT(guest.media->audibleTestBlocks()>=before+8,12000);
+                if(cycle==5)host.media->changeVideo(true,0,{},{},{});
+                else QTest::mouseClick(card(host),Qt::LeftButton);
+                QTRY_VERIFY(!host.sharingSound);silence();
+                QCOMPARE(host.media->activeScreenAudioResources(),0);
+                PROCESS_MEMORY_COUNTERS_EX2 usage{};usage.cb=sizeof(usage);
+                QVERIFY(GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&usage),sizeof(usage)));
+                qInfo()<<"audio off, mode"<<mode<<"cycle"<<cycle<<"private WS"<<qulonglong(usage.PrivateWorkingSetSize);
+            }
+            QTRY_COMPARE(host.screenMode,0);
+            QTRY_VERIFY(!card(guest));
+        }
+        host.leaveCall();guest.leaveCall();QTRY_VERIFY(!host.inCall && !guest.inCall);
+    }
     void browserScreenShareVoice(){
         const auto dir=qEnvironmentVariable("NIMBO_BROWSER_AUDIO_FIXTURE");
         if(dir.isEmpty() || !qEnvironmentVariableIsSet("NIMBO_QA_SILENT_OUTPUT"))QSKIP("Requires muted browser fixture");
@@ -2984,6 +3064,18 @@ int main(int argc,char** argv){
     }
     QApplication application(argc,argv);application.setApplicationVersion(NIMBO_DESKTOP_VERSION);
     const auto arguments=application.arguments();
+    if(arguments.size()==3 && arguments[1]=="--virtual-share-audio"){
+        // Never select the user's default endpoint as a fallback.
+        QAudioDevice output;
+        for(const auto& device:QMediaDevices::audioOutputs())
+            if(device.description().contains("Steam Streaming Speakers",Qt::CaseInsensitive))output=device;
+        if(output.isNull())return 2;
+        QSoundEffect phrase(output);
+        phrase.setLoopCount(QSoundEffect::Infinite);phrase.setSource(QUrl::fromLocalFile(arguments[2]));phrase.play();
+        QWidget window;window.setAttribute(Qt::WA_ShowWithoutActivating);
+        window.setWindowTitle(qEnvironmentVariable("NIMBO_SHARE_AUDIO_TEST_WINDOW"));window.resize(200,80);window.show();
+        return application.exec();
+    }
     if(arguments.size()==3 && arguments[1]=="--write-test-microphone"){
         // Chromium's default fake microphone also emits a beep. Feed it the
         // same quiet phrase and rest used by the native synthetic participant.

@@ -51,6 +51,7 @@ if(NIMBO_MEDIA)
     target_compile_options(nimbo_media PRIVATE /W4 /utf-8)
     find_package(Qt6 REQUIRED COMPONENTS Network)
     add_library(nimbo_desktop STATIC desktop/game_overlay.cpp desktop/youtube_surface.cpp desktop/share_picker.cpp desktop/api.cpp desktop/motion.cpp desktop/profile.cpp desktop/window.cpp desktop/workspace.cpp desktop/views.cpp desktop/profile_view.cpp desktop/admin.cpp desktop/keys.cpp desktop/chat_media.cpp desktop/message_actions.cpp)
+    target_sources(nimbo_desktop PRIVATE desktop/installed_shortcuts.cpp)
     file(GLOB voice_row_assets CONFIGURE_DEPENDS "desktop/voice-rows/*.png")
     qt_add_resources(nimbo_desktop voice_rows PREFIX "/voice-rows"
         BASE "desktop/voice-rows" FILES ${voice_row_assets})

@@ -1,4 +1,5 @@
 #include "window.h"
+#include "installed_shortcuts.h"
 #include "voice_channel_list.h"
 #include "version.h"
 #include "media_session.h"
@@ -664,6 +665,36 @@ public:
         return true;
     }
 private slots:
+    void installedShortcutMigration(){
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        QDir base(root.path());
+        for(const auto name:{"Nimbo","Nimbo Desktop Preview","menu","desktop","other"}) QVERIFY(base.mkdir(name));
+        const QDir menu(base.filePath("menu")), desk(base.filePath("desktop"));
+        const QString exe=base.filePath("Nimbo/Nimbo.exe");
+        const QString old=base.filePath("Nimbo Desktop Preview/NimboDesktop.exe");
+        const QString other=base.filePath("other/Nimbo.exe");
+        for(const auto &path:{exe,old,other}) {QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly));}
+        const QString canonical=menu.filePath("Nimbo.lnk");
+        const QString legacy=menu.filePath("Nimbo Desktop.lnk");
+        const QString personal=desk.filePath("Nimbo Desktop.lnk");
+        const QString unrelated=desk.filePath("Nimbo Desktop Preview.lnk");
+        for(const auto &path:{legacy,personal}) QVERIFY(QFile::link(old,path));
+        QVERIFY(QFile::link(other,unrelated));
+        QVERIFY(QFile::remove(old));
+        QVERIFY(repairInstalledShortcuts(exe,menu,desk));
+        QCOMPARE(QFileInfo(canonical).symLinkTarget(),exe);
+        QCOMPARE(QFileInfo(personal).symLinkTarget(),exe);
+        QCOMPARE(QFileInfo(unrelated).symLinkTarget(),other);
+        QVERIFY(!QFileInfo::exists(old));
+        QVERIFY(!QFileInfo::exists(legacy));
+        QVERIFY(!QFileInfo::exists(desk.filePath("Nimbo.lnk")));
+        QVERIFY(QFile::remove(canonical));
+        QVERIFY(QFile::link(base.filePath("Nimbo/NimboDesktop.exe"),canonical));
+        QVERIFY(repairInstalledShortcuts(exe,menu,desk));
+        QCOMPARE(QFileInfo(canonical).symLinkTarget(),exe);
+        QVERIFY(repairInstalledShortcuts(exe,menu,desk));
+    }
     void voiceMemberMenuLayout(){
         QTemporaryDir store;DesktopWindow w(store.path(),true);
         w.setAttribute(Qt::WA_DontShowOnScreen);w.resize(1100,760);w.show();

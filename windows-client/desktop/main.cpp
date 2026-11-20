@@ -1,5 +1,6 @@
 #include "window.h"
 #include "version.h"
+#include "installed_shortcuts.h"
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QDir>
@@ -12,10 +13,13 @@
 static bool finishInstalledUpdate() {
     const QDir directory(QCoreApplication::applicationDirPath());
     QFile replacement(directory.filePath("uninstall-update.bin"));
-    if (!replacement.exists()) return false;
     QSettings registration("HKEY_CURRENT_USER\\Software\\Nimbo\\DesktopPreview", QSettings::NativeFormat);
     const QString installed = registration.value("InstallDir").toString();
-    if (installed.isEmpty() || QDir(installed) != directory) return false;
+    if (installed.isEmpty() || QDir(QDir::fromNativeSeparators(installed)) != directory) return false;
+    const bool linksReady = repairInstalledShortcuts(QCoreApplication::applicationFilePath(),
+        QDir(QStandardPaths::writableLocation(QStandardPaths::ApplicationsLocation)),
+        QDir(QStandardPaths::writableLocation(QStandardPaths::DesktopLocation)));
+    if (!replacement.exists()) return false;
     QSaveFile uninstaller(directory.filePath("Uninstall.exe"));
     if (!replacement.open(QIODevice::ReadOnly) || !uninstaller.open(QIODevice::WriteOnly)) return false;
     const auto bytes = replacement.readAll();
@@ -26,17 +30,7 @@ static bool finishInstalledUpdate() {
     listing.setValue("DisplayVersion", QCoreApplication::applicationVersion());
     listing.setValue("DisplayIcon",directory.filePath("assets/nimbo.ico"));
     listing.setValue("UninstallString","\""+directory.filePath("Uninstall.exe")+"\"");
-    const QDir menu(QStandardPaths::writableLocation(QStandardPaths::ApplicationsLocation));
-    const QString link = menu.filePath("Nimbo.lnk");
-    const auto exe = QCoreApplication::applicationFilePath();
-    const auto previousLink=QFileInfo(link).symLinkTarget();
-    if(previousLink.compare(exe,Qt::CaseInsensitive)!=0 && QFileInfo(previousLink).fileName().compare("NimboDesktop.exe",Qt::CaseInsensitive)==0)
-        QFile::remove(link);
-    if (QFileInfo(link).symLinkTarget().compare(exe, Qt::CaseInsensitive) != 0 && !QFile::link(exe, link)) return false;
-    for (const auto name : {"Nimbo Desktop.lnk", "Nimbo Desktop Preview.lnk"}) {
-        const QString old = menu.filePath(name);
-        if (QFileInfo(old).symLinkTarget().compare(exe, Qt::CaseInsensitive) == 0) QFile::remove(old);
-    }
+    if (!linksReady) qWarning("Nimbo could not repair all installed shortcuts");
     replacement.close();
     replacement.remove();
     return true;

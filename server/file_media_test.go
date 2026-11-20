@@ -64,15 +64,30 @@ func TestMediaStreamingSessionRangeAndRevocation(t *testing.T) {
 	}
 	mustStatus(t, get("HEAD", path, true, "", "same-origin", ""), 200)
 	mustStatus(t, get("GET", path, true, "", "same-origin", "bytes=999999-"), 416)
+	download := path + "?download=1"
+	mustStatus(t, get("GET", download, false, "", "same-origin", ""), 401)
+	mustStatus(t, get("GET", download, true, "https://other.example", "cross-site", ""), 403)
+	downloaded := get("GET", download, true, "", "same-origin", "bytes=0-7")
+	mustStatus(t, downloaded, 206)
+	if !bytes.Equal(downloaded.Body.Bytes(), imageData.Bytes()[:8]) || downloaded.Header().Get("Content-Type") != "application/octet-stream" || !strings.HasPrefix(downloaded.Header().Get("Content-Disposition"), "attachment;") {
+		t.Fatal("download must stream bytes as attachment")
+	}
 	forged := fileRequest(t, h, auth.Session, "fake.png", "<script>alert(1)</script>", randomKey())
 	mustStatus(t, forged, 200)
 	var fake chatMessage
 	_ = json.Unmarshal(forged.Body.Bytes(), &fake)
 	mustStatus(t, get("GET", "/api/session/media/"+fake.Attachment.ID, true, "", "same-origin", ""), 415)
+	// Arbitrary files may be downloaded, but never become inline active content.
+	downloaded = get("GET", "/api/session/media/"+fake.Attachment.ID+"?download=1", true, "", "same-origin", "")
+	mustStatus(t, downloaded, 200)
+	if downloaded.Header().Get("Content-Type") != "application/octet-stream" || !strings.HasPrefix(downloaded.Header().Get("Content-Disposition"), "attachment;") || downloaded.Header().Get("Content-Security-Policy") != "sandbox; default-src 'none'" {
+		t.Fatal("unsafe arbitrary download")
+	}
 	s.mu.Lock()
 	findMember(&s.data, auth.Member.ID).Blocked = true
 	s.mu.Unlock()
 	mustStatus(t, get("GET", path, true, "", "same-origin", "bytes=8-15"), 401)
+	mustStatus(t, get("GET", download, true, "", "same-origin", "bytes=8-15"), 401)
 	s.mu.Lock()
 	findMember(&s.data, auth.Member.ID).Blocked = false
 	entry := s.data.Sessions[keyHash(cookie.Value)]
@@ -80,6 +95,7 @@ func TestMediaStreamingSessionRangeAndRevocation(t *testing.T) {
 	s.data.Sessions[keyHash(cookie.Value)] = entry
 	s.mu.Unlock()
 	mustStatus(t, get("GET", path, true, "", "same-origin", ""), 401)
+	mustStatus(t, get("GET", download, true, "", "same-origin", ""), 401)
 }
 
 func TestMediaSignaturesNeverRenderActiveContent(t *testing.T) {

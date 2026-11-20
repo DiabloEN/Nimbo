@@ -86,6 +86,7 @@ type workspaceData struct {
 // One API process owns this store. A committed write replaces the complete file;
 // failed writes leave both the previous file and the in-memory state intact.
 type workspaceStore struct {
+	downloads     map[string]*fileDownloadGrant
 	mediaRevision string
 	mediaChanged  chan struct{}
 	mu            sync.Mutex
@@ -468,6 +469,7 @@ func (s *workspaceStore) register(mux *http.ServeMux, c config, presence *presen
 	s.registerServerUpdates(handle)
 	s.registerLinkPreviews(handle)
 	s.registerFileMedia(mux, c)
+	s.registerFileDownloads(mux, c, handle)
 	s.registerRoles(handle)
 	s.registerInvitations(handle)
 	s.registerProfile(handle)

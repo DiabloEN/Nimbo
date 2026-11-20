@@ -77,15 +77,19 @@ func (s *workspaceStore) registerFileMedia(mux *http.ServeMux, c config) {
 			reject(w, 415, "Предпросмотр недоступен")
 			return
 		}
-		header := make([]byte, 65536)
-		n, _ := f.ReadAt(header, 0)
-		mediaType := safeMediaType(found.Name, header[:n])
-		if mediaType == "" {
-			reject(w, 415, "Предпросмотр недоступен")
-			return
+		mediaType, disposition := "application/octet-stream", "attachment"
+		if r.URL.Query().Get("download") != "1" {
+			header := make([]byte, 65536)
+			n, _ := f.ReadAt(header, 0)
+			mediaType = safeMediaType(found.Name, header[:n])
+			if mediaType == "" {
+				reject(w, 415, "Предпросмотр недоступен")
+				return
+			}
+			disposition = "inline"
 		}
 		w.Header().Set("Content-Type", mediaType)
-		w.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": found.Name}))
+		w.Header().Set("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": found.Name}))
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
 		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")

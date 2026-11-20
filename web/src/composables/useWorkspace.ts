@@ -1,4 +1,4 @@
-import { activeServer, apiURL, serverFetch } from './serverConnection';
+import { activeServer, apiURL, remoteServer, serverFetch } from './serverConnection';
 import { computed, ref } from 'vue';
 import { uploadForm, TRANSFER_TIMEOUT_MS } from './uploadForm';
 import { canWriteChannel } from './channelPosting';
@@ -634,12 +634,75 @@ export function useWorkspace(session: { value: string }, renewSession?: () => Pr
     return blob;
   }
   async function downloadFile(file: Attachment) {
+    if (!remoteServer()) {
+      // The first-party HttpOnly session authorizes the streamed response.
+      // Let the browser show download progress without buffering the file here.
+      const a = document.createElement('a');
+      a.href = '/api/session/media/' + encodeURIComponent(file.id) + '?download=1';
+      a.download = file.name;
+      a.hidden = true;
+      document.body.appendChild(a);
+      try {
+        a.click();
+      } finally {
+        a.remove();
+      }
+      return;
+    }
+    const origin = activeServer.value,
+      current = generation;
+    const requestTicket = () => {
+      if (current !== generation || origin !== activeServer.value)
+        throw new Error('Запрос отменён.');
+      return serverFetch(origin, '/api/files/' + encodeURIComponent(file.id) + '/download', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + session.value },
+        signal: AbortSignal.any([
+          controller?.signal || new AbortController().signal,
+          AbortSignal.timeout(10000),
+        ]),
+      });
+    };
+    let response = await requestTicket();
+    if (response.status === 401 && current === generation && renewSession && (await renewSession()))
+      response = await requestTicket();
+    if (current !== generation || origin !== activeServer.value) throw new Error('Запрос отменён.');
+    if (response.status !== 404 && response.status !== 405) {
+      const data = await response.json();
+      if (current !== generation || origin !== activeServer.value)
+        throw new Error('Запрос отменён.');
+      if (!response.ok) throw new Error(data.error || 'Не удалось начать скачивание.');
+      if (typeof data.ticket !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(data.ticket))
+        throw new Error('Некорректный ответ сервера.');
+      const a = document.createElement('a');
+      a.href = origin + '/api/download/' + data.ticket;
+      a.download = file.name;
+      // A failed/expired navigation must not replace the ongoing chat/call.
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.hidden = true;
+      document.body.appendChild(a);
+      try {
+        a.click();
+      } finally {
+        a.remove();
+      }
+      return;
+    }
+    await response.body?.cancel();
+    // Compatibility with servers predating streamed cross-server downloads.
     const blob = await loadFile(file),
       url = URL.createObjectURL(blob),
       a = document.createElement('a');
     a.href = url;
     a.download = file.name;
-    a.click();
+    a.hidden = true;
+    document.body.appendChild(a);
+    try {
+      a.click();
+    } finally {
+      a.remove();
+    }
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   const readingMentions = new Set<string>();

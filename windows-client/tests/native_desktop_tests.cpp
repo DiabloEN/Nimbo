@@ -612,7 +612,7 @@ private:
             QVERIFY(QFile::remove(marker));QTRY_VERIFY_WITH_TIMEOUT(install->isVisibleTo(panel),3000);
             QCOMPARE(nav->mapTo(&win,QPoint()),navAt);QVERIFY(!nav->visibleRegion().isEmpty());
             stageBadLocalRelease(win);
-            install->click();QTRY_VERIFY(QFile::exists(inbox+"/install"));
+            install->click();QTRY_VERIFY(QFile::exists(marker));QVERIFY(QFile::remove(marker));QTRY_VERIFY(QFile::exists(inbox+"/install"));
             QTRY_VERIFY(win.updates->status().contains("Контрольная сумма"));win.updates->asset.clear();win.updates->refresh();
             QFile request(inbox+"/install");QVERIFY(request.open(QIODevice::ReadOnly));QCOMPARE(request.readAll(),QByteArray("server-v1.2.3"));request.close();
             QVERIFY(QFile::remove(inbox+"/install"));
@@ -830,6 +830,34 @@ private slots:
             permitted=true;
         }
         QCOMPARE(moved,QStringList({"one.1","a","b"}));
+    }
+    void browserScreenShareVoice(){
+        const auto dir=qEnvironmentVariable("NIMBO_BROWSER_AUDIO_FIXTURE");
+        if(dir.isEmpty() || !qEnvironmentVariableIsSet("NIMBO_QA_SILENT_OUTPUT"))QSKIP("Requires muted browser fixture");
+        QFile invite(dir+"/receiver.json");
+        QTRY_VERIFY_WITH_TIMEOUT(invite.exists(),20000);
+        QVERIFY(invite.open(QIODevice::ReadOnly));
+        const auto data=QJsonDocument::fromJson(invite.readAll()).object();
+        MediaOptions options;
+        options.url=data["url"].toString();options.token=data["token"].toString();
+        QCOMPARE(QUrl(options.url).host(),QString("127.0.0.1"));
+        options.inputId="fixture-no-microphone";
+        MediaSession session;
+        int frames=0;
+        connect(&session,&VoiceEvents::participantFrame,this,[&](QString peer,bool screen,const QImage& image){
+            if(!peer.isEmpty() && screen && !image.isNull())++frames;
+        });
+        session.start(options);
+        for(int stage=0;stage<=10;++stage){
+            QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(dir+"/stage-"+QString::number(stage)),15000);
+            const auto start=session.audibleTestBlocks();
+            const int before=frames;
+            if(stage%2)QTRY_VERIFY_WITH_TIMEOUT(frames>=before+3,10000);
+            QTRY_VERIFY_WITH_TIMEOUT(session.audibleTestBlocks()>=start+20,10000);
+            qInfo()<<"stage"<<stage<<"audible 10 ms blocks"<<session.audibleTestBlocks()-start;
+            QFile ack(dir+"/heard-"+QString::number(stage));QVERIFY(ack.open(QIODevice::WriteOnly));
+        }
+        session.stop();
     }
     void crossClientVoiceMove(){
         const auto dir=qEnvironmentVariable("NIMBO_MOVE_FIXTURE"),url=qEnvironmentVariable("NIMBO_NATIVE_TEST_URL");
@@ -1502,6 +1530,48 @@ private slots:
         QCOMPARE(reopened.overlayPrefs.backgroundOpacity,43);
         QVERIFY(reopened.overlayPrefs.enabled && !reopened.gameOverlay);
     }
+    void ownerUpdateFindsNewServerAfterLeavingSettings(){
+        QTcpServer service;QVERIFY(service.listen(QHostAddress::LocalHost));
+        bool checked=false,installed=false;
+        int acceptances=0;
+        connect(&service,&QTcpServer::newConnection,&service,[&]{
+            auto* socket=service.nextPendingConnection();
+            connect(socket,&QTcpSocket::disconnected,socket,&QObject::deleteLater);
+            connect(socket,&QTcpSocket::readyRead,socket,[&,socket]{
+                auto request=socket->peek(socket->bytesAvailable());
+                const auto end=request.indexOf("\r\n\r\n");
+                if(end<0)return;
+                const auto path=request.split(' ').value(1);
+                QJsonObject state{{"installed","server-v1.0.0"},{"phase","current"}};
+                if(path=="/api/server-update/check"){
+                    checked=true;state["phase"]="checking";
+                }else if(path=="/api/server-update" && request.startsWith("POST ")){
+                    const auto body=QJsonDocument::fromJson(request.mid(end+4)).object();
+                    if(body.isEmpty())return;
+                    QCOMPARE(body["tag"].toString(),QString("server-v1.0.1"));
+                    QVERIFY(checked);installed=true;++acceptances;state["phase"]="queued";
+                }else if(checked && path=="/api/server-update"){
+                    state["phase"]="available";state["available"]="server-v1.0.1";state["canInstall"]=true;
+                }
+                socket->readAll();
+                const auto payload=QJsonDocument(state).toJson(QJsonDocument::Compact);
+                socket->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: "+QByteArray::number(payload.size())+"\r\n\r\n"+payload);
+                socket->disconnectFromHost();
+            });
+        });
+        QTemporaryDir profile; DesktopWindow win(profile.path(),true);
+        win.api.server=QUrl(QString("http://127.0.0.1:%1").arg(service.serverPort()));
+        stageBadLocalRelease(win);
+        QWidget viewport;
+        auto* panel=new ServerUpdatesPanel(win.api,*win.updates,true,&viewport,{},[](auto){return QString();},[](auto,auto){});
+        for(auto* button:panel->findChildren<QPushButton*>())if(button->text()==UiText::Update())button->click();
+        QVERIFY(win.updates->coordinating());
+        delete panel;
+        win.api.reset();win.api.server=QUrl("http://127.0.0.1:1");
+        QTRY_VERIFY(installed);
+        QTRY_COMPARE(win.updates->message,UiText::Id::TheReleaseChecksumDoesNotMatch);
+        QCOMPARE(acceptances,1);
+    }
     void updateSurvivesSettingsAndCall_data(){
         QTest::addColumn<bool>("disconnectFirst");
         QTest::newRow("continuous")<<false;
@@ -1533,7 +1603,9 @@ private slots:
         update->version="9.9.9";update->expected=1048576;update->digest=QString(64,'0');
         QWidget viewport;
         auto panel=[&]{return new ServerUpdatesPanel(win.api,*update,false,&viewport,{},[](const QJsonObject&){return QString();},[](const QString&,const QString&){});};
-        auto* first=panel();update->install();QVERIFY(update->active());
+        auto* first=panel();
+        for(auto* button:first->findChildren<QPushButton*>())if(button->text()==UiText::Update())button->click();
+        QVERIFY(update->active());
         QTRY_VERIFY(update->downloadedBytes()>0);
         QVERIFY(first->findChild<QProgressBar*>("desktopUpdateProgressBar")->value()>0);
         delete first;

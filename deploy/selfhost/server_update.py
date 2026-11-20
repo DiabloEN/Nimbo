@@ -367,9 +367,10 @@ def prepare(root,project):
     units=Path("/etc/systemd/system")
     atomic(units/(unit+".service"),f"[Unit]\nAfter=docker.service network-online.target\n[Service]\nType=oneshot\nUMask=0077\nTimeoutStartSec=30min\nExecStart=/usr/bin/python3 {root}/server_update.py\n".encode(),0o644)
     atomic(units/(unit+".timer"),f"[Unit]\nDescription=Nimbo server updates ({project})\n[Timer]\nOnBootSec=25s\nOnUnitInactiveSec=20s\n[Install]\nWantedBy=timers.target\n".encode(),0o644)
-    atomic(units/(unit+".path"),f"[Unit]\nDescription=Nimbo manual release check ({project})\n[Path]\nPathChanged={inbox}/check\n[Install]\nWantedBy=multi-user.target\n".encode(),0o644)
+    atomic(units/(unit+".path"),f"[Unit]\nDescription=Nimbo server update requests ({project})\n[Path]\nPathChanged={inbox}/check\nPathChanged={inbox}/install\n[Install]\nWantedBy=multi-user.target\n".encode(),0o644)
     call("systemctl","daemon-reload")
     call("systemctl","enable","--now",unit+".timer",unit+".path")
+    call("systemctl","restart",unit+".path")
 
 
 if __name__=="__main__":

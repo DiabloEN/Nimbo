@@ -95,6 +95,15 @@ func TestUpdateQueueOwnerAndVersion(t *testing.T) {
 	if err != nil || string(tag) != body["tag"] {
 		t.Fatal(string(tag), err)
 	}
+	for _, file := range []string{"requests/install", "status.json"} {
+		if err := os.Chtimes(filepath.Join(dir, file), old.Add(-time.Second), old.Add(-time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reply = apiCall(h, "GET", path, session, nil)
+	if err := json.Unmarshal(reply.Body.Bytes(), &state); err != nil || state.Phase != "queued" || state.CanInstall || state.Detail != "Служба обновлений пока недоступна" {
+		t.Fatal("missing updater heartbeat", state, err)
+	}
 	if err := os.Remove(filepath.Join(dir, "requests", "install")); err != nil {
 		t.Fatal(err)
 	}

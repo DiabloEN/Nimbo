@@ -4,6 +4,7 @@
 #include <QThread>
 #include <QMap>
 #include <mutex>
+#include <atomic>
 
 class MediaWorker;
 class MediaSession final : public VoiceEvents {
@@ -35,6 +36,8 @@ private:
     friend class NativeDesktopTests;
     QObject* workerContext() const;
     int activeEncoderQueues() const;
+    quint64 audibleTestBlocks() const;
+    std::atomic<quint64> audibleBlocks_{0};
     void postFrame(const QString& member,bool screen,const QImage& frame);
     std::mutex previewMutex_;
     QMap<QPair<QString,bool>,QImage> pendingPreviews_;

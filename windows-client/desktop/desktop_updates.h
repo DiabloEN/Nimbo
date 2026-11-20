@@ -1,5 +1,6 @@
 #pragma once
 #include "interface_text.h"
+#include "api.h"
 #include <QtWidgets>
 #include <QtNetwork>
 #include <functional>
@@ -66,7 +67,11 @@ private:
     QPointer<QObject> observer;
     std::function<void()> changed;
     void refresh(){if(availabilityChanged)availabilityChanged();if(observer && changed)changed();}
-    void finish(UiText::Id text){working=false;downloading=false;message=text;refresh();}
+    void finish(UiText::Id text){
+        const bool proceed=installAfterCheck && text==UiText::Id::VersionAvailable;
+        installAfterCheck=false;working=false;downloading=false;message=text;refresh();
+        if(proceed)install();
+    }
 public:
     void check() {
         if(working)return;
@@ -93,6 +98,66 @@ public:
             finish(UiText::Id::VersionAvailable);
         });
     }
+    // Keep the original server and session while Settings closes or the user changes rooms.
+    bool coordinating() const { return updateServer!=nullptr; }
+    void clearServerIssue(const QUrl& server){if(issueServer==server)updateIssue.clear();}
+    bool checkingServer(const QUrl& server)const{return updateServer && updateServer->server==server;}
+    QString serverIssue(const QUrl& server) const { return server==issueServer?updateIssue:QString(); }
+    void updateBoth(const ServerApi* ownerApi) {
+        if(coordinating() || installing())return;
+        if(!ownerApi){installLatestClient();return;}
+        issueServer=ownerApi->server;
+        updateIssue.clear();
+        updateServer=new ServerApi(this);
+        updateServer->server=ownerApi->server;
+        updateServer->token=ownerApi->token;
+        serverDeadline.start();
+        refresh();
+        serverStep("GET","/api/server-update",{},false);
+    }
+private:
+    ServerApi* updateServer=nullptr;
+    QElapsedTimer serverDeadline;
+    QUrl issueServer;
+    QString updateIssue;
+    bool installAfterCheck=false;
+    void installLatestClient(){
+        if(available() && !working){install();return;}
+        if(!installing()){installAfterCheck=true;check();}
+    }
+    void serverDone(QString issue){
+        updateIssue=std::move(issue);
+        updateServer->deleteLater();
+        updateServer=nullptr;
+        refresh();
+        installLatestClient();
+    }
+    void serverStep(QByteArray method,QString path,QJsonObject body,bool checked){
+        updateServer->request(method,path,body,[this,checked,path,method](QJsonObject data,QString issue){
+            if(!issue.isEmpty()){serverDone(issue);return;}
+            const auto phase=data["phase"].toString();
+            if(phase=="queued" || phase=="installing" || phase=="waiting" || phase=="unmanaged"){
+                serverDone({});return;
+            }
+            if(phase=="checking"){
+                if(serverDeadline.elapsed()>20000){serverDone(UiText::CouldNotCompleteTheOperation());return;}
+                QTimer::singleShot(350,updateServer,[this]{serverStep("GET","/api/server-update",{},true);});
+                return;
+            }
+            if(!checked){
+                serverStep("POST","/api/server-update/check",{},true);
+                return;
+            }
+            if(phase=="error"){serverDone(UiText::serverMessage(data["detail"].toString()));return;}
+            const auto tag=data["available"].toString();
+            if(data["canInstall"].toBool() && !tag.isEmpty() && !(method=="POST" && path=="/api/server-update")){
+                serverStep("POST","/api/server-update",{{"tag",tag}},true);
+                return;
+            }
+            serverDone({});
+        });
+    }
+public:
     QString helper()const{return QCoreApplication::applicationDirPath()+"/update-desktop.ps1";}
     void install() {
         if(working||asset.isEmpty())return;

@@ -43,6 +43,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <thread>
 
 namespace {
 constexpr int rate = 48000, samples = 480;
@@ -73,6 +74,16 @@ struct OutgoingVideo {
     QElapsedTimer clock;
     qint64 nextCaptureNs=0;
     QImage lastWindowFrame;
+};
+
+// A browser may give every publication the same (often empty) name.
+struct RemoteReader {
+    std::function<void()> close;
+    std::thread worker;
+    ~RemoteReader() {
+        if (close) close();
+        if (worker.joinable()) worker.join();
+    }
 };
 
 // SDK/network and device operations live on this worker, never on the UI thread.
@@ -159,7 +170,7 @@ public:
         try{
             // Keep captures, DSP, encoders and their sources. Only the RTC publications belong to a room.
             ++generation_;
-            room_->setDelegate(nullptr);room_->disconnect();room_.reset();
+            room_->setDelegate(nullptr); readers_.clear();room_->disconnect();room_.reset();
             encoderStats_={};
             for(auto* video:{&cameraVideo_,&shareVideo_}){
                 video->track.reset();
@@ -199,7 +210,7 @@ public:
         delete devices_;devices_=nullptr;outputRetry_=nullptr;outputDelay_=250;
         closeOutput();
         inputIo_ = outputIo_ = nullptr; pending_.clear();processor_.reset();denoiser_.reset();effect_.reset();
-        if (room_) { room_->setDelegate(nullptr); room_->disconnect(); room_.reset(); }
+        if (room_) { room_->setDelegate(nullptr); readers_.clear(); room_->disconnect(); room_.reset(); }
         audioTrack_.reset();source_.reset();
         encoderStats_ = {};
         { std::lock_guard guard(mutex_); incoming_.clear(); frames_.clear(); peers_.clear(); gains_.clear();mutedStreams_.clear();lastSpeech_.clear();sdkSpeakers_.clear();rosterDirty_=true; }
@@ -397,7 +408,8 @@ private:
         }else{
             auto next=std::make_unique<QAudioSink>(device,format,this);
             next->setBufferSize(format.bytesForDuration(60000));
-            next->setVolume(qEnvironmentVariableIsSet("NIMBO_QA_SILENT_OUTPUT")?0.f:1.f);
+            measureSilentOutput_=qEnvironmentVariableIsSet("NIMBO_QA_SILENT_OUTPUT");
+            next->setVolume(measureSilentOutput_?0.f:1.f);
             auto* io=next->start();
             if(!io || next->error()!=QtAudio::NoError)throw std::runtime_error("Cannot open audio output");
             closeOutput();
@@ -484,6 +496,7 @@ private:
             pending_.remove(0, bytes); sendFrame(std::move(pcm));
         }
     }
+    bool measureSilentOutput_=false;
     void playAudio() {
         if (!outputIo_) return;
         // Some drivers leave a live sink with a permanently full buffer after reconnect.
@@ -509,6 +522,8 @@ private:
             const auto data=AudioPcm::playbackBlock(mixed,outFormat_);
             const auto written=outputIo_->write(data);
             if(written>0)outputProgress_.restart();
+            if(measureSilentOutput_ && written==bytes && std::any_of(std::begin(mixed),std::end(mixed),[](float x){return std::abs(x)>.0001f;}))
+                ++owner_->audibleBlocks_;
             if(written<0){
                 outputIo_=nullptr;
                 if(outputRetry_ && !outputRetry_->isActive())outputRetry_->start(0);
@@ -771,21 +786,40 @@ private:
     void onTrackUnpublished(livekit::Room&,const livekit::TrackUnpublishedEvent& event) override{
         setPublicationState(event.participant,event.publication,false);
     }
+    using StreamKey = std::pair<std::string,std::string>; // participant identity, publication SID
+    std::map<StreamKey,std::unique_ptr<RemoteReader>> readers_; // media worker thread only
+    template<class Stream,class Event,class Callback>
+    void readTrack(const StreamKey& key,const std::shared_ptr<livekit::Track>& track,
+                   const typename Stream::Options& options,Callback callback) {
+        readers_.erase(key);
+        if(readers_.size()>=64)return;
+        auto stream=Stream::fromTrack(track,options);
+        if(!stream)return;
+        auto reader=std::make_unique<RemoteReader>();
+        reader->close=[stream]{stream->close();};
+        reader->worker=std::thread([stream,callback=std::move(callback)]{
+            try {
+                Event event;
+                while(stream->read(event))callback(event.frame);
+            } catch(const std::exception&) { qWarning("Remote track reader stopped"); }
+        });
+        readers_.emplace(key,std::move(reader));
+    }
     void onTrackSubscribed(livekit::Room& room, const livekit::TrackSubscribedEvent& event) override {
         if (!event.participant || !event.track || !event.publication) return;
-        const auto identity = event.participant->identity(), name = event.publication->name();
-        const auto kind = event.track->kind();
-        auto peer=QString::fromStdString(identity);bool screen=event.publication->source()==livekit::TrackSource::SOURCE_SCREENSHARE;
+        const StreamKey streamKey{event.participant->identity(),event.publication->sid()};
+        const auto peer=QString::fromStdString(streamKey.first);
+        const auto source=event.publication->source();
         rememberParticipant(*event.participant);
         setPublicationState(event.participant,event.publication,!event.publication->muted());
-        // The SDK starts its stream reader immediately after this callback returns.
-        // Register synchronously here; a queued registration misses that transition.
-        // These setters only register callbacks; they do not block on FFI operations.
+        QMetaObject::invokeMethod(this,[this,gen=generation_.load(),origin=&room,streamKey,peer,source,track=event.track]{
+            if(gen!=generation_ || room_.get()!=origin)return;
+            const auto kind=track->kind();
+            try {
             if (kind == livekit::TrackKind::KIND_AUDIO) {
-                const bool screenAudio=event.publication->source()==livekit::TrackSource::SOURCE_SCREENSHARE_AUDIO;
-                const auto streamKey=std::make_pair(identity,name);
+                const bool screenAudio=source==livekit::TrackSource::SOURCE_SCREENSHARE_AUDIO;
                 livekit::AudioStream::Options opts; opts.capacity = 10;
-                room.setOnAudioFrameCallback(identity, name, [this, streamKey, screenAudio, peer](const livekit::AudioFrame& frame) {
+                readTrack<livekit::AudioStream,livekit::AudioFrameEvent>(streamKey,track,opts, [this, streamKey, screenAudio, peer](const livekit::AudioFrame& frame) {
                     if (frame.sampleRate() != rate || frame.numChannels() < 1 || frame.numChannels() > 8 || frame.data().size()%frame.numChannels()!=0) return;
                     double sum = 0; for (auto v : frame.data()) sum += double(v) * v;
                     const double level=frame.data().empty()?0:std::sqrt(sum/frame.data().size())/32768.;
@@ -809,10 +843,11 @@ private:
                         }
                     }
                     if (buffer.size() > 19200) buffer.remove(0, buffer.size() - 19200);
-                }, opts);
+                });
             } else if (kind == livekit::TrackKind::KIND_VIDEO) {
                 livekit::VideoStream::Options opts; opts.capacity = 2;
-                room.setOnVideoFrameCallback(identity, name, [this,peer,screen](const livekit::VideoFrame& frame, std::int64_t) {
+                const bool screen=source==livekit::TrackSource::SOURCE_SCREENSHARE;
+                readTrack<livekit::VideoStream,livekit::VideoFrameEvent>(streamKey,track,opts, [this,peer,screen](const livekit::VideoFrame& frame) {
                     ++videoRx_;
                     try {
                         std::optional<livekit::VideoFrame> converted;
@@ -822,20 +857,34 @@ private:
                         std::lock_guard guard(mutex_);
                         if(peers_.value(peer).value(screen?"screen":"camera").toBool())frames_[{peer,screen}]=image.copy();
                     } catch (const std::exception&) {}
-                }, opts);
+                });
             }
+            } catch(const std::exception&) { qWarning("Could not open remote track"); }
+        },Qt::QueuedConnection);
     }
-    void onParticipantDisconnected(livekit::Room&, const livekit::ParticipantDisconnectedEvent& event) override {
+    void onParticipantDisconnected(livekit::Room& room,const livekit::ParticipantDisconnectedEvent& event) override {
         if (!event.participant) return;
-        auto identity=event.participant->identity();auto peer=QString::fromStdString(identity);std::lock_guard guard(mutex_);std::erase_if(incoming_,[&](const auto& stream){return stream.first.first==identity;});peers_.remove(peer);lastSpeech_.remove(peer);sdkSpeakers_.remove(peer);rosterDirty_=true;frames_[{peer,false}]={};frames_[{peer,true}]={};
+        const auto identity=event.participant->identity();
+        QMetaObject::invokeMethod(this,[this,gen=generation_.load(),origin=&room,identity]{
+            if(gen!=generation_ || room_.get()!=origin)return;
+            std::erase_if(readers_,[&](const auto& item){return item.first.first==identity;});
+            const auto peer=QString::fromStdString(identity);
+            std::lock_guard guard(mutex_);
+            std::erase_if(incoming_,[&](const auto& item){return item.first.first==identity;});
+            peers_.remove(peer);lastSpeech_.remove(peer);sdkSpeakers_.remove(peer);rosterDirty_=true;
+            frames_[{peer,false}]={};frames_[{peer,true}]={};
+        },Qt::QueuedConnection);
     }
-    void onTrackUnsubscribed(livekit::Room&, const livekit::TrackUnsubscribedEvent& e) override{
+    void onTrackUnsubscribed(livekit::Room& room,const livekit::TrackUnsubscribedEvent& e) override {
         if(!e.participant||!e.publication)return;
-        if(e.publication->kind()==livekit::TrackKind::KIND_AUDIO){
-            std::lock_guard guard(mutex_);incoming_.erase({e.participant->identity(),e.publication->name()});return;
-        }
-        if(e.publication->kind()!=livekit::TrackKind::KIND_VIDEO)return;
-        std::lock_guard guard(mutex_);frames_[{QString::fromStdString(e.participant->identity()),e.publication->source()==livekit::TrackSource::SOURCE_SCREENSHARE}]={};
+        const StreamKey key{e.participant->identity(),e.publication->sid()};
+        QMetaObject::invokeMethod(this,[this,gen=generation_.load(),origin=&room,key,kind=e.publication->kind(),source=e.publication->source()]{
+            if(gen!=generation_ || room_.get()!=origin)return;
+            readers_.erase(key);
+            std::lock_guard guard(mutex_);
+            if(kind==livekit::TrackKind::KIND_AUDIO)incoming_.erase(key);
+            if(kind==livekit::TrackKind::KIND_VIDEO)frames_[{QString::fromStdString(key.first),source==livekit::TrackSource::SOURCE_SCREENSHARE}]={};
+        },Qt::QueuedConnection);
     }
     void onActiveSpeakersChanged(livekit::Room&, const livekit::ActiveSpeakersChangedEvent& e) override {
         QSet<QString> active;for(auto p:e.speakers)if(p)active.insert(QString::fromStdString(p->identity()));
@@ -915,6 +964,7 @@ MediaSession::MediaSession(QObject* parent) : VoiceEvents(parent), worker_(new M
     worker_->moveToThread(&thread_); connect(&thread_, &QThread::finished, worker_, &QObject::deleteLater); thread_.start();
 }
 QObject* MediaSession::workerContext() const { return worker_; }
+quint64 MediaSession::audibleTestBlocks() const {return audibleBlocks_.load();}
 int MediaSession::activeEncoderQueues() const {
     int count=0;
     QMetaObject::invokeMethod(worker_,[this,&count]{count=worker_->activeEncoderQueues();},Qt::BlockingQueuedConnection);

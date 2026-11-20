@@ -23,6 +23,8 @@ def main():
     parser.add_argument("--online-youtube",action="store_true",help="Require an actual online YouTube clip to start with one click")
     parser.add_argument("--capture-window",action="store_true",help="Also capture the test's own colored Windows window and verify its pixels on a second client")
     parser.add_argument("--local-devices",action="store_true",help="Exercise default microphone, output and camera in an empty disposable localhost room; do not save recordings")
+    parser.add_argument("--browser-share-voice",type=Path,metavar="BROWSER",help="Run only the muted Chromium-to-Windows microphone test during five screen shares")
+    parser.add_argument("--playwright-module",default="playwright",help="Node module name or path for the browser fixture")
     parser.add_argument("--settings-shots",type=Path,help="Save owner settings at two native window widths and run the workspace scenario")
     args=parser.parse_args()
     plugin=ROOT/"build-media/platforms"/("q"+args.platform.split(":")[0]+".dll")
@@ -46,6 +48,19 @@ def main():
             env["NIMBO_QA_UPDATE_INBOX"]=str(updates/"requests")
             env.update(NIMBO_WEB_FIXTURE=str(fixture), NIMBO_NATIVE_TEST_SCREENSHOT=str(out/"workspace.png"),QT_QPA_PLATFORM=args.platform)
             env["NIMBO_QA_SILENT_OUTPUT"]="1"
+            if args.browser_share_voice:
+                env.update(NIMBO_BROWSER_AUDIO_FIXTURE=str(temp),NIMBO_QA_BROWSER=str(args.browser_share_voice.resolve()),
+                           NIMBO_PLAYWRIGHT=args.playwright_module)
+                peer=subprocess.Popen(["node",ROOT/"scripts/browser-share-voice.cjs"],cwd=ROOT,env=env)
+                try:
+                    subprocess.run([ROOT/"build-media/nimbo_desktop_tests.exe","browserScreenShareVoice"],env=env,timeout=150,check=True)
+                    if peer.wait(timeout=10):
+                        raise RuntimeError("Browser screen share fixture failed")
+                finally:
+                    if peer.poll() is None:
+                        peer.terminate()
+                        peer.wait(timeout=10)
+                return
             if args.online_youtube:env["NIMBO_QA_ONLINE_YOUTUBE"]="1"
             if args.local_devices:env["NIMBO_QA_LOCAL_DEVICES"]="1"
             if args.capture_window:env["NIMBO_QA_CAPTURE_WINDOW"]="1"

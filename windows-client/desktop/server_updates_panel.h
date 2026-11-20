@@ -39,9 +39,7 @@ public:
         connect(&timer,&QTimer::timeout,this,[this]{request("GET","/api/server-update",{});});
         connect(check,&QPushButton::clicked,this,[this]{clientCheck();});
         connect(install,&QPushButton::clicked,this,[this]{
-            if(serverReady())request("POST","/api/server-update",{{"tag",state["available"]}});
-            // Client download belongs to the application, not this panel or the server session.
-            if(this->client.available())this->client.install();
+            this->client.updateBoth(this->owner?&this->api:nullptr);
         });
         connect(rollback,&QPushButton::clicked,this,[this]{request("POST","/api/server-update/rollback",{{"tag",state["previous"]}});});
         client.observe(this,[this]{render();});render();
@@ -73,7 +71,7 @@ private:
     bool managed()const{return owner&&!state.isEmpty()&&state["phase"]!="unmanaged";}
     bool busy()const{return QStringList{"checking","queued","waiting","installing"}.contains(state["phase"].toString());}
     bool serverReady()const{return managed() && !busy() && state["canInstall"].toBool() && !state["available"].toString().isEmpty();}
-    void clientCheck(){if(managed()&&!busy())request("POST","/api/server-update/check",{});else if(owner)request("GET","/api/server-update",{});client.check();}
+    void clientCheck(){client.clearServerIssue(api.server);if(managed()&&!busy())request("POST","/api/server-update/check",{});else if(owner)request("GET","/api/server-update",{});client.check();}
     void render(){
         dot->setVisible(client.available() || !serverTag.isEmpty());dot->update();
         const auto phase=state["phase"].toString();
@@ -90,14 +88,16 @@ private:
         }
         auto msg=error.isEmpty()?UiText::serverMessage(state["detail"].toString()):error;
         if(msg.isEmpty())msg=labels.value(phase);
+        if(client.checkingServer(api.server) && owner)msg=UiText::CheckingGithubReleases();
+        if(!client.serverIssue(api.server).isEmpty())msg=client.serverIssue(api.server);
         if(serverReady())msg+=" "+state["available"].toString();
         detail->setText(msg);detail->setVisible(owner&&!msg.isEmpty());desktop->setText(client.status());
         progressBox->setVisible(client.installing());progressLabel->setText(client.progressText());progressHint->setText(UiText::UpdateContinuesInBackground());
         progressBar->setValue(client.totalBytes()?int(client.downloadedBytes()*1000/client.totalBytes()):0);
         progressBar->setAccessibleName(client.progressText());
-        install->setVisible(serverReady()||client.available());install->setEnabled(!posting && !client.active() && (client.available() || !owner || !state.isEmpty()));
-        rollback->setText(UiText::RollBackTo()+state["previous"].toString());rollback->setVisible(managed()&&!state["previous"].toString().isEmpty());rollback->setEnabled(!posting&&!busy());
-        check->setEnabled(!posting&&!client.active()&&!busy());
+        install->setVisible(serverReady()||client.available());install->setEnabled(!client.coordinating() && !posting && !client.active() && (client.available() || !owner || !state.isEmpty()));
+        rollback->setText(UiText::RollBackTo()+state["previous"].toString());rollback->setVisible(managed()&&!state["previous"].toString().isEmpty());rollback->setEnabled(!client.coordinating() && !posting&&!busy());
+        check->setEnabled(!client.coordinating() && !posting&&!client.active()&&!busy());
     }
     void request(QByteArray method,QString path,QJsonObject body,bool alsoClient=false){
         if(!owner||posting)return;

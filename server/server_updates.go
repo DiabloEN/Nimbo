@@ -54,8 +54,15 @@ func (s *workspaceStore) registerServerUpdates(handle func(string, func(http.Res
 					expired = time.Since(info.ModTime()) >= 15*time.Second
 				}
 			}
-			if _, err := os.Stat(filepath.Join(dir, "requests", "install")); err == nil && state.Phase != "waiting" && state.Phase != "installing" {
-				state.CanInstall, state.Phase = false, "queued"
+			if pending, err := os.Stat(filepath.Join(dir, "requests", "install")); err == nil && state.Phase != "waiting" && state.Phase != "installing" {
+				state.CanInstall, state.Phase, state.Detail = false, "queued", ""
+				// The host refreshes status every 20 seconds. Keep a delayed command
+				// intact so recovery does not require another click or a duplicate install.
+				if time.Since(pending.ModTime()) > time.Minute {
+					if heartbeat, err := os.Stat(filepath.Join(dir, "status.json")); err == nil && time.Since(heartbeat.ModTime()) > time.Minute {
+						state.Detail = "Служба обновлений пока недоступна"
+					}
+				}
 			}
 		}
 		if r.URL.Path == "/api/server-update/check" {
@@ -124,7 +131,7 @@ func (s *workspaceStore) registerServerUpdates(handle func(string, func(http.Res
 				return
 			}
 			state.CanInstall = false
-			state.Phase = "queued"
+			state.Phase, state.Detail = "queued", ""
 		}
 		w.Header().Set("Cache-Control", "no-store")
 		jsonReply(w, 200, state)

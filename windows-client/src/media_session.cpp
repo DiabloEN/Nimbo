@@ -23,6 +23,7 @@
 #include <private/qvideoframeconverter_p.h>
 #include <private/qcapturablewindow_p.h>
 #include <QJsonObject>
+#include <QJsonDocument>
 #include <livekit/livekit.h>
 #include <livekit/room.h>
 #include <livekit/room_delegate.h>
@@ -78,6 +79,7 @@ struct OutgoingVideo {
 class MediaWorker final : public QObject, public livekit::RoomDelegate {
 public:
     explicit MediaWorker(MediaSession* owner) : owner_(owner) {}
+    int activeEncoderQueues() const{return int(bool(cameraVideo_.encoder))+int(bool(shareVideo_.encoder));}
     void start(const MediaOptions& options, bool mayRetry = true) {
         stop(false); options_ = options; gains_=options.participantVolumes; muted_ = false; tx_ = rx_ = videoRx_ = 0; rms_ = 0; ticks_ = 0;
         ++generation_;
@@ -152,6 +154,42 @@ public:
             }
         }
     }
+    void moveRoom(const QString& url,const QString& token,bool annotations){
+        if(!room_ || !tick_)return;
+        try{
+            // Keep captures, DSP, encoders and their sources. Only the RTC publications belong to a room.
+            ++generation_;
+            room_->setDelegate(nullptr);room_->disconnect();room_.reset();
+            encoderStats_={};
+            for(auto* video:{&cameraVideo_,&shareVideo_}){
+                video->track.reset();
+                if(!video->mode)video->source.reset();
+            }
+            audioTrack_.reset();screenAudioTrack_.reset();
+            {std::lock_guard lock(mutex_);incoming_.clear();frames_.clear();peers_.clear();sdkSpeakers_.clear();lastSpeech_.clear();mutedStreams_.clear();rosterDirty_=true;}
+            room_=std::make_unique<livekit::Room>();room_->setDelegate(this);
+            livekit::RoomOptions config;config.join_retries=0;config.connect_timeout=std::chrono::milliseconds(5000);
+            if(!room_->connect(url.toStdString(),token.toStdString(),config))throw std::runtime_error("move");
+            auto local=room_->localParticipant().lock();
+            if(!local)throw std::runtime_error("move");
+            audioTrack_=livekit::LocalAudioTrack::createLocalAudioTrack("microphone",source_);
+            if(muted_)audioTrack_->mute();
+            livekit::TrackPublishOptions mic;mic.source=livekit::TrackSource::SOURCE_MICROPHONE;
+            local->publishTrack(audioTrack_,mic);
+            if(cameraVideo_.mode)publishVideo(cameraVideo_,false);
+            if(shareVideo_.mode)publishVideo(shareVideo_,true);
+            if(loopback_){
+                screenAudioTrack_=local->publishAudioTrack("screen-audio",screenAudioSource_,livekit::TrackSource::SOURCE_SCREENSHARE_AUDIO);
+                if(!screenAudioTrack_)throw std::runtime_error("screen audio");
+            }
+            options_.url=url;options_.token=token;options_.annotationData=annotations;
+            for(auto handle:room_->remoteParticipants())if(auto remote=handle.lock())rememberParticipant(*remote);
+            emit owner_->roomMoved();
+            if(!board_.session.isEmpty())announceInk({});
+        }catch(const std::exception&){
+            stop(false);emit owner_->failed(UiText::VoiceMoveFailed());
+        }
+    }
     void stop(bool notify = true) {
         ++generation_;
         resetSpeaking();
@@ -223,6 +261,13 @@ public:
         }
     }
     void setVideoHeight(int height){height_=height==360||height==720?height:1080;}
+    void sendInk(const QString& host,QJsonObject command){
+        if(!room_)return;
+        auto local=room_->localParticipant().lock();if(!local)return;
+        const auto self=QString::fromStdString(local->identity());
+        if(host==self){receiveInk(self,true,command);return;}
+        if(options_.annotationData && !host.isEmpty())publishInk(host,command);
+    }
     void changeVideo(bool share,int mode,QByteArray camera,QString screen,QCapturableWindow window){
         if(!room_)return;
         try{
@@ -233,6 +278,57 @@ public:
         }catch(const std::exception&){releaseVideo(share,true);emit owner_->videoModeChanged(share,0,UiText::VideoSourceUnavailable());}
     }
 private:
+    ScreenInk::Board board_;
+    QImage cleanScreen_;
+    std::atomic_int pendingInk_{0};
+    void publishInk(const QString& destination,const QJsonObject& object){
+        if(!options_.annotationData || !room_)return;
+        const auto bytes=QJsonDocument(object).toJson(QJsonDocument::Compact);
+        if(bytes.size()>12000)return;
+        try{
+            if(auto local=room_->localParticipant().lock()){
+                std::vector<std::string> recipients;
+                if(!destination.isEmpty())recipients.push_back(destination.toStdString());
+                local->publishData({bytes.begin(),bytes.end()},true,recipients,ScreenInk::topic);
+            }
+        }catch(const std::exception&){emit owner_->audioWarning(UiText::InkSendFailed());}
+    }
+    void announceInk(const QString& destination){
+        publishInk(destination,{{"type","ready"},{"session",board_.session},{"allowed",true}});
+    }
+    void receiveInk(const QString& author,bool local,const QJsonObject& command){
+        const auto type=command["type"].toString();
+        if((type=="ready" || type=="locked") && !local){
+            const auto epoch=command["session"].toString();
+            if(!QUuid::fromString(epoch).isNull())emit owner_->inkSession(author,epoch,type=="ready" && command["allowed"].toBool(true));
+            return;
+        }
+        if(board_.session.isEmpty())return;
+        if(type=="query"){announceInk(author);return;}
+        if(!board_.apply(author,local,command))return;
+        emit owner_->localInkChanged(board_.strokes);
+        const auto& last=shareVideo_.mode==4?shareVideo_.lastWindowFrame:cleanScreen_;
+        if(!last.isNull())sendVideo(last,true);
+    }
+    void onUserPacketReceived(livekit::Room&,const livekit::UserDataPacketEvent& event) override{
+        if(event.topic=="nimbo.voice-move"){
+            if(!event.participant && event.kind==livekit::DataPacketKind::Reliable && !event.data.empty() && event.data.size()<=128){
+                const QByteArray bytes(reinterpret_cast<const char*>(event.data.data()),qsizetype(event.data.size()));
+                if(QJsonDocument::fromJson(bytes).object()["check"].toBool())emit owner_->voiceControlHint();
+            }
+            return;
+        }
+        if(event.topic!=ScreenInk::topic || !event.participant || event.data.empty() || event.data.size()>12000)return;
+        if(pendingInk_.fetch_add(1)>=32){--pendingInk_;return;}
+        const auto sender=QString::fromStdString(event.participant->identity());
+        const QByteArray bytes(reinterpret_cast<const char*>(event.data.data()),qsizetype(event.data.size()));
+        const auto generation=generation_.load();
+        QMetaObject::invokeMethod(this,[this,sender,bytes,generation]{
+            --pendingInk_;
+            if(generation==generation_ && room_ && options_.annotationData)
+                receiveInk(sender,false,QJsonDocument::fromJson(bytes).object());
+        },Qt::QueuedConnection);
+    }
     void stopScreenAudio(bool unpublish){
         loopback_.reset();
         if(unpublish && screenAudioTrack_ && room_){
@@ -243,6 +339,10 @@ private:
     void releaseVideo(bool share,bool stayInRoom){
         if(share && loopback_){stopScreenAudio(stayInRoom);emit owner_->screenAudioChanged(false,{});}
         auto& v=share?shareVideo_:cameraVideo_;
+        if(share && !board_.session.isEmpty()){
+            board_={};cleanScreen_={};emit owner_->localInkChanged({});
+            emit owner_->inkSession({},{},false);
+        }
         if(v.capture){
             if(auto* sink=v.capture->videoSink())disconnect(sink,nullptr,v.capture.get(),nullptr);
             if(auto* camera=v.capture->camera())camera->stop();
@@ -302,37 +402,40 @@ private:
             if(!io || next->error()!=QtAudio::NoError)throw std::runtime_error("Cannot open audio output");
             closeOutput();
             output_=next.release();outputIo_=io;outFormat_=format;outputId_=device.id();
+            outputProgress_.start();
             connect(output_,&QAudioSink::stateChanged,this,[this](QtAudio::State state){
-                if(state==QtAudio::StoppedState && outputRetry_)outputRetry_->start(0);
+                if((state==QtAudio::StoppedState || state==QtAudio::SuspendedState) && outputRetry_)outputRetry_->start(0);
             });
         }
     }
     void closeOutput(){
         outputIo_=nullptr;
-        outputId_.clear();
+        outputId_.clear();outputProgress_.invalidate();
         if(!output_)return;
         disconnect(output_,nullptr,this,nullptr);
         output_->stop();
         delete output_;
         output_=nullptr;
     }
-    void refreshOutput(){
+    void refreshOutput(bool stalled=false){
         const auto outputs=QMediaDevices::audioOutputs();
-        auto target=QMediaDevices::defaultAudioOutput();
+        const auto fallback=QMediaDevices::defaultAudioOutput();
+        auto target=fallback;
         for(const auto& device:outputs){
             if(device.id()==options_.outputId){target=device;break;}
         }
         if(target.isNull()){closeOutput();return;}
-        if(output_ && outputId_==target.id() && output_->state()!=QtAudio::StoppedState && outputIo_)return;
+        if(!stalled && output_ && outputId_==target.id() && outputIo_ &&
+           (output_->state()==QtAudio::ActiveState || output_->state()==QtAudio::IdleState))return;
         try{
             openAudioDevice(false,target.id(),false);
             outputDelay_=250;
-            if(!options_.outputId.isEmpty() && target.id()!=options_.outputId){
-                options_.outputId.clear();
-                emit owner_->audioDeviceSelected(false,{},{});
-            }
+            // A fallback is temporary. Keep the selected headset so it is restored on replug.
         }catch(const std::exception&){
-            if(output_ && output_->state()==QtAudio::StoppedState)closeOutput();
+            if(output_ && (stalled || output_->state()==QtAudio::StoppedState))closeOutput();
+            if(!fallback.isNull() && fallback.id()!=target.id() && (!output_ || !outputIo_ || outputId_!=fallback.id())){
+                try{openAudioDevice(false,fallback.id(),false);}catch(const std::exception&){}
+            }
             outputRetry_->start(outputDelay_);
             outputDelay_=qMin(outputDelay_*2,4000);
         }
@@ -383,6 +486,11 @@ private:
     }
     void playAudio() {
         if (!outputIo_) return;
+        // Some drivers leave a live sink with a permanently full buffer after reconnect.
+        if(outputProgress_.isValid() && outputProgress_.elapsed()>2000){
+            refreshOutput(true);
+            if(!outputIo_)return;
+        }
         const int frames = outFormat_.sampleRate() / 100;
         const int bytes = frames * outFormat_.bytesPerFrame();
         for (int chunk = 0; chunk < 3 && output_->bytesFree() >= bytes; ++chunk) {
@@ -400,6 +508,7 @@ private:
             if(processor_&&options_.echo){std::vector<int16_t> ref(samples);for(int i=0;i<samples;++i)ref[i]=int16_t(std::clamp(mixed[i],-1.f,1.f)*32767);livekit::AudioFrame frame(std::move(ref),rate,1,samples);try{processor_->processReverseStream(frame);}catch(const std::exception&){deviceFailed();return;}}
             const auto data=AudioPcm::playbackBlock(mixed,outFormat_);
             const auto written=outputIo_->write(data);
+            if(written>0)outputProgress_.restart();
             if(written<0){
                 outputIo_=nullptr;
                 if(outputRetry_ && !outputRetry_->isActive())outputRetry_->start(0);
@@ -407,24 +516,32 @@ private:
             if(written!=data.size())break;
         }
     }
+    void publishVideo(OutgoingVideo& stream,bool share){
+        stream.track=livekit::LocalVideoTrack::createLocalVideoTrack(share?"screen":"camera",stream.source);
+        livekit::TrackPublishOptions publish;
+        publish.source=share?livekit::TrackSource::SOURCE_SCREENSHARE:livekit::TrackSource::SOURCE_CAMERA;
+        publish.video_encoder=options_.hardwareVideo?livekit::VideoEncoderBackend::Hardware:livekit::VideoEncoderBackend::PreEncoded;
+        publish.video_codec=livekit::VideoCodec::H264;publish.simulcast=false;publish.video_encoding=livekit::VideoEncodingOptions{3000000,30};
+        auto participant=room_->localParticipant().lock();if(!participant)throw std::runtime_error("No local participant");
+        participant->publishTrack(stream.track,publish);
+    }
     void startVideo(bool share,int mode){
         auto& stream=share?shareVideo_:cameraVideo_;stream.mode=mode;
         if(!stream.track){
             const int w = mode==1 ? 640 : 1920, h = mode==1 ? 360 : 1080;
             if (options_.hardwareVideo) stream.source = std::make_shared<livekit::VideoSource>(w,h);
             else stream.source = std::make_shared<livekit::EncodedVideoSource>(livekit::VideoCodec::H264,w,h);
-            stream.track=livekit::LocalVideoTrack::createLocalVideoTrack(share?"screen":"camera",stream.source);
-            livekit::TrackPublishOptions publish;
-            publish.source=share?livekit::TrackSource::SOURCE_SCREENSHARE:livekit::TrackSource::SOURCE_CAMERA;
-            publish.video_encoder=options_.hardwareVideo?livekit::VideoEncoderBackend::Hardware:livekit::VideoEncoderBackend::PreEncoded;
-            publish.video_codec=livekit::VideoCodec::H264;publish.simulcast=false;publish.video_encoding=livekit::VideoEncodingOptions{3000000,30};
-            auto participant=room_->localParticipant().lock();if(!participant)throw std::runtime_error("No local participant");
-            participant->publishTrack(stream.track,publish);
+            publishVideo(stream,share);
         }else{
             stream.track->unmute();
         }
         if (!options_.hardwareVideo) stream.encoder = std::make_unique<CaptureEncoder>(
             std::static_pointer_cast<livekit::EncodedVideoSource>(stream.source));
+        if(share){
+            board_.session=QUuid::createUuid().toString(QUuid::WithoutBraces);
+            emit owner_->inkSession({},board_.session,true);
+            announceInk({});
+        }
         if(mode==1)return;
         stream.capture=std::make_unique<QMediaCaptureSession>();auto* capture=stream.capture.get();
         auto* sink=new QVideoSink(capture);capture->setVideoSink(sink);stream.clock.invalidate();stream.nextCaptureNs=0;
@@ -530,6 +647,12 @@ private:
             QSize size=raw.size();if(size.height()>height_||size.width()>height_*16/9)size.scale(height_*16/9,height_,Qt::KeepAspectRatio);
             size.setWidth(qMax(2,size.width()&~1));size.setHeight(qMax(2,size.height()&~1));
             auto image=(size==raw.size()?raw:raw.scaled(size,Qt::IgnoreAspectRatio,Qt::FastTransformation)).convertToFormat(QImage::Format_RGBA8888);
+            if(share && stream.mode!=3){
+                if(stream.mode==1)cleanScreen_=image;
+                if(!board_.strokes.isEmpty()){
+                    QPainter composite(&image);ScreenInk::paint(composite,image.rect(),board_.strokes);
+                }
+            }
             if(!share&&stream.mode==2&&options_.blur){try{if(!effect_)effect_=std::make_unique<BackgroundBlur>();image=effect_->apply(image,options_.blurRadius);}catch(...){blur(false,options_.blurRadius);emit owner_->effectFailed();}}
             if(stream.mode!=1)owner_->postFrame({},share,image);
             if (stream.encoder) {
@@ -745,6 +868,7 @@ private:
     std::shared_ptr<livekit::LocalAudioTrack> screenAudioTrack_;
     OutgoingVideo cameraVideo_,shareVideo_;int height_=1080;
     std::future<std::vector<livekit::RtcStats>> encoderStats_;
+    QElapsedTimer outputProgress_;
     QAudioSource* input_ = nullptr; QAudioSink* output_ = nullptr;
     QPointer<QIODevice> inputIo_,outputIo_;
     QMediaDevices* devices_=nullptr;
@@ -791,6 +915,11 @@ MediaSession::MediaSession(QObject* parent) : VoiceEvents(parent), worker_(new M
     worker_->moveToThread(&thread_); connect(&thread_, &QThread::finished, worker_, &QObject::deleteLater); thread_.start();
 }
 QObject* MediaSession::workerContext() const { return worker_; }
+int MediaSession::activeEncoderQueues() const {
+    int count=0;
+    QMetaObject::invokeMethod(worker_,[this,&count]{count=worker_->activeEncoderQueues();},Qt::BlockingQueuedConnection);
+    return count;
+}
 MediaSession::~MediaSession() {
     QMetaObject::invokeMethod(worker_, [this] { worker_->stop(false); }, Qt::BlockingQueuedConnection);
     thread_.quit(); thread_.wait();
@@ -805,8 +934,14 @@ void MediaSession::setProcessing(bool n,bool e,bool a,QString engine){QMetaObjec
 void MediaSession::selectAudioDevice(bool input,const QByteArray& id){
     QMetaObject::invokeMethod(worker_,[this,input,id]{worker_->selectAudioDevice(input,id);},Qt::QueuedConnection);
 }
+void MediaSession::moveRoom(QString url,QString token,bool annotations){
+    QMetaObject::invokeMethod(worker_,[this,url,token,annotations]{worker_->moveRoom(url,token,annotations);},Qt::QueuedConnection);
+}
 void MediaSession::setMuted(bool muted) { QMetaObject::invokeMethod(worker_, [this, muted] { worker_->mute(muted); }, Qt::QueuedConnection); }
 void MediaSession::setScreenAudio(bool enabled){QMetaObject::invokeMethod(worker_,[this,enabled]{worker_->setScreenAudio(enabled);},Qt::QueuedConnection);}
+void MediaSession::sendInk(QString host,QJsonObject command){
+    QMetaObject::invokeMethod(worker_,[this,host,command]{worker_->sendInk(host,command);},Qt::QueuedConnection);
+}
 void MediaSession::setVideoHeight(int height){QMetaObject::invokeMethod(worker_,[this,height]{worker_->setVideoHeight(height);},Qt::QueuedConnection);}
 void MediaSession::changeVideo(bool share,int mode, const QByteArray& camera, const QString& screen, const QCapturableWindow& window) {
     QMetaObject::invokeMethod(worker_, [this,share,mode,camera,screen,window] { worker_->changeVideo(share,mode,camera,screen,window); }, Qt::QueuedConnection);

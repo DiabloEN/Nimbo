@@ -50,7 +50,8 @@ if(!$env:NIMBO_QA_CAPTURE_CYCLES){$clientArguments+='--synthetic-media'}
 $profiler=$null
 if($env:NIMBO_QA_HEOB){
   $logPath=Join-Path $OutputDir 'heap-stacks.txt'
-  $profiler=Start-Process -FilePath $env:NIMBO_QA_HEOB -WorkingDirectory $OutputDir -ArgumentList (@('-p0','-d4','-k2','-G1','-l1','-z32768','-oheap-stacks.txt',('"'+$Client+'"'))+$clientArguments) -WindowStyle Hidden -PassThru
+  $minimumTrace=if($env:NIMBO_QA_RETENTION_ROUTE){'-z4096'}else{'-z32768'}
+  $profiler=Start-Process -FilePath $env:NIMBO_QA_HEOB -WorkingDirectory $OutputDir -ArgumentList (@('-p0','-d4','-k2','-G1','-l1',$minimumTrace,'-oheap-stacks.txt',('"'+$Client+'"'))+$clientArguments) -WindowStyle Hidden -PassThru
   $p=$null
   for($i=0;$i -lt 60 -and !$p -and !$profiler.HasExited;$i++){
     $child=Get-CimInstance Win32_Process -Filter ("ParentProcessId="+$profiler.Id) | Where-Object ExecutablePath -eq $Client | Select-Object -First 1
@@ -261,6 +262,7 @@ try{
         Start-Sleep -Milliseconds 400
       }
       function Leave-TestCall {
+        $root=[Windows.Automation.AutomationElement]::FromHandle($hw)
         # Both the hovering tile action and the permanent bottom bar expose
         # the same accessible name. Select the visible full-size bottom button.
         $condition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,'Выйти из голосовой комнаты')
@@ -273,6 +275,17 @@ try{
       }
       function Measure-Stage([string]$label){
         Sample-Idle $label @(1)
+        if ($env:NIMBO_QA_VMMAP -and $label -in @('idle','rest-final')) {
+          $mapFile=Join-Path $OutputDir ($label+'-vmmap.csv')
+          for($attempt=0;$attempt -lt 3;$attempt++){
+            $mapTool=Start-Process -FilePath $env:NIMBO_QA_VMMAP -ArgumentList @('-accepteula','-p',$p.Id,('"'+$mapFile+'"')) -WindowStyle Hidden -PassThru
+            if(!$mapTool.WaitForExit(25000)){ $mapTool.Kill();throw 'VMMap timed out' }
+            if(!(Test-Path -LiteralPath $mapFile)){throw 'Missing VMMap report'}
+            # A changing address space can produce a truncated VMMap enumeration.
+            if(Select-String -LiteralPath $mapFile -Pattern '^"Image","[0-9]' -Quiet){break}
+            Start-Sleep -Milliseconds 250
+          }
+        }
         if($heapEnabled -and $label -in @('voice','both-on-1','camera-on-1','screen-on-1','capture-rest','left')){
           & wpr.exe -singlesnapshot heap $p.Id -instancename $traceSession
           if($LASTEXITCODE){throw "Could not capture the heap at $label"}
@@ -302,6 +315,10 @@ try{
           if([NimboWindowQA]::HitTest($hw,0x80db,[IntPtr]::Zero,[IntPtr]::Zero) -ne [IntPtr]1){throw 'Missing client resource sample'}
           $resources=Get-Content -Raw -LiteralPath (Join-Path $data 'qa-memory.json') | ConvertFrom-Json
           $resources | Select-Object @{n='phase';e={$label}},* | Export-Csv -NoTypeInformation -Append -LiteralPath (Join-Path $OutputDir 'resources.csv')
+          if($env:NIMBO_QA_GAME_OVERLAY){
+            if($label -like 'overlay-visible-*' -and !$resources.gameOverlay){throw "Overlay missing at $label"}
+            if(($label -like 'overlay-hidden-*' -or $label -like 'left-*' -or $label -eq 'rest-final') -and $resources.gameOverlay){throw "Overlay survived $label"}
+          }
           if($label -like 'settings-closed-*' -and ($resources.settingsPages -or $resources.effectCards -or $resources.audioChecks)){
             throw "Settings resources survived the return to chat at $label"
           }
@@ -319,7 +336,8 @@ try{
         }
         $mapPause=$env:NIMBO_QA_PAUSE_REST -and $label -in @('history-1','play-1','pause-1','pause-rest')
         $mapSettings=$env:NIMBO_QA_SETTINGS_CYCLES -and $label -in @('settings-video-1','settings-closed-1','settings-closed-3')
-        if(($mapSettings -or $mapPause -or $label -in @('idle','rest-final','workspace-final','voice','capture-rest','left')) -and $env:NIMBO_QA_PYTHON){
+        $mapCaptureStop=$env:NIMBO_QA_CAPTURE_COUNTERS -and $label -eq 'screen-off-5'
+        if(($mapSettings -or $mapPause -or $mapCaptureStop -or $label -in @('idle','rest-final','workspace-final','voice','capture-rest','left')) -and $env:NIMBO_QA_PYTHON){
           & $env:NIMBO_QA_PYTHON (Join-Path $PSScriptRoot 'measure-native-idle.py') --map-pid $p.Id |
             Set-Content -LiteralPath (Join-Path $OutputDir ($label+'-map.json'))
           if($LASTEXITCODE){throw 'Could not classify resident pages'}
@@ -334,6 +352,7 @@ try{
           # real, laid-out row before clicking or taking a measurement.
           $attempts=if($profiler){200}else{50}
           for($n=0;$n -lt $attempts;$n++){
+            $root=[Windows.Automation.AutomationElement]::FromHandle($hw)
             $row=$root.FindAll([Windows.Automation.TreeScope]::Descendants,$match) |
               Where-Object {$_.Current.ControlType -eq [Windows.Automation.ControlType]::ListItem -and $_.Current.BoundingRectangle.Width -gt 280} | Select-Object -First 1
             if($row){return $row}
@@ -725,66 +744,101 @@ try{
           $null=Find-Control 'Большая история' ([Windows.Automation.ControlType]::ListItem)
         }
         $rounds=if($env:NIMBO_QA_ATTACHMENT_CYCLES){5}else{2}
+        $route=$env:NIMBO_QA_RETENTION_ROUTE
+        if($route){$rounds=[int]$env:NIMBO_QA_RETENTION_ROUNDS}
         foreach($round in 1..$rounds){
-          $clock=[Diagnostics.Stopwatch]::StartNew()
-          $historyRoom=Find-Control 'Большая история' ([Windows.Automation.ControlType]::ListItem)
-          $historyRoom.GetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern).Select()
-          $last=MediaRow 'Видео 4'
-          $clock.ElapsedMilliseconds | Add-Content -LiteralPath (Join-Path $OutputDir 'history-ms.txt')
-          $bounds=$root.Current.BoundingRectangle
-          $point=[IntPtr](([int]($bounds.Top+$bounds.Height/2) -shl 16) -bor ([int]($bounds.Left+$bounds.Width/2) -band 0xffff))
-          foreach($direction in @(1,-1)){
-            $steps=if($env:NIMBO_QA_ATTACHMENT_CYCLES -and $round -gt 1){0}else{64}
-            for($step=0;$step -lt $steps;$step++){
-              $null=[NimboWindowQA]::PostMessage($hw,0x20A,[IntPtr](($direction*480) -shl 16),$point)
-              Start-Sleep -Milliseconds 100
-            }
-            $edge=if($direction -gt 0){'Текст 0-0'}else{'Видео 4'}
-            if($steps){$null=Find-Control $edge ([Windows.Automation.ControlType]::ListItem)}
-          }
-          Measure-Stage "history-$round"
-          if($env:NIMBO_QA_PLAY_CHAT_VIDEO){
-            $row=MediaRow 'Видео 4'
-            Click-TestControl $row 150 145
-            Measure-Stage "play-$round"
-            Click-TestControl $row 150 145
-            Measure-Stage "pause-$round"
-            if($env:NIMBO_QA_PAUSE_REST -and $round -eq 1){
-              Start-Sleep -Seconds 30
-              Measure-Stage 'pause-rest'
-            }
-            if($env:NIMBO_QA_ATTACHMENT_CYCLES){
-              # Resume, then observe natural end so the next cycle starts at time zero.
-              Click-TestControl $row 150 145
-              Measure-Stage "play-resumed-$round"
-              for($retry=0;$retry -lt 120;$retry++){
-                if([NimboWindowQA]::HitTest($hw,0x80db,[IntPtr]::Zero,[IntPtr]::Zero) -ne [IntPtr]1){throw 'Missing playback resource sample'}
-                $state=Get-Content -Raw -LiteralPath (Join-Path $data 'qa-memory.json') | ConvertFrom-Json
-                if(!$state.attachmentDecoders){break}
-                Start-Sleep -Milliseconds 250
+          if($route -in @('quiet','voice')){
+            Select-TestRoom 'общий'
+            Start-Sleep -Seconds 13
+          }else{
+            $clock=[Diagnostics.Stopwatch]::StartNew()
+            $historyRoom=Find-Control 'Большая история' ([Windows.Automation.ControlType]::ListItem)
+            if($route){Click-TestControl $historyRoom}
+            $historyRoom.GetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern).Select()
+            $last=MediaRow 'Видео 4'
+            $clock.ElapsedMilliseconds | Add-Content -LiteralPath (Join-Path $OutputDir 'history-ms.txt')
+            $bounds=$root.Current.BoundingRectangle
+            $point=[IntPtr](([int]($bounds.Top+$bounds.Height/2) -shl 16) -bor ([int]($bounds.Left+$bounds.Width/2) -band 0xffff))
+            foreach($direction in @(1,-1)){
+              $steps=if($env:NIMBO_QA_ATTACHMENT_CYCLES -and $round -gt 1){0}else{64}
+              for($step=0;$step -lt $steps;$step++){
+                $null=[NimboWindowQA]::PostMessage($hw,0x20A,[IntPtr](($direction*480) -shl 16),$point)
+                Start-Sleep -Milliseconds 100
               }
-              if($retry -eq 120){throw 'Video decoder survived natural end'}
-              Measure-Stage "pause-ended-$round"
+              $edge=if($direction -gt 0){'Текст 0-0'}else{'Видео 4'}
+              if($steps){
+                # Older pages can arrive after the wheel sequence finishes on a busy desktop.
+                for($pass=1;$pass -le 3;$pass++){
+                  try {$null=Find-Control $edge ([Windows.Automation.ControlType]::ListItem);break}
+                  catch {if($pass -eq 3){throw}}
+                  for($step=0;$step -lt 64;$step++){
+                    $null=[NimboWindowQA]::PostMessage($hw,0x20A,[IntPtr](($direction*480) -shl 16),$point)
+                    Start-Sleep -Milliseconds 100
+                  }
+                }
+              }
+            }
+            Measure-Stage "history-$round"
+            if($env:NIMBO_QA_PLAY_CHAT_VIDEO){
+              $row=MediaRow 'Видео 4'
+              Click-TestControl $row 150 145
+              Measure-Stage "play-$round"
+              Click-TestControl $row 150 145
+              Measure-Stage "pause-$round"
+              if($env:NIMBO_QA_PAUSE_REST -and $round -eq 1){
+                Start-Sleep -Seconds 30
+                Measure-Stage 'pause-rest'
+              }
+              if($env:NIMBO_QA_ATTACHMENT_CYCLES){
+                # Resume, then observe natural end so the next cycle starts at time zero.
+                Click-TestControl $row 150 145
+                Measure-Stage "play-resumed-$round"
+                for($retry=0;$retry -lt 120;$retry++){
+                  if([NimboWindowQA]::HitTest($hw,0x80db,[IntPtr]::Zero,[IntPtr]::Zero) -ne [IntPtr]1){throw 'Missing playback resource sample'}
+                  $state=Get-Content -Raw -LiteralPath (Join-Path $data 'qa-memory.json') | ConvertFrom-Json
+                  if(!$state.attachmentDecoders){break}
+                  Start-Sleep -Milliseconds 250
+                }
+                if($retry -eq 120){throw 'Video decoder survived natural end'}
+                Measure-Stage "pause-ended-$round"
+              }
+            }
+            if($env:NIMBO_QA_ACTIVE_CAPTURE -or $env:NIMBO_QA_ATTACHMENT_CYCLES){
+              $audio=Reveal-RecentRow 'Запись 4' 124
+              Click-TestControl $audio 89 124
+              Measure-Stage "play-audio-$round"
+              Click-TestControl $audio 89 124
+              Measure-Stage "pause-audio-$round"
+              $photo=Reveal-RecentRow 'Галерея 4' 135
+              Click-TestControl $photo 150 135
+              $null=Find-Control 'Закрыть просмотр'
+              Measure-Stage "photo-open-$round"
+              Click-TestControl (Find-Control 'Закрыть просмотр')
+              $null=Find-Control 'Гостиная' ([Windows.Automation.ControlType]::ListItem)
+              Measure-Stage "photo-closed-$round"
             }
           }
-          if($env:NIMBO_QA_ACTIVE_CAPTURE -or $env:NIMBO_QA_ATTACHMENT_CYCLES){
-            $audio=Reveal-RecentRow 'Запись 4' 124
-            Click-TestControl $audio 89 124
-            Measure-Stage "play-audio-$round"
-            Click-TestControl $audio 89 124
-            Measure-Stage "pause-audio-$round"
-            $photo=Reveal-RecentRow 'Галерея 4' 135
-            Click-TestControl $photo 150 135
-            $null=Find-Control 'Закрыть просмотр'
-            Measure-Stage "photo-open-$round"
-            Click-TestControl (Find-Control 'Закрыть просмотр')
-            $null=Find-Control 'Гостиная' ([Windows.Automation.ControlType]::ListItem)
-            Measure-Stage "photo-closed-$round"
-          }
-          if($env:NIMBO_QA_CHAT_CALL_CLOSE){
+          if($env:NIMBO_QA_CHAT_CALL_CLOSE -and $route -notin @('quiet','chat')){
             Select-TestRoom 'Гостиная'
             $null=Find-Control 'Выключить микрофон'
             Measure-Stage "voice-$round"
+            if($env:NIMBO_QA_GAME_OVERLAY -and $round -eq 1){
+              Press 'Настройки'
+              Press 'Игровой оверлей'
+              Measure-Stage 'overlay-before'
+              function Toggle-TestOverlay {
+                $control=Find-Control 'Игровой оверлей' ([Windows.Automation.ControlType]::CheckBox)
+                $control.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern).Toggle()
+              }
+              for($i=1;$i -le 5;$i++){
+                Toggle-TestOverlay
+                Measure-Stage "overlay-visible-$i"
+                Toggle-TestOverlay
+                Measure-Stage "overlay-hidden-$i"
+              }
+              Toggle-TestOverlay
+              Press 'К комнате'
+            }
             if($env:NIMBO_QA_ACTIVE_CAPTURE){
               Start-TestScreen
               Measure-Stage "screen-on-$round"

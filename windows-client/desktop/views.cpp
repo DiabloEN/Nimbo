@@ -72,6 +72,7 @@ void DesktopWindow::updateSettingsTitle(QString sectionName){
     title->setTextFormat(Qt::RichText);title->setText(markup+"</tr></table>");
 }
 void DesktopWindow::openView(const QString& next){
+    if(previewingOverlay && next!="overlay"){previewingOverlay=false;syncGameOverlay();}
     if(next=="profile"&&view!=next){draftProfileName=self.value("name").toString(nickname->text());draftProfileAvatar=profile.value("avatar").toString();}
     view=next;bool room=view=="room";content->setCurrentWidget(room?roomPage:detailPage);
     backButton->setVisible(!room);
@@ -135,7 +136,7 @@ void DesktopWindow::renderView(){
     auto* page=new QWidget;scroll->setWidget(page);page->setObjectName("settingsPage");auto* columns=new QVBoxLayout(page);
     auto* tabs=new WrapLayout(nav);tabs->setSpacing(7);
     struct Tab{QString id,label,icon;};
-    for(const auto& tab:QList<Tab>{{"general",UiText::General(),"settings"},{"audio",UiText::Sound(),"headphones"},{"video",UiText::Video(),"camera"},{"channels",UiText::Channels(),"hash"},{"roles",UiText::MembersAndRoles(),"users"},{"keys",UiText::KeyboardShortcuts(),"keyboard"}}){
+    for(const auto& tab:QList<Tab>{{"general",UiText::General(),"settings"},{"audio",UiText::Sound(),"headphones"},{"video",UiText::Video(),"camera"},{"overlay",UiText::GameOverlay(),"screen"},{"channels",UiText::Channels(),"hash"},{"roles",UiText::MembersAndRoles(),"users"},{"keys",UiText::KeyboardShortcuts(),"keyboard"}}){
         if(tab.id=="channels" && !allowed("manage_server") && !allowed("manage_channels"))continue;
         auto* b=new QPushButton(icon(tab.icon),tab.label);b->setFixedHeight(45);b->setIconSize({19,19});
         b->setStyleSheet(QString("QPushButton{text-align:left;padding:0 13px;border:0;border-radius:10px;background:%1;color:%2;font-size:12px} QPushButton:hover{background:#202020} QPushButton:focus{border:1px solid #ddd}").arg(tab.id==view?"#242424":"transparent",tab.id==view?"#eee":"#a0a0a0"));
@@ -206,8 +207,8 @@ void DesktopWindow::renderView(){
                              for(const auto& d:list)combo->addItem(d.description(),d.id());
                              combo->setCurrentIndex(qMax(0,combo->findData(saved)));}
                             if(!saved.isEmpty() && combo->findData(saved)<0){
-                                // During a call the worker confirms a usable fallback before changing the preference.
-                                if(inCall && !input)continue;
+                                // The default output is temporary until the chosen device returns.
+                                if(!input)continue;
                                 saved.clear();QSettings(dataPath+"/desktop.ini",QSettings::IniFormat).remove(key);
                                 if(inCall && media)media->selectAudioDevice(input,{});
                                 note(UiText::TheSelectedDeviceWasDisconnectedUsingThe());
@@ -239,6 +240,7 @@ void DesktopWindow::renderView(){
                 connect(engines,&QComboBox::currentIndexChanged,engines,[this,engines]{QSettings p(dataPath+"/desktop.ini",QSettings::IniFormat);QString engine=engines->currentData().toString();p.setValue("noise",engine!="off");if(engine!="off")p.setValue("engine",engine);if(media)media->setProcessing(engine!="off",p.value("echo",true).toBool(),p.value("agc",false).toBool(),engine);});
             }
         }else if(view=="keys"){renderKeys(body);}
+        else if(view=="overlay"){renderOverlaySettings(body);}
         else if(view=="channels"){
             if(allowed("manage_server")){
                 auto* identity=new WorkspaceIdentity(api,workspace,[this]{return selectAvatar(this,true);},[this]{refresh();});
@@ -268,11 +270,18 @@ void DesktopWindow::renderView(){
 void DesktopWindow::memberMenu(QString id,QPoint pos){
     if(id==selfId || id.isEmpty())return;
     auto m=byId(workspace.value("members").toArray(),id);if(m.isEmpty())return;
-    auto* panel=new QFrame(this,Qt::Popup);panel->setObjectName("participantMenu");panel->setAttribute(Qt::WA_TranslucentBackground);
+    class MenuPanel final : public QFrame {
+    public:
+        explicit MenuPanel(QWidget* parent):QFrame(parent,Qt::Popup){}
+        void paintEvent(QPaintEvent*) override{
+            QPainter painter(this);painter.setRenderHint(QPainter::Antialiasing);
+            painter.setPen(Qt::NoPen);painter.setBrush(QColor("#252525"));painter.drawRoundedRect(rect(),14,14);
+        }
+    };
+    auto* panel=new MenuPanel(this);panel->setObjectName("participantMenu");panel->setAttribute(Qt::WA_TranslucentBackground);
     panel->setAttribute(Qt::WA_DeleteOnClose);panel->setFixedWidth(252);panel->setFocusPolicy(Qt::StrongFocus);
     panel->setAccessibleName(UiText::Member()+m["name"].toString());
-    panel->setStyleSheet("QFrame#participantMenu{background:#252525;border-radius:14px}"
-                         "QPushButton{background:transparent;border:0;border-radius:8px;padding:11px 8px;text-align:left;font-size:12px}"
+    panel->setStyleSheet("QPushButton{background:transparent;border:0;border-radius:8px;min-height:36px;padding:0 8px;text-align:left;font-size:12px}"
                          "QPushButton:hover,QPushButton:focus{background:#353535}"
                          "QSlider{background:transparent;border:0;padding:0} QSlider::groove:horizontal{height:4px;background:#444;border-radius:2px}"
                          "QSlider::sub-page:horizontal{background:#66aaf0;border-radius:2px}"
@@ -298,8 +307,20 @@ void DesktopWindow::memberMenu(QString id,QPoint pos){
         });
     }
     auto* error=text("","color:#efaaaa;font-size:12px");error->setWordWrap(true);error->hide();
-    auto action=[this,panel,error,id](QBoxLayout* dest,QString caption,QString op,int seconds=0){
-        auto* button=new QPushButton(caption);dest->addWidget(button);
+    auto menuButton=[](QString caption,QString glyph,bool danger=false){
+        auto* button=new QPushButton;
+        button->setAccessibleName(caption);button->setCursor(Qt::PointingHandCursor);
+        auto* row=new QHBoxLayout(button);row->setContentsMargins(8,0,8,0);row->setSpacing(10);
+        auto color=QColor(danger?"#e3a5a5":"#eeeeee");
+        auto* icon=new QLabel;icon->setPixmap(tintedIcon(glyph,color).pixmap(16,16));row->addWidget(icon);
+        auto* label=new QLabel(caption);label->setStyleSheet("background:transparent;font-size:12px;color:"+color.name());
+        row->addWidget(label,1);
+        for(auto* child:{label,icon})child->setAttribute(Qt::WA_TransparentForMouseEvents);
+        return button;
+    };
+    auto action=[this,panel,error,id,menuButton](QLayout* dest,QString caption,QString op,int seconds=0){
+        static const QHash<QString,QString> icons={{"mute_mic","mic-off"},{"mute_camera","camera-off"},{"mute_screen","screen"},{"kick","exit"}};
+        auto* button=seconds?new QPushButton(caption):menuButton(caption,icons.value(op,"chat"),op=="kick");dest->addWidget(button);
         connect(button,&QPushButton::clicked,panel,[this,panel,error,id,op,seconds]{
             for(auto* b:panel->findChildren<QPushButton*>())b->setEnabled(false);
             api.request("POST","/api/members/"+enc(id)+"/moderate",{{"action",op},{"seconds",seconds}},
@@ -316,15 +337,21 @@ void DesktopWindow::memberMenu(QString id,QPoint pos){
     if(chat){
         if(m["chatMutedUntil"].toInteger()>QDateTime::currentMSecsSinceEpoch())action(layout,UiText::AllowPosting(),"unmute");
         else{
-            auto* select=new QPushButton(UiText::RestrictPosting());select->setCheckable(true);layout->addWidget(select);
-            auto* durations=new QWidget;auto* options=new QVBoxLayout(durations);options->setContentsMargins(8,0,0,0);options->setSpacing(0);
+            auto* select=menuButton(UiText::RestrictPosting(),"chat");select->setCheckable(true);layout->addWidget(select);
+            auto* durations=new QWidget;auto* options=new QGridLayout(durations);options->setDefaultPositioning(2,Qt::Horizontal);
+            options->setContentsMargins(8,5,8,5);options->setSpacing(5);
             action(options,UiText::Value15Minutes(),"mute",900);action(options,UiText::Value1Hour(),"mute",3600);
             action(options,UiText::Value24Hours(),"mute",86400);action(options,UiText::Value1Week(),"mute",604800);
             layout->addWidget(durations);durations->hide();
             connect(select,&QPushButton::toggled,panel,[panel,durations](bool on){durations->setVisible(on);panel->adjustSize();});
         }
     }
-    if(voice&&editable&&allowed("kick_members"))action(layout,UiText::DisconnectFromVoice(),"kick");
+    if(voice&&editable&&allowed("kick_members")){
+        action(layout,UiText::MuteMicrophone(),"mute_mic");
+        action(layout,UiText::TurnOffCamera(),"mute_camera");
+        action(layout,UiText::StopScreenSharing2(),"mute_screen");
+        action(layout,UiText::DisconnectFromVoice(),"kick");
+    }
     if(!voice&&!chat)layout->addWidget(text(UiText::NoActionsAvailable(),"font-size:12px;color:#a0a0a0;padding:8px"));
     layout->addWidget(error);
     auto* escape=new QShortcut(QKeySequence(Qt::Key_Escape),panel);connect(escape,&QShortcut::activated,panel,&QWidget::close);

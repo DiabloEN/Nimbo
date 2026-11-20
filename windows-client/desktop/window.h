@@ -1,5 +1,6 @@
 #pragma once
 #include "api.h"
+#include "game_overlay.h"
 #include "interface_text.h"
 #include "media_session.h"
 #include <QMainWindow>
@@ -14,6 +15,7 @@
 #include <memory>
 
 class DesktopUpdates;
+class PresenterInk;
 class QSoundEffect;
 class StreamViewer; class MessageInput; class VoiceCard; class QLabel; class QPushButton; class QLineEdit; class QListWidget; class QComboBox;
 class QStackedWidget; class QVBoxLayout;
@@ -68,6 +70,14 @@ private:
     bool leavingVoice=false, rosterSeeded=false;
     quint64 voiceInviteGeneration=0;
     ServerApi callStateApi;
+    QTimer voiceControlTimer,moveDisplayTimer;
+    bool controlBusy=false;
+    QString handledMove,admittedRoom,admittedName;
+    void pollVoiceControl();
+    bool canDragVoice(const QString& identity) const;
+    void requestVoiceMove(QString identity,QString from,QString to);
+    QJsonArray rawRoomPeople(const QString& room) const;
+    struct DisplayMove {QString origin,identity,from,to;QJsonObject person;} displayMove;
     void retireVoiceIdentity();
     void finishVoiceClose();
     int pendingVoiceDepartures=0;
@@ -81,6 +91,13 @@ private:
     qint64 latestNotice=0;
     QElapsedTimer chatSoundCooldown;
     void updateCallRoster(const QJsonArray& people);
+    OverlayPreferences overlayPrefs;
+    bool previewingOverlay=false;
+    QPointer<QPushButton> overlayPreviewButton;
+    QString overlayLocalName;
+    std::unique_ptr<GameOverlay> gameOverlay;
+    void syncGameOverlay();
+    void renderOverlaySettings(QVBoxLayout* body);
     QHash<QString,QSoundEffect*> callSounds;
     QList<QPair<QString,QString>> endedVoiceSessions;
     QHash<QString,QImage> trackFrames;
@@ -90,6 +107,11 @@ private:
     void syncViewer(bool newScreen=false);
     QSet<QString> mutedStreams;
     StreamViewer* viewer=nullptr;
+    QString ownInkSession,inkMonitor;
+    bool inkTransport=false;
+    WId inkProgram=0;
+    std::unique_ptr<PresenterInk> presenterInk;
+    void displayInk(const ScreenInk::Strokes& strokes);
     QPointer<QWidget> attachmentViewer;
     bool wasViewingCall=false;
     void showServers();

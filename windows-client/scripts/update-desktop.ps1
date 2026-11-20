@@ -4,7 +4,8 @@
     [Parameter(Mandatory)][int]$ParentId,
     [Parameter(Mandatory)][ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version,
     [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{64}$')][string]$Digest,
-    [string]$ReadyFile = ''
+    [string]$ReadyFile = '',
+    [switch]$NonInteractive
 )
 $ErrorActionPreference = 'Stop'
 # Also support older clients that inherit PowerShell 7's module search path.
@@ -46,7 +47,20 @@ function Set-UpdateProgress([int]$value,[string]$text) {
     [Windows.Forms.Application]::DoEvents()
 }
 function Start-Client {
-    Start-Process -FilePath (Join-Path $target 'NimboDesktop.exe') -WorkingDirectory $target -ArgumentList ('--data-dir "' + $ProfileDir.TrimEnd('\') + '"') -PassThru
+    $entry=Join-Path $target 'Nimbo.exe'
+    if (!(Test-Path -LiteralPath $entry -PathType Leaf)) { $entry=Join-Path $target 'NimboDesktop.exe' }
+    Start-Process -FilePath $entry -WorkingDirectory $target -ArgumentList ('--data-dir "' + $ProfileDir.TrimEnd('\') + '"') -PassThru
+}
+function Move-UpdateDirectory([string]$source,[string]$destination) {
+    for($attempt=1;$attempt -le 20;$attempt++){
+        try { [IO.Directory]::Move($source,$destination); return }
+        catch {
+            $cause=$_.Exception.GetBaseException()
+            if ($attempt -eq 20 -or (Test-Path -LiteralPath $destination) -or
+                ($cause -isnot [IO.IOException] -and $cause -isnot [UnauthorizedAccessException])){throw}
+            Start-Sleep -Milliseconds 250
+        }
+    }
 }
 function Remove-PristineBackup {
     $path=[IO.Path]::GetFullPath($backup)
@@ -78,7 +92,8 @@ function Remove-PristineBackup {
     Remove-Item -LiteralPath $path -Recurse -Force
 }
 try {
-    $exe = Join-Path $target 'NimboDesktop.exe'
+    $exe = Join-Path $target 'Nimbo.exe'
+    if (!(Test-Path -LiteralPath $exe -PathType Leaf)) { $exe=Join-Path $target 'NimboDesktop.exe' }
     if (!(Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'The existing installation was not found.' }
     $parent = Get-Process -Id $ParentId -ErrorAction SilentlyContinue
     if ($parent) {
@@ -87,7 +102,29 @@ try {
     if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $Digest) { throw 'Release checksum mismatch.' }
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [IO.Compression.ZipFile]::ExtractToDirectory($archive,$stage)
-    foreach ($file in @('NimboDesktop.exe','Qt6Core.dll','update-desktop.ps1','assets\room-preview.png')) {
+    $legacyExe=Join-Path $stage 'NimboDesktop.exe'
+    $newExe=Join-Path $stage 'Nimbo.exe'
+    if ((Test-Path -LiteralPath $legacyExe -PathType Leaf) -and !(Test-Path -LiteralPath $newExe)) {
+        Rename-Item -LiteralPath $legacyExe -NewName 'Nimbo.exe'
+        # The immutable legacy ZIP contains inventories under the previous filename.
+        $binaries=Join-Path $stage 'licenses\windows-binaries.sha256'
+        $receipt=Join-Path $stage 'licenses\windows-files.json'
+        $utf8=New-Object Text.UTF8Encoding($false)
+        if(Test-Path -LiteralPath $binaries){
+            [IO.File]::WriteAllText($binaries,([IO.File]::ReadAllText($binaries) -replace '(?m)  NimboDesktop\.exe(?=\r?$)','  Nimbo.exe'),$utf8)
+        }
+        if(Test-Path -LiteralPath $receipt){
+            $inventory=Get-Content -LiteralPath $receipt -Raw -Encoding UTF8 | ConvertFrom-Json
+            $hash=$inventory.'NimboDesktop.exe'
+            if($hash){
+                $inventory.PSObject.Properties.Remove('NimboDesktop.exe')
+                $inventory | Add-Member NoteProperty 'Nimbo.exe' $hash
+                $inventory.'licenses/windows-binaries.sha256'=(Get-FileHash -LiteralPath $binaries).Hash.ToLowerInvariant()
+                [IO.File]::WriteAllText($receipt,($inventory | ConvertTo-Json),$utf8)
+            }
+        }
+    }
+    foreach ($file in @('Nimbo.exe','Qt6Core.dll','update-desktop.ps1','assets\room-preview.png')) {
         if (!(Test-Path -LiteralPath (Join-Path $stage $file) -PathType Leaf)) { throw 'Incomplete Windows release.' }
     }
     $installKey = 'HKCU:\Software\Nimbo\DesktopPreview'
@@ -104,7 +141,6 @@ try {
         $installTarget=Join-Path $parentDir.FullName 'Nimbo'
         if(Test-Path -LiteralPath $installTarget){throw 'The Nimbo destination already exists. Use Setup to repair this installation.'}
     }
-    $newExe = Join-Path $stage 'NimboDesktop.exe'
     if ([Diagnostics.FileVersionInfo]::GetVersionInfo($newExe).FileVersion -ne $Version) {
         throw 'The executable version does not match the requested release.'
     }
@@ -126,7 +162,7 @@ try {
         $uninstaller = Join-Path $target 'Uninstall.exe'
         if (!(Test-Path -LiteralPath $uninstaller -PathType Leaf)) { $uninstaller = Join-Path $stage 'uninstall-update.bin' }
         Copy-Item -LiteralPath $uninstaller -Destination (Join-Path $stage 'Uninstall.exe')
-        [IO.Directory]::Move($target,$backup)
+        Move-UpdateDirectory $target $backup
         $oldMoved = $true
         $target=$installTarget
     } else {
@@ -137,7 +173,7 @@ try {
             $target = "$target-$id"
         }
     }
-    [IO.Directory]::Move($stage,$target)
+    Move-UpdateDirectory $stage $target
     $newInstalled = $true
     if($registeredHere -and $target -ne $originalTarget){
         Set-ItemProperty -LiteralPath $installKey -Name InstallDir -Value $target
@@ -146,7 +182,7 @@ try {
     $client = Start-Client
     if ($client.WaitForExit(5000)) { throw 'The updated client exited during startup.' }
     $runningExe = $client.MainModule.FileName
-    if ($runningExe -ne (Join-Path $target 'NimboDesktop.exe') -or
+    if ($runningExe -ne (Join-Path $target 'Nimbo.exe') -or
         (Get-FileHash -LiteralPath $runningExe -Algorithm SHA256).Hash -ne $expectedExeHash) {
         $null = $client.CloseMainWindow()
         if (!$client.WaitForExit(5000)) { throw 'The new client could not be verified or closed.' }
@@ -164,11 +200,12 @@ try {
 } catch {
     $reason = $_.Exception.Message
     [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'failed'),$reason)
-    if ($newInstalled) { [IO.Directory]::Move($target,$stage) }
-    if ($oldMoved) { [IO.Directory]::Move($backup,$originalTarget) }
+    if ($newInstalled) { Move-UpdateDirectory $target $stage }
+    if ($oldMoved) { Move-UpdateDirectory $backup $originalTarget }
     $target = $originalTarget
     if($registeredHere -and $oldMoved){Set-ItemProperty -LiteralPath $installKey -Name InstallDir -Value $originalTarget}
     if ($canRestart) { Start-Client | Out-Null }
+    if ($NonInteractive) {throw $reason}
     Add-Type -AssemblyName PresentationFramework
     [System.Windows.MessageBox]::Show($reason,'Nimbo. — обновление') | Out-Null
     exit 1

@@ -11,6 +11,7 @@ struct MediaOptions {
     quint32 applicationPid = 0; // Root of the process tree excluded from screen audio.
     QByteArray inputId, outputId;
     bool synthetic = false;
+    bool annotationData = false;
     int videoMode = 0; // 0 off, 1 generated pattern, 2 camera, 3 primary screen
     bool hardwareVideo = false;
     bool blur=false,noise=true,echo=true,agc=true;

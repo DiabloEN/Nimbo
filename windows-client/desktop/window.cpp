@@ -5,6 +5,9 @@
 #include "password_reveal.h"
 #include "profile.h"
 #include "share_picker.h"
+#include "stream_viewer.h"
+#include "presenter_ink.h"
+#include <private/qcapturablewindow_p.h>
 #include "ui.h"
 #include <QtWidgets>
 #include <QAudioDevice>
@@ -57,6 +60,24 @@ DesktopWindow::DesktopWindow(QString directory,bool generated,QJsonObject restar
         }
         return QString();
     };
+    callStateApi.activeProfileKey=[this]{
+        for(auto value:profile["servers"].toArray()){
+            auto entry=value.toObject();
+            if(DesktopProfile::origin(entry["url"].toString())==callStateApi.server)return entry["profileKey"].toString();
+        }
+        return QString{};
+    };
+    voiceControlTimer.setInterval(2000);
+    connect(&voiceControlTimer,&QTimer::timeout,this,&DesktopWindow::pollVoiceControl);
+    moveDisplayTimer.setSingleShot(true);
+    connect(&moveDisplayTimer,&QTimer::timeout,this,[this]{
+        auto move=std::exchange(displayMove,DisplayMove{});
+        if(move.origin!=api.server.toString())return;
+        const auto people=rawRoomPeople(move.to);
+        const bool arrived=std::any_of(people.begin(),people.end(),[&](const auto& p){return p.toObject()["identity"]==move.identity;});
+        renderWorkspace(workspace,WorkspaceRefresh::Channels);
+        if(!arrived)note(UiText::VoiceMoveFailed());
+    });
     const QDir assets(QCoreApplication::applicationDirPath()+"/assets");
     static const bool fontsLoaded=[&assets] {
         for(const auto weight:{400,500,700})QFontDatabase::addApplicationFont(assets.filePath(QString("Roboto-%1.ttf").arg(weight)));
@@ -75,7 +96,14 @@ DesktopWindow::DesktopWindow(QString directory,bool generated,QJsonObject restar
         "QListWidget::item:selected{background:#303030;color:white} QWidget#sidebar{background:#101010}"
         "QMenu{background:#202020} QMenu::item:selected{background:#444}"));
     pages = new QStackedWidget; setCentralWidget(pages);
-    QSettings prefs(dataPath+"/desktop.ini",QSettings::IniFormat);inputDevice=prefs.value("input").toByteArray();outputDevice=prefs.value("output").toByteArray();cameraDevice=prefs.value("camera").toByteArray();buildLogin(); buildWorkspace(); chromeTexts=authoredChrome(pages); loadLocal(); showLogin();if(!profile["name"].toString().isEmpty())openLocalHome();
+    QSettings prefs(dataPath+"/desktop.ini",QSettings::IniFormat);
+    overlayPrefs.enabled=prefs.value("overlay/enabled",false).toBool();
+    overlayPrefs.opacity=qBound(10,prefs.value("overlay/opacity",85).toInt(),100);
+    overlayPrefs.backgroundOpacity=qBound(0,prefs.value("overlay/backgroundOpacity",0).toInt(),100);
+    const auto overlayPosition=prefs.value("overlay/position").toPoint();
+    overlayPrefs.position={qBound(0,overlayPosition.x(),100),qBound(0,overlayPosition.y(),100)};
+    overlayPrefs.screen=prefs.value("overlay/screen").toString();
+    inputDevice=prefs.value("input").toByteArray();outputDevice=prefs.value("output").toByteArray();cameraDevice=prefs.value("camera").toByteArray();buildLogin(); buildWorkspace(); chromeTexts=authoredChrome(pages); loadLocal(); showLogin();if(!profile["name"].toString().isEmpty())openLocalHome();
     qApp->installEventFilter(this);
     connect(qApp,&QApplication::focusChanged,this,[this](QWidget* old,QWidget* current){
         if((old&&old->window()==this)||(current&&current->window()==this))bindMute();
@@ -156,6 +184,7 @@ void DesktopWindow::translateChrome(const QList<ChromeText>& texts) {
 
 void DesktopWindow::applyProfileLanguage() {
     if (!UiText::setLanguage(profile["language"].toString())) return;
+    if(gameOverlay)gameOverlay->languageChanged();
     translateChrome(chromeTexts);
     sendQuality->setItemText(0,UiText::Auto());
     refreshUpdateBadge();
@@ -496,6 +525,8 @@ QString DesktopWindow::persistImport(QJsonObject next,bool activate,bool& merged
             if(!found)servers.append(incoming);
         }
         if(servers.size()>64){note(UiText::YouCanSaveUpTo64Servers());return {};}
+        const auto inkColor=next.value("screenInkColor").toString();
+        if(ScreenInk::colors.contains(inkColor))saved["screenInkColor"]=inkColor;
         const auto language=next["language"].toString();
         if(language=="ru" || language=="en" || language=="system")saved["language"]=language;
         saved["servers"]=servers;entry["profile"]=saved;entries[i]=entry;merged=true;
@@ -749,6 +780,7 @@ void DesktopWindow::leaveCall(){
         return;
     }
     leavingVoice=true;
+    syncGameOverlay();
     retireVoiceIdentity();
     media->stop();
     if(callOrigin==api.server.toString())renderWorkspace(workspace,WorkspaceRefresh::Channels);
@@ -764,17 +796,15 @@ void DesktopWindow::playSound(const QString& file){
     for(const auto& candidate:QMediaDevices::audioOutputs())if(candidate.id()==outputDevice){device=candidate;break;}
     if(!sound){
         sound=new QSoundEffect(device,this);
-        if(file=="chat"){
-            auto release=[this,file,effect=sound]{
-                if(effect->isPlaying() || callSounds.value(file)!=effect)return;
-                callSounds.remove(file);
-                effect->deleteLater();
-            };
-            connect(sound,&QSoundEffect::playingChanged,sound,release,Qt::QueuedConnection);
-            connect(sound,&QSoundEffect::statusChanged,sound,[effect=sound,release]{
-                if(effect->status()==QSoundEffect::Error)release();
-            },Qt::QueuedConnection);
-        }
+        auto release=[this,file,effect=sound]{
+            if(effect->isPlaying() || callSounds.value(file)!=effect)return;
+            callSounds.remove(file);
+            effect->deleteLater();
+        };
+        connect(sound,&QSoundEffect::playingChanged,sound,release,Qt::QueuedConnection);
+        connect(sound,&QSoundEffect::statusChanged,sound,[effect=sound,release]{
+            if(effect->status()==QSoundEffect::Error)release();
+        },Qt::QueuedConnection);
         sound->setSource(QUrl::fromLocalFile(QCoreApplication::applicationDirPath()+"/assets/sounds/"+file+".wav"));
     }else if(sound->audioDevice()!=device)sound->setAudioDevice(device);
     sound->setMuted(qEnvironmentVariableIsSet("NIMBO_QA_SILENT_OUTPUT") ||
@@ -806,6 +836,7 @@ void DesktopWindow::updateCallRoster(const QJsonArray& people){
     rosterSeeded=true;
     if(liveRoster==people)return;
     liveRoster=people;
+    if(gameOverlay)syncGameOverlay();
     if(onlySpeech){
         if(callOrigin==api.server.toString())for(const auto& person:speechChanges)updateSpeakingPerson(person);
         return;
@@ -827,17 +858,32 @@ void DesktopWindow::join() {
     joining=true;joinProgress.start();
     QTimer::singleShot(500,this,[this]{if(joining){stageSignature.clear();refreshStage();}});
     const auto room=selected;voiceRoomName=title->text();voiceServerName=serverTitle->text();
+    overlayLocalName=self["name"].toString();
     activeVoice=room;callOrigin=api.server.toString();callStateApi.server=api.server;callStateApi.token=api.token;
     renderWorkspace(workspace,WorkspaceRefresh::Channels);refreshDock();
     note({});
     const auto generation=++voiceInviteGeneration;
-    api.request("POST","/api/join",{{"room",room},{"name",self.value("name").toString()}},[this,generation](QJsonObject data,QString error){
+    api.request("POST","/api/join?annotations=1",{{"room",room},{"name",self.value("name").toString()}},[this,generation](QJsonObject data,QString error){
         if(generation!=voiceInviteGeneration)return;
         if(!error.isEmpty()){setCall(false);note(error);return;}
         callIdentity=data["identity"].toString();
         if(leavingVoice){setCall(false);return;}
         if(!media){
             media=std::make_unique<MediaSession>();
+            connect(media.get(),&MediaSession::voiceControlHint,this,&DesktopWindow::pollVoiceControl);
+            connect(media.get(),&MediaSession::roomMoved,this,[this]{
+                if(!inCall || leavingVoice || admittedRoom.isEmpty())return;
+                const bool follow=api.server.toString()==callOrigin && selected==activeVoice && kind=="voice";
+                activeVoice=std::exchange(admittedRoom,QString{});
+                voiceRoomName=std::exchange(admittedName,QString{});
+                liveRoster={};rosterSeeded=false;callQuality.clear();
+                for(auto it=trackFrames.begin();it!=trackFrames.end();){
+                    if(!it.key().startsWith(callIdentity+"/"))it=trackFrames.erase(it);else ++it;
+                }
+                if(follow)selected=activeVoice;
+                stageSignature.clear();renderWorkspace(workspace,WorkspaceRefresh::Channels);
+                syncGameOverlay();refreshDock();pollVoiceControl();
+            });
             connect(media.get(),&VoiceEvents::connectedChanged,this,&DesktopWindow::setCall);
             connect(media.get(),&VoiceEvents::failed,this,[this](QString message){
                 if(leavingVoice)return; // The queued stop completes the handover.
@@ -876,9 +922,18 @@ void DesktopWindow::join() {
                 localSpeaking=active;updateLocalPerson();
             });
             connect(media.get(),&VoiceEvents::participantFrame,this,&DesktopWindow::frameArrived);
+            connect(media.get(),&MediaSession::inkSession,this,[this](QString host,QString epoch,bool allowed){
+                if(host.isEmpty()){
+                    ownInkSession=epoch;if(epoch.isEmpty())presenterInk.reset();host=callIdentity;
+                }
+                if(viewer && viewer->track==host+"/screen")
+                    viewer->setInkSession(epoch,allowed);
+            });
+            connect(media.get(),&MediaSession::localInkChanged,this,[this](const ScreenInk::Strokes& strokes){displayInk(strokes);});
             connect(media.get(),&VoiceEvents::callRoster,this,&DesktopWindow::updateCallRoster);
         }
         MediaOptions opts;
+        inkTransport=data["annotations"].toBool();opts.annotationData=inkTransport;
         opts.applicationPid=quint32(QCoreApplication::applicationPid());
         QSettings prefs(dataPath+"/desktop.ini",QSettings::IniFormat);opts.blur=prefs.value("blur",false).toBool();opts.blurRadius=prefs.value("blurRadius",12).toInt();opts.noise=prefs.value("noise",true).toBool();opts.echo=prefs.value("echo",true).toBool();opts.agc=prefs.value("agc",false).toBool();opts.noiseEngine=prefs.value("engine","gtcrn").toString();opts.url=data["url"].toString();opts.token=data["token"].toString();opts.inputId=inputDevice;opts.outputId=outputDevice;opts.synthetic=generatedMedia;
         QUrl endpoint(opts.url); if(endpoint.scheme()!="wss"&&!(api.server.scheme()=="http"&&endpoint.scheme()=="ws")){
@@ -902,6 +957,8 @@ void DesktopWindow::setCall(bool active) {
         callIdentity.clear();
     }
     if(!active){
+        voiceControlTimer.stop();controlBusy=false;handledMove.clear();admittedRoom.clear();admittedName.clear();
+        presenterInk.reset();ownInkSession.clear();inkTransport=false;inkMonitor.clear();inkProgram=0;
         for(auto it=callSounds.begin();it!=callSounds.end();){
             if(it.key().startsWith("voice-")){
                 it.value()->stop();
@@ -915,17 +972,48 @@ void DesktopWindow::setCall(bool active) {
         if(!next.isEmpty())QTimer::singleShot(0,this,[this,next,origin]{if(selected==next && api.server.toString()==origin && kind=="voice" && !inCall && !joining)join();});
         leavingVoice=false;rosterSeeded=false;callQuality.clear();updateNetworkIndicator();}
     inCall=active;joining=false;muted=false;localSpeaking=false;cameraMode=0;screenMode=0;sharingSound=false;if(!active){mutedStreams.clear();trackFrames.clear();liveRoster={};frameHosts.clear();}
+    previewingOverlay=false;syncGameOverlay();
+    if(!active)overlayLocalName.clear();
     removeKeys();
     joinButton->setText(active?UiText::Disconnect():UiText::Connect());joinButton->setVisible(active||kind=="voice");joinButton->setEnabled(true);
     for(auto* b:{muteButton,cameraButton,screenButton}){b->setVisible(active);b->setEnabled(active);}
     muteButton->setText(UiText::MuteMicrophone()); cameraButton->setText(UiText::Camera());screenButton->setText(UiText::ScreenSharing());
     if(active){
+        voiceControlTimer.start();pollVoiceControl();
         note({});bindMute();
     }else{activeVoice.clear();callOrigin.clear();callLabel->clear();video->clear();video->hide();}
     stageSignature.clear();
     if((active||endedHere||wasJoining) && !workspace.isEmpty() && !api.token.isEmpty())renderWorkspace(workspace,WorkspaceRefresh::Channels);
     refreshStage();refreshDock();
     finishVoiceClose();
+}
+void DesktopWindow::pollVoiceControl(){
+    if(!inCall || leavingVoice || closingWindow || controlBusy || !admittedRoom.isEmpty())return;
+    const auto gen=voiceInviteGeneration;
+    controlBusy=true;
+    callStateApi.request("POST","/api/voice-control",{{"identity",callIdentity},{"room",activeVoice}},
+        [this,gen](QJsonObject data,QString){
+        if(gen!=voiceInviteGeneration)return;
+        controlBusy=false;
+        const auto command=data["move"].toObject();
+        const auto id=command["id"].toString(),room=command["room"].toString();
+        if(!inCall || leavingVoice || id.isEmpty() || handledMove==id || room.isEmpty() || room==activeVoice)return;
+        handledMove=id;controlBusy=true;
+        callStateApi.request("POST","/api/voice-move/join?annotations=1",{{"identity",callIdentity},{"moveId",id}},
+            [this,gen,room,name=command["name"].toString()](QJsonObject invite,QString error){
+            if(gen!=voiceInviteGeneration)return;
+            controlBusy=false;
+            if(!inCall || leavingVoice)return;
+            const QUrl url(invite["url"].toString());
+            if(!error.isEmpty() || invite["identity"]!=callIdentity || invite["token"].toString().isEmpty()
+               || url.host().isEmpty() || !url.userInfo().isEmpty()
+               || !(url.scheme()=="wss" || (url.scheme()=="ws" && callStateApi.server.scheme()=="http"))){
+                note(error.isEmpty()?QString::fromUtf8(UiText::VoiceMoveFailed()):error);return;
+            }
+            admittedRoom=room;admittedName=name;inkTransport=invite["annotations"].toBool();
+            media->moveRoom(url.toString(),invite["token"].toString(),inkTransport);
+        });
+    });
 }
 void DesktopWindow::toggleMute() {
     if(!inCall||!media)return;
@@ -941,6 +1029,8 @@ void DesktopWindow::chooseVideo(bool share) {
         auto source=chooseShareSource(this);
         if(!source || !inCall || leavingVoice || identity!=callIdentity)return;
         screen=source->screen;window=source->window;mode=screen.isEmpty()?4:3;
+        inkMonitor=screen;inkProgram=0;
+        if(auto handle=QCapturableWindowPrivate::handle(window))inkProgram=WId(handle->id);
     }else if(!share&&!cameraMode)mode=2;
     cameraButton->setEnabled(false);screenButton->setEnabled(false);media->changeVideo(share,mode,cameraDevice,screen,window);
 }

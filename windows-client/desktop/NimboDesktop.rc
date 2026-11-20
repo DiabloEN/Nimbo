@@ -16,7 +16,7 @@ BEGIN
             VALUE "CompanyName", "Nimbo contributors\0"
             VALUE "FileVersion", NIMBO_DESKTOP_VERSION
             VALUE "ProductVersion", NIMBO_DESKTOP_VERSION
-            VALUE "OriginalFilename", "NimboDesktop.exe\0"
+            VALUE "OriginalFilename", "Nimbo.exe\0"
         END
     END
     BLOCK "VarFileInfo"

@@ -69,6 +69,7 @@ bool DesktopWindow::nativeEvent(const QByteArray& type,void* message,qintptr* re
             {"videoCards",messages->findChildren<QWidget*>("videoAttachment").size()},
             {"downloads",imageRequests.size()},{"imageFilesOnDisk",imageFiles.size()},
             {"videoFrames",trackFrames.size()},{"sounds",callSounds.size()},
+            {"gameOverlay",bool(gameOverlay)},
             {"voiceClient",bool(media)},{"widgets",findChildren<QWidget*>().size()},
             {"settingsPages",findChildren<QWidget*>("settingsPage").size()},
             {"effectCards",findChildren<QWidget*>("effectCard").size()},

@@ -5,7 +5,7 @@ namespace Ui {
 bool animationsEnabled();
 inline void compactButton(QPushButton* b){
     b->setFixedHeight(38);b->setCursor(Qt::PointingHandCursor);
-    b->setStyleSheet("QPushButton{background:#202020;color:#ededed;border:1px solid transparent;border-radius:11px;padding:0 15px;font-size:12px} QPushButton:hover:enabled{background:#303030} QPushButton:focus{border-color:#ddd} QPushButton:disabled{background:#151515;color:#777}");
+    b->setStyleSheet("QPushButton{background:#202020;color:#ededed;border:1px solid transparent;border-radius:11px;padding:0 15px;font-size:12px} QPushButton:hover:enabled,QPushButton:focus:enabled{background:#303030} QPushButton:disabled{background:#151515;color:#777}");
 }
 inline QIcon icon(const QString& name) {
     static const QRegularExpression valid("^[a-zA-Z0-9_-]+$");
@@ -26,6 +26,19 @@ inline QIcon tintedIcon(const QString& name,QColor color){
     icons.insert(key,new QIcon(result));
     return result;
 }
+class ToggleSwitch final : public QCheckBox {
+public:
+    explicit ToggleSwitch(const QString& label){setFixedSize(34,20);setCursor(Qt::PointingHandCursor);setAccessibleName(label);}
+protected:
+    bool hitButton(const QPoint& p)const override{return rect().contains(p);}
+    void paintEvent(QPaintEvent*)override{
+        QPainter p(this);p.setRenderHint(QPainter::Antialiasing);p.setOpacity(isEnabled()?1.:0.6);
+        QColor track(isChecked()?"#66aaf0":"#474747");
+        if(isEnabled() && (underMouse() || hasFocus()))track=track.lighter(isDown()?108:120);
+        p.setPen(Qt::NoPen);p.setBrush(track);
+        p.drawRoundedRect(QRectF(.5,.5,33,19),10,10);p.setPen(Qt::NoPen);p.setBrush(QColor("#eee"));p.drawEllipse(isChecked()?17:3,3,14,14);
+    }
+};
 class CheckBox final : public QCheckBox {
 public:
     explicit CheckBox(const QString& label,int size=15,int gap=8,QColor checked=QColor("#ddd")):QCheckBox(label),side(size),checkedColor(checked){

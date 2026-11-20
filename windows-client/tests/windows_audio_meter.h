@@ -9,13 +9,15 @@
 #include <QThread>
 
 // Read only the playback level of the supplied test PID. No PCM is captured.
-inline int measureProcessOutput(DWORD pid, const QString& report) {
+inline int measureProcessOutput(DWORD pid, const QString& report,const QString& endpoint={}) {
     using Microsoft::WRL::ComPtr;
     ComPtr<IMMDeviceEnumerator> devices;
     if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
                                 IID_PPV_ARGS(&devices)))) return 2;
     ComPtr<IMMDevice> device;
-    if (FAILED(devices->GetDefaultAudioEndpoint(eRender, eMultimedia, &device))) return 2;
+    const auto hr=endpoint.isEmpty()?devices->GetDefaultAudioEndpoint(eRender,eMultimedia,&device)
+                                    :devices->GetDevice(endpoint.toStdWString().c_str(),&device);
+    if (FAILED(hr)) return 2;
     ComPtr<IAudioSessionManager2> manager;
     if (FAILED(device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr,
                                 reinterpret_cast<void**>(manager.GetAddressOf())))) return 2;

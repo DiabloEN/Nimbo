@@ -3,24 +3,13 @@
 #include "api.h"
 #include "ui.h"
 
-class AntivirusSwitch final : public QCheckBox {
-public:
-    AntivirusSwitch(){setFixedSize(34,20);setCursor(Qt::PointingHandCursor);setAccessibleName(UiText::ChatFileAntivirusClamav());}
-protected:
-    bool hitButton(const QPoint& p)const override{return rect().contains(p);}
-    void paintEvent(QPaintEvent*)override{
-        QPainter p(this);p.setRenderHint(QPainter::Antialiasing);p.setOpacity(isEnabled()?1.:0.6);
-        p.setPen(hasFocus()?QPen(palette().color(QPalette::Text),1):QPen(Qt::NoPen));p.setBrush(isChecked()?QColor("#66aaf0"):QColor("#474747"));
-        p.drawRoundedRect(QRectF(.5,.5,33,19),10,10);p.setPen(Qt::NoPen);p.setBrush(QColor("#eee"));p.drawEllipse(isChecked()?17:3,3,14,14);
-    }
-};
 class AntivirusSettings final : public QWidget {
 public:
     explicit AntivirusSettings(ServerApi& server): api(server) {
         setObjectName("antivirusSettings");setAttribute(Qt::WA_StyledBackground);
         auto* layout=new QVBoxLayout(this);layout->setContentsMargins(0,0,0,0);layout->setSpacing(8);
         auto* row=new QHBoxLayout;row->setSpacing(12);auto* heading=Ui::text(UiText::ChatFileAntivirusClamav(),"font-size:14px;font-weight:500");heading->setWordWrap(true);
-        row->addWidget(heading,1);policy=new AntivirusSwitch;row->addWidget(policy);layout->addLayout(row);
+        row->addWidget(heading,1);policy=new Ui::ToggleSwitch(UiText::ChatFileAntivirusClamav());row->addWidget(policy);layout->addLayout(row);
         for(auto** field:{&policyHelp,&version,&checked}){*field=Ui::text("","color:#aaa;font-size:12px");(*field)->setWordWrap(true);layout->addWidget(*field);}
         auto* actions=new QGridLayout;actions->setContentsMargins(0,0,0,0);actions->setHorizontalSpacing(12);actions->setColumnStretch(1,1);
         updateButton=new QPushButton(UiText::CheckForDatabaseUpdates());Ui::compactButton(updateButton);
@@ -47,11 +36,14 @@ private:
         display(version,loaded?UiText::ClamavVersion()+(engine.isEmpty()?QString::fromUtf8(UiText::NoData()):engine):QString());
         const auto last=updater["lastCheck"].toInteger(updater["lastSuccess"].toInteger());
         display(checked,loaded?UiText::LastDatabaseCheck()+(last?QDateTime::fromSecsSinceEpoch(last).toLocalTime().toString("dd.MM.yyyy, HH:mm:ss"):QString::fromUtf8(UiText::NoData())):QString());
-        policy->setEnabled(loaded&&!busy);policy->setChecked(data["enabled"].toBool());
+        const bool enabled=data["enabled"].toBool();
+        const bool available=data["available"].toBool(true);
+        policy->setEnabled(loaded && !busy && (enabled || available));policy->setChecked(enabled);
         const auto max=data["scanLimitBytes"].toInteger();display(policyHelp,policy->isChecked()&&max>0?QString(UiText::ClamavScansFilesUpToAndIncluding()).arg(max/1048576):QString());
         updateButton->setVisible(loaded);
         updateButton->setEnabled(!busy && data["updateConfigured"].toBool() && !updater["busy"].toBool());
         QStringList notices;
+        if(loaded && !available)notices.append(data["configured"].toBool(true)?UiText::ScannerUnavailable():UiText::ScannerNotConfigured());
         if(requestingUpdate || updater["busy"].toBool())notices.append(progressText());
         if(!message.isEmpty())notices.append(message);
         const auto error=UiText::serverMessage(updater["error"].toString());

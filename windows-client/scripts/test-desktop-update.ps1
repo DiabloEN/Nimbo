@@ -1,9 +1,19 @@
-param([Parameter(Mandatory)][string]$OldPortable,[Parameter(Mandatory)][string]$Archive,[string[]]$Modes=@('portable','occupied-portable','installed','installed-no-registry','registered-no-uninstaller','legacy-installed'))
+param([Parameter(Mandatory)][string]$OldPortable,[Parameter(Mandatory)][string]$Archive,[switch]$UsePreviousHelper,[string[]]$Modes=@('portable','occupied-portable','installed','installed-no-registry','registered-no-uninstaller','legacy-installed'))
 $ErrorActionPreference='Stop'
 $root=(Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $source=(Resolve-Path -LiteralPath $OldPortable).Path
 $zip=(Resolve-Path -LiteralPath $Archive).Path
 $manifest=Get-Content -LiteralPath (Join-Path (Split-Path -Parent $zip) 'windows-x64.json') -Raw | ConvertFrom-Json
+if((Get-FileHash -LiteralPath $zip).Hash -ne $manifest.sha256){throw 'Archive differs from update manifest'}
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$package=[IO.Compression.ZipFile]::OpenRead($zip)
+try {
+    $payload=$package.GetEntry('NimboDesktop.exe')
+    if(!$payload){$payload=$package.GetEntry('Nimbo.exe')}
+    if(!$payload){throw 'Missing client executable in update archive'}
+    $stream=$payload.Open()
+    try {$expectedHash=(Get-FileHash -InputStream $stream).Hash} finally {$stream.Dispose()}
+} finally {$package.Dispose()}
 $base=(Resolve-Path -LiteralPath (Join-Path $root 'artifacts/native-desktop')).Path
 $work=Join-Path $base ('update-test-'+[guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $work | Out-Null
@@ -23,7 +33,8 @@ try {
         [IO.File]::WriteAllBytes($profileState,[Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($fixture),$null,[Security.Cryptography.DataProtectionScope]::CurrentUser))
         Copy-Item -LiteralPath $zip -Destination (Join-Path $run.FullName 'client.zip')
         $helper=Join-Path $run.FullName 'update-desktop.ps1'
-        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'update-desktop.ps1') -Destination $helper
+        $helperSource=if($UsePreviousHelper){$old}else{$PSScriptRoot}
+        Copy-Item -LiteralPath (Join-Path $helperSource 'update-desktop.ps1') -Destination $helper
         $destination=Join-Path $run.FullName ("Nimbo-Desktop-"+$manifest.version+"-portable")
         $registration=@{}
         $occupied = $destination
@@ -52,7 +63,9 @@ try {
             if($Name -ne 'DisplayVersion' -or !$LiteralPath.EndsWith('\Uninstall\NimboDesktopPreview')){throw 'Unexpected registry write'}
             $registration.DisplayVersion=$Value
         }
-        $previous=Start-Process -FilePath (Join-Path $old 'NimboDesktop.exe') -ArgumentList @('--data-dir',('"'+$profile.FullName+'"'),'--screenshot',('"'+(Join-Path $run.FullName 'old.png')+'"')) -WindowStyle Hidden -PassThru
+        $oldExe=Join-Path $old 'Nimbo.exe'
+        if(!(Test-Path -LiteralPath $oldExe)){ $oldExe=Join-Path $old 'NimboDesktop.exe' }
+        $previous=Start-Process -FilePath $oldExe -ArgumentList @('--data-dir',('"'+$profile.FullName+'"'),'--screenshot',('"'+(Join-Path $run.FullName 'old.png')+'"')) -WindowStyle Hidden -PassThru
         try {
             if(!$previous.WaitForExit(15000) -or $previous.ExitCode -ne 0){throw 'Old client did not start and close cleanly'}
             $before=(Get-FileHash -LiteralPath $profileState).Hash
@@ -61,7 +74,9 @@ try {
             $originalLocal=$env:LOCALAPPDATA
             try{
                 if($mode -eq 'legacy-installed'){$env:LOCALAPPDATA=$run.FullName}
-                & $helper -InstallDir $old -ProfileDir $profile.FullName -ParentId $previous.Id -Version $manifest.version -Digest $manifest.sha256
+                $testOptions=@{}
+                if(!$UsePreviousHelper){$testOptions.NonInteractive=$true}
+                & $helper -InstallDir $old -ProfileDir $profile.FullName -ParentId $previous.Id -Version $manifest.version -Digest $manifest.sha256 @testOptions
             }finally{$env:LOCALAPPDATA=$originalLocal}
             if($mode -eq 'legacy-installed' -and $registration.InstallDir -ne $destination){throw 'Legacy install registration not migrated'}
             if($mode -in @('occupied-portable','installed-no-registry')){
@@ -72,10 +87,11 @@ try {
                 if($alternate.Count -ne 1){throw 'Expected exactly one fresh portable directory'}
                 $destination=$alternate[0].FullName
             }
-            $expected=(Join-Path $destination 'NimboDesktop.exe')
-            $running=@(Get-Process -Name NimboDesktop -ErrorAction SilentlyContinue | Where-Object Path -eq $expected)
+            $entry=if($UsePreviousHelper -and (Split-Path $oldExe -Leaf) -eq 'NimboDesktop.exe'){'NimboDesktop.exe'}else{'Nimbo.exe'}
+            $expected=(Join-Path $destination $entry)
+            $running=@(Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($entry)) -ErrorAction SilentlyContinue | Where-Object Path -eq $expected)
             if($running.Count -ne 1){throw "Expected exactly one updated client in $destination"}
-            if((Get-FileHash -LiteralPath $expected).Hash -ne (Get-FileHash -LiteralPath (Join-Path $root 'build-media/NimboDesktop.exe')).Hash){throw 'Updated executable differs from build'}
+            if((Get-FileHash -LiteralPath $expected).Hash -ne $expectedHash){throw 'Updated executable differs from the release archive'}
             if((Get-FileHash -LiteralPath $profileState).Hash -ne $before){throw 'Profile changed during update'}
             if((Get-FileHash -LiteralPath $library).Hash -ne $libraryBefore){throw 'Profile library changed during update'}
             if($mode -eq 'installed' -and ($registration.DisplayVersion -ne $manifest.version -or !(Test-Path -LiteralPath (Join-Path $destination 'Uninstall.exe')))){throw 'Installed registration or uninstaller missing'}
@@ -87,7 +103,7 @@ try {
         } finally {
             if(!$previous.HasExited){$previous.Kill();$previous.WaitForExit()}
             $previous.Dispose()
-            foreach($process in @(Get-Process -Name NimboDesktop -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($run.FullName+'\',[StringComparison]::OrdinalIgnoreCase) })){
+            foreach($process in @(Get-Process -Name NimboDesktop,Nimbo -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($run.FullName+'\',[StringComparison]::OrdinalIgnoreCase) })){
                 $null=$process.CloseMainWindow()
                 if(!$process.WaitForExit(5000)){$process.Kill();$process.WaitForExit()}
                 $process.Dispose()

@@ -1,4 +1,5 @@
 #include "window.h"
+#include "voice_channel_list.h"
 #include "version.h"
 #include "media_session.h"
 #include "ui.h"
@@ -15,6 +16,7 @@
 #include "noise.h"
 #include "audio_pcm.h"
 #include "voice_card.h"
+#include "stream_viewer.h"
 #include <random>
 #include <QtWidgets>
 #include <QtTest>
@@ -31,6 +33,7 @@
 #include "windows_audio_meter.h"
 #include "sound_check_phrase.h"
 #include <psapi.h>
+#include "presenter_ink.h"
 
 class NativeDesktopTests final : public QObject {
     Q_OBJECT
@@ -622,7 +625,7 @@ private:
         auto has=[&](QString value){for(auto* label:card->findChildren<QLabel*>())if(label->isVisible()&&label->text().contains(value))return true;return false;};
         QVERIFY(has("Версия ClamAV · нет данных"));QVERIFY(policy->isChecked());
         policy->click();QTRY_VERIFY(has("Изменение сохранено"));QVERIFY(!policy->isChecked());
-        policy->click();QTRY_VERIFY(has("Настройки не изменены"));QVERIFY(!policy->isChecked());
+        QVERIFY(has("ClamAV не настроен на этом сервере"));QVERIFY(!policy->isEnabled());
         auto* update=card->findChild<QPushButton*>();QVERIFY(update);QVERIFY(!update->isEnabled());
         win.openView("room");
     }
@@ -661,6 +664,844 @@ public:
         return true;
     }
 private slots:
+    void voiceMemberMenuLayout(){
+        QTemporaryDir store;DesktopWindow w(store.path(),true);
+        w.setAttribute(Qt::WA_DontShowOnScreen);w.resize(1100,760);w.show();
+        w.selfId="owner";w.self={{"id",w.selfId},{"role","owner"}};
+        const QJsonObject person={{"id","guest"},{"role","member"},{"name","Ника"}};
+        w.workspace["members"]=QJsonArray{w.self,person};
+        w.workspace["presence"]=QJsonObject{{"lounge",QJsonObject{{"people",QJsonArray{QJsonObject{{"identity","guest.one"}}}}}}};
+        w.memberMenu("guest",w.mapToGlobal(QPoint(20,50)));
+        auto* menu=w.findChild<QFrame*>("participantMenu");QVERIFY(menu);QCOMPARE(menu->width(),252);
+        for(QString action:{UiText::MuteMicrophone(),UiText::TurnOffCamera(),UiText::StopScreenSharing2(),UiText::DisconnectFromVoice()}){
+            QPushButton* found=nullptr;
+            for(auto* b:menu->findChildren<QPushButton*>())if(b->accessibleName()==action)found=b;
+            QVERIFY(found);QVERIFY(found->height()>=36);
+            const auto icons=found->findChildren<QLabel*>();QCOMPARE(icons.size(),2);
+            QVERIFY(!icons.front()->pixmap().isNull());QCOMPARE(icons.front()->pixmap().deviceIndependentSize().width(),16.);
+        }
+        const auto shot=qEnvironmentVariable("NIMBO_MOVE_MENU_SHOT");
+        const auto picture=menu->grab();
+        QCOMPARE(picture.toImage().pixelColor(picture.width()/2,6),QColor("#252525"));
+        if(!shot.isEmpty())QVERIFY(picture.save(shot));
+        menu->close();
+    }
+    void voiceMoveCaptureCycles(){
+        const auto url=qEnvironmentVariable("NIMBO_NATIVE_TEST_URL");
+        if(QUrl(url).host()!="127.0.0.1")QSKIP("Requires isolated media server");
+        QTemporaryDir store;DesktopWindow w(store.path(),true);
+        w.setAttribute(Qt::WA_DontShowOnScreen);w.show();w.address->setText(url);w.nickname->setText("Capture");
+        w.password->setText(qEnvironmentVariable("NIMBO_NATIVE_TEST_CODE"));w.loginButton->click();
+        QTRY_VERIFY(!w.rooms.isEmpty());
+        for(int i=0;i<w.channels->count();++i)if(w.channels->item(i)->data(Qt::UserRole).toJsonObject()["id"]=="lounge"){w.channels->setCurrentRow(i);break;}
+        w.join();QTRY_VERIFY_WITH_TIMEOUT(w.inCall,12000);
+        auto sample=[&](QString mode,int cycle,QString stage){
+            PROCESS_MEMORY_COUNTERS_EX2 memory{};memory.cb=sizeof(memory);
+            QVERIFY(GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory),sizeof(memory)));
+            qInfo()<<mode<<cycle<<stage<<"privateWS"<<qulonglong(memory.PrivateWorkingSetSize)<<"queues"<<w.media->activeEncoderQueues();
+        };
+        for(QString mode:{"control","camera","screen","both"}){
+            bool camera=mode=="camera" || mode=="both",screen=mode=="screen" || mode=="both";
+            for(int i=1;i<=5;++i){
+                if(camera)w.media->changeVideo(false,1,{}, {},{});
+                if(screen)w.media->changeVideo(true,1,{}, {},{});
+                QTRY_VERIFY(w.cameraMode==int(camera) && w.screenMode==int(screen));
+                QTest::qWait(600);QCOMPARE(w.media->activeEncoderQueues(),int(camera)+int(screen));sample(mode,i,"on");
+                if(camera)w.media->changeVideo(false,0,{}, {},{});
+                if(screen)w.media->changeVideo(true,0,{}, {},{});
+                QTRY_VERIFY(!w.cameraMode && !w.screenMode);
+                QTest::qWait(600);QCOMPARE(w.media->activeEncoderQueues(),0);sample(mode,i,"off");
+            }
+        }
+        w.leaveCall();QTRY_VERIFY(!w.inCall);
+    }
+    void recoverStalledVoiceOutput(){
+        const auto url=qEnvironmentVariable("NIMBO_NATIVE_TEST_URL");
+        if(QUrl(url).host()!="127.0.0.1" || !qEnvironmentVariableIsSet("NIMBO_QA_SILENT_OUTPUT"))QSKIP("Silent isolated audio fixture required");
+        QTemporaryDir store;DesktopWindow w(store.path(),false);
+        w.outputDevice="disconnected-test-headset";
+        w.setAttribute(Qt::WA_DontShowOnScreen);w.show();w.address->setText(url);w.nickname->setText("Audio");
+        w.password->setText(qEnvironmentVariable("NIMBO_NATIVE_TEST_CODE"));w.loginButton->click();QTRY_VERIFY(!w.rooms.isEmpty());
+        for(int i=0;i<w.channels->count();++i)if(w.channels->item(i)->data(Qt::UserRole).toJsonObject()["kind"]=="voice"){w.channels->setCurrentRow(i);break;}
+        w.join();QTRY_VERIFY_WITH_TIMEOUT(w.inCall,12000);
+        const auto identity=w.callIdentity;auto* worker=w.media->workerContext();
+        bool ready=false,replaced=false;QPointer<QAudioSink> original;
+        auto probe=[&](bool suspend){
+            QMetaObject::invokeMethod(worker,[&]{
+                auto* sink=worker->findChild<QAudioSink*>();
+                ready=sink && sink->error()==QtAudio::NoError && sink->volume()==0.f;
+                if(ready && suspend){original=sink;sink->suspend();}
+                if(!suspend)replaced=ready && original.isNull();
+            },Qt::BlockingQueuedConnection);
+            return ready;
+        };
+        QTRY_VERIFY(probe(false));QVERIFY(probe(true));replaced=false;
+        QTRY_VERIFY_WITH_TIMEOUT(probe(false) && replaced,8000);
+        QCOMPARE(w.outputDevice,QByteArray("disconnected-test-headset"));QCOMPARE(w.callIdentity,identity);
+        QVERIFY(w.inCall);w.leaveCall();QTRY_VERIFY(!w.inCall);
+    }
+    void voiceSidebarPixels(){
+        const QString dir=qEnvironmentVariable("NIMBO_SIDEBAR_FIXTURE");
+        if(dir.isEmpty())QSKIP("Requires the recorded browser workspace");
+        QFile file(dir+"/fixture.json");QVERIFY(file.open(QIODevice::ReadOnly));
+        QTemporaryDir store;DesktopWindow w(store.path(),true);
+        w.resize(1280,780);w.setAttribute(Qt::WA_DontShowOnScreen);w.show();
+        w.pages->setCurrentIndex(1);w.openView("room");
+        w.renderWorkspace(QJsonDocument::fromJson(file.readAll()).object());
+        auto* list=w.channels;auto* vp=list->viewport();
+        auto find=[&](QString id){
+            for(int i=0;i<list->count();++i)if(list->item(i)->data(Qt::UserRole).toJsonObject()["id"]==id)return list->item(i);
+            return static_cast<QListWidgetItem*>(nullptr);
+        };
+        auto* first=find("lounge");auto* last=find("test");
+        QVERIFY(first && last && find("general"));list->setCurrentItem(first);
+        auto rect=[&](QListWidgetItem* item){return list->visualItemRect(item);};
+        auto snap=[&](QString name){
+            const QRect bounds=rect(first).united(rect(last));
+            const auto area=QRect(vp->mapTo(&w,bounds.topLeft()),bounds.size());
+            const auto actual=w.grab(area).toImage().convertToFormat(QImage::Format_RGB32);
+            QVERIFY(actual.save(dir+"/qt-"+name+".png"));
+            const QImage reference=QImage(dir+"/web-"+name+".png").convertToFormat(QImage::Format_RGB32);
+            QCOMPARE(actual.size(),reference.size());QVERIFY(!reference.isNull());
+            const qreal scale=actual.devicePixelRatio();
+            int different=0;
+            for(int y=0;y<actual.height();++y){
+                for(int x=0;x<actual.width();++x){
+                    if(actual.pixel(x,y)==reference.pixel(x,y))continue;
+                    ++different;
+                    // Every pixel in the destination strip, except the dynamic name.
+                    const QPointF pt(x/scale,y/scale);
+                    const int destY=rect(last).top()-bounds.top();
+                    if(pt.y()>=destY && !QRectF(40,destY+10,95,26).contains(pt))
+                        QFAIL("Destination surface or channel icon differs from Chromium");
+                }
+            }
+            qInfo()<<name<<different<<"different pixels in the complete panel";
+        };
+        QApplication::processEvents();snap("selected");list->setCurrentItem(find("general"));snap("idle");
+        const QPoint dest=rect(last).center();
+        QMouseEvent hover(QEvent::MouseMove,dest,vp->mapToGlobal(dest),Qt::NoButton,Qt::NoButton,Qt::NoModifier);
+        QApplication::sendEvent(vp,&hover);snap("hover");
+        const auto source=rect(list->item(list->row(first)+1)).center();
+        QTest::mousePress(vp,Qt::LeftButton,Qt::NoModifier,source);
+        QMouseEvent motion(QEvent::MouseMove,dest,vp->mapToGlobal(dest),Qt::NoButton,Qt::LeftButton,Qt::NoModifier);
+        QApplication::sendEvent(vp,&motion);
+        QCOMPARE(list->property("voiceDrop").toString(),QString("test"));snap("drag");
+        QTest::keyClick(list,Qt::Key_Escape);QTest::mouseRelease(vp,Qt::LeftButton,Qt::NoModifier,dest);
+    }
+    void voiceDropOverOccupants(){
+        VoiceChannelList list;
+        bool permitted=true;
+        list.canMove=[&](QString){return permitted;};
+        list.origin=[]{return QStringLiteral("local");};
+        QStringList moved;
+        list.moveMember=[&](QString who,QString from,QString to){moved={who,from,to};};
+        auto person=[&](QString room,QString id){
+            auto* row=new QListWidgetItem(id,&list);
+            row->setData(Qt::UserRole+2,QJsonObject{{"identity",id}});
+            row->setData(Qt::UserRole+5,room);
+            row->setFlags(Qt::NoItemFlags);
+            return row;
+        };
+        auto* first=person("a","one.1");
+        auto* second=person("b","two.1");
+        auto* text=new QListWidgetItem("Chat",&list);
+        text->setData(Qt::UserRole,QJsonObject{{"id","general"},{"kind","text"}});
+        list.setAttribute(Qt::WA_DontShowOnScreen);list.show();
+        auto* surface=list.viewport();
+        auto pos=[&](QListWidgetItem* row){return list.visualItemRect(row).center();};
+        auto motion=[&](QListWidgetItem* row){
+            const auto pt=pos(row);
+            QMouseEvent event(QEvent::MouseMove,pt,surface->mapToGlobal(pt),Qt::NoButton,Qt::LeftButton,Qt::NoModifier);
+            QApplication::sendEvent(surface,&event);
+        };
+        QTest::mousePress(surface,Qt::LeftButton,Qt::NoModifier,pos(first));
+        motion(second);QCOMPARE(list.property("voiceDrop").toString(),"b");
+        motion(text);QVERIFY(list.property("voiceDrop").toString().isEmpty());
+        motion(first);QVERIFY(list.property("voiceDrop").toString().isEmpty());
+        motion(second);QTest::keyClick(&list,Qt::Key_Escape);
+        QTest::mouseRelease(surface,Qt::LeftButton,Qt::NoModifier,pos(second));
+        QVERIFY(moved.isEmpty());QVERIFY(list.property("voiceDrag").toString().isEmpty());
+        for(bool allow:{false,true}){
+            QTest::mousePress(surface,Qt::LeftButton,Qt::NoModifier,pos(first));
+            motion(second);permitted=allow;
+            QTest::mouseRelease(surface,Qt::LeftButton,Qt::NoModifier,pos(second));
+            QCOMPARE(!moved.isEmpty(),allow);
+            permitted=true;
+        }
+        QCOMPARE(moved,QStringList({"one.1","a","b"}));
+    }
+    void crossClientVoiceMove(){
+        const auto dir=qEnvironmentVariable("NIMBO_MOVE_FIXTURE"),url=qEnvironmentVariable("NIMBO_NATIVE_TEST_URL");
+        if(dir.isEmpty() || QUrl(url).host()!="127.0.0.1")QSKIP("Requires isolated browser peer");
+        if(!qEnvironmentVariableIsSet("NIMBO_QA_SILENT_OUTPUT") && !qEnvironmentVariableIsSet("NIMBO_MOVE_AUDIO_METER"))
+            QSKIP("Use silent output for the browser fixture. Audible metering requires explicit opt-in.");
+        QFile invitation(dir+"/invite");
+        QTRY_VERIFY_WITH_TIMEOUT(invitation.exists(),15000);
+        QVERIFY(invitation.open(QIODevice::ReadOnly));
+        QTemporaryDir store;
+        DesktopWindow w(store.path(),false);
+        const auto outputId=qgetenv("NIMBO_MOVE_OUTPUT");
+        w.outputDevice=outputId;
+        w.setAttribute(Qt::WA_DontShowOnScreen);w.show();
+        w.address->setText(url);w.nickname->setText("Windows");w.password->setText(QString::fromUtf8(invitation.readAll()));
+        w.loginButton->click();QTRY_VERIFY(!w.rooms.isEmpty());
+        QString from="lounge",to;
+        for(auto value:w.rooms){auto room=value.toObject();if(room["kind"]=="voice" && room["id"]!=from)to=room["id"].toString();}
+        QVERIFY(!to.isEmpty());
+        auto select=[&](QString id){for(int i=0;i<w.channels->count();i++)if(w.channels->item(i)->data(Qt::UserRole).toJsonObject()["id"]==id){w.channels->setCurrentRow(i);return;}};
+        select("general");
+        QTRY_VERIFY_WITH_TIMEOUT(!w.roomPeople(from).isEmpty(),18000);
+        auto roomItem=[&](const QString& id)->QListWidgetItem*{
+            for(int i=0;i<w.channels->count();++i)
+                if(w.channels->item(i)->data(Qt::UserRole).toJsonObject()["id"]==id)return w.channels->item(i);
+            return nullptr;
+        };
+        auto* viewport=w.channels->viewport();
+        auto* occupied=roomItem(from);QVERIFY(occupied);
+        const auto occupiedPos=w.channels->visualItemRect(occupied).center();
+        // Use the widget a real click would hit, including the activity timer area.
+        QVERIFY(!viewport->childAt(occupiedPos));
+        QTest::mousePress(viewport,Qt::LeftButton,Qt::NoModifier,occupiedPos);
+        w.renderWorkspace(w.workspace,DesktopWindow::WorkspaceRefresh::Channels);
+        QTest::mouseRelease(viewport,Qt::LeftButton,Qt::NoModifier,occupiedPos);
+        QTRY_VERIFY_WITH_TIMEOUT(w.inCall,12000);
+        QCOMPARE(w.selected,from);
+        auto* exit=w.channels->itemWidget(roomItem(from));QVERIFY(exit);
+        QCOMPARE(exit->objectName(),QString("channelLeave"));
+        QVERIFY(!viewport->childAt(occupiedPos));QVERIFY(viewport->childAt(exit->geometry().center())==exit);
+        const auto identity=w.callIdentity;
+        if(!w.muted)w.toggleMute();
+        select("general");
+        QSignalSpy stats(w.media.get(),&VoiceEvents::statistics);
+        auto incoming=[&]{for(const auto& s:stats)if(s[1].toULongLong()>0 && s[3].toDouble()>.00005)return true;return false;};
+        QTRY_VERIFY_WITH_TIMEOUT(!w.liveRoster.isEmpty(),12000);
+        const auto peer=w.liveRoster.first().toObject()["identity"].toString();
+        QTRY_VERIFY_WITH_TIMEOUT(w.canDragVoice(peer),10000);
+        auto output=[&](QString stage){
+            if(qEnvironmentVariableIsSet("NIMBO_QA_SILENT_OUTPUT"))return;
+            const auto file=dir+"/"+stage;
+            QStringList args={"--measure-output",QString::number(QCoreApplication::applicationPid()),file};
+            if(!outputId.isEmpty())args<<QString::fromUtf8(outputId);
+            QProcess meter;meter.start(QCoreApplication::applicationFilePath(),args);
+            QTRY_COMPARE_WITH_TIMEOUT(meter.state(),QProcess::NotRunning,6000);
+            QFile reading(file);if(reading.open(QIODevice::ReadOnly))qInfo()<<stage<<"Windows audio session peak"<<reading.readAll();
+            QCOMPARE(meter.exitCode(),0);
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(incoming(),10000);output("before");
+        w.media->changeVideo(false,1,{}, {},{});w.media->changeVideo(true,1,{}, {},{});
+        QTRY_VERIFY(w.cameraMode && w.screenMode && !w.ownInkSession.isEmpty());
+        auto epoch=w.ownInkSession;
+        QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(dir+"/web-present"),15000);
+        QPoint rowPos,targetPos;
+        for(int i=0;i<w.channels->count();++i){
+            const auto* row=w.channels->item(i);
+            if(row->data(Qt::UserRole+2).toJsonObject()["identity"]==peer)rowPos=w.channels->visualItemRect(row).center();
+            if(row->data(Qt::UserRole).toJsonObject()["id"]==to)targetPos=w.channels->visualItemRect(row).center();
+        }
+        QVERIFY(!rowPos.isNull() && !targetPos.isNull());
+        auto* list=w.channels->viewport();
+        QMouseEvent hover(QEvent::MouseMove,rowPos,list->mapToGlobal(rowPos),Qt::NoButton,Qt::NoButton,Qt::NoModifier);
+        QApplication::sendEvent(list,&hover);
+        QCOMPARE(list->cursor().shape(),Qt::OpenHandCursor);
+        QTest::mousePress(list,Qt::LeftButton,Qt::NoModifier,rowPos);
+        QMouseEvent motion(QEvent::MouseMove,targetPos,list->mapToGlobal(targetPos),Qt::NoButton,Qt::LeftButton,Qt::NoModifier);
+        QApplication::sendEvent(list,&motion);
+        QCOMPARE(w.channels->property("voiceDrag").toString(),peer);
+        QCOMPARE(w.channels->property("voiceDrop").toString(),to);
+        auto pixels=list->grab().toImage();
+        const auto screenshot=qEnvironmentVariable("NIMBO_MOVE_SCREENSHOT");
+        if(!screenshot.isEmpty())QVERIFY(list->grab().save(screenshot));
+        const auto sample=w.channels->visualItemRect(roomItem(to)).topLeft()+QPoint(16,4);
+        QCOMPARE(pixels.pixelColor((QPointF(sample)*pixels.devicePixelRatio()).toPoint()),QColor("#080808"));
+        QTest::mouseRelease(list,Qt::LeftButton,Qt::NoModifier,targetPos);
+        QCOMPARE(w.roomPeople(from).size(),1);QCOMPARE(w.roomPeople(to).size(),1);
+        QTRY_COMPARE_WITH_TIMEOUT(w.activeVoice,to,20000);
+        QCOMPARE(w.callIdentity,identity);QVERIFY(w.muted);QCOMPARE(w.selected,"general");
+        QVERIFY(w.cameraMode && w.screenMode && w.inkTransport);QCOMPARE(w.ownInkSession,epoch);
+        stats.clear();QTRY_VERIFY_WITH_TIMEOUT(incoming(),10000);output("after");
+        QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(dir+"/video-ok"),10000);
+        QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(dir+"/twin") && w.liveRoster.size()==2,20000);
+        QTRY_VERIFY(w.canDragVoice(peer));
+        QPoint peerPos;
+        for(int i=0;i<w.channels->count();++i){
+            auto* row=w.channels->item(i);
+            if(row->data(Qt::UserRole+2).toJsonObject()["identity"]==peer)peerPos=w.channels->visualItemRect(row).center();
+        }
+        QVERIFY(!peerPos.isNull());
+        QTest::mousePress(list,Qt::LeftButton,Qt::NoModifier,peerPos);
+        const auto returnPos=w.channels->visualItemRect(roomItem(from)).center();
+        QMouseEvent returnMotion(QEvent::MouseMove,returnPos,list->mapToGlobal(returnPos),Qt::NoButton,Qt::LeftButton,Qt::NoModifier);
+        QApplication::sendEvent(list,&returnMotion);
+        QCOMPARE(w.channels->property("voiceDrop").toString(),from);
+        QTest::mouseRelease(list,Qt::LeftButton,Qt::NoModifier,returnPos);
+        QCOMPARE(w.roomPeople(to).size(),2);QCOMPARE(w.roomPeople(from).size(),1);
+        QTRY_VERIFY_WITH_TIMEOUT(!w.allowed("move_members"),12000);
+        QVERIFY(!w.canDragVoice(peer));
+        auto second=qEnvironmentVariable("NIMBO_NATIVE_TEST_URL2");
+        w.switchServer({{"url",second},{"displayName","Windows"},{"profileKey",QString::fromLatin1(DesktopProfile::randomKey())}},true,qEnvironmentVariable("NIMBO_NATIVE_TEST_CODE2"));
+        QTRY_COMPARE(w.api.server,QUrl(second));QString secondChannel=w.selected;
+        QFile other(dir+"/other-server");QVERIFY(other.open(QIODevice::WriteOnly));other.close();
+        QTRY_COMPARE_WITH_TIMEOUT(w.activeVoice,from,20000);
+        QCOMPARE(w.api.server,QUrl(second));QCOMPARE(w.selected,secondChannel);
+        QCOMPARE(w.callIdentity,identity);QCOMPARE(w.callOrigin,url);QVERIFY(w.muted && w.cameraMode && w.screenMode);
+        QCOMPARE(w.ownInkSession,epoch);
+        QFile end(dir+"/done");QVERIFY(end.open(QIODevice::WriteOnly));end.close();
+        w.leaveCall();QTRY_VERIFY(!w.inCall);
+    }
+    void livePresenterInk(){
+        const auto url=qEnvironmentVariable("NIMBO_NATIVE_TEST_URL");
+        if(QUrl(url).host()!="127.0.0.1")QSKIP("Requires isolated server");
+        QTemporaryDir hostDir,guestDir;
+        DesktopWindow host(hostDir.path(),true),guest(guestDir.path(),true);
+        auto login=[&](DesktopWindow& w,QString name,QString code){
+            w.setAttribute(Qt::WA_DontShowOnScreen);w.resize(1264,784);w.show();
+            w.address->setText(url);w.nickname->setText(name);w.password->setText(code);w.loginButton->click();
+        };
+        login(host,"Presenter",qEnvironmentVariable("NIMBO_NATIVE_TEST_CODE"));QTRY_VERIFY(!host.rooms.isEmpty());
+        QString invite;
+        host.api.request("POST","/api/invitations",{{"seconds",600},{"singleUse",true}},
+                         [&](QJsonObject data,QString){invite=data["code"].toString();});
+        QTRY_VERIFY(!invite.isEmpty());login(guest,"Viewer",invite);QTRY_VERIFY(!guest.rooms.isEmpty());
+        for(auto* w:{&host,&guest}){
+            for(int i=0;i<w->channels->count();++i){
+                if(w->channels->item(i)->data(Qt::UserRole).toJsonObject()["kind"]=="voice"){
+                    w->channels->setCurrentRow(i);break;
+                }
+            }
+            QVERIFY(w->kind=="voice");w->join();QTRY_VERIFY_WITH_TIMEOUT(w->inCall,12000);
+        }
+        auto sample=[](int cycle,const char* phase){
+            PROCESS_MEMORY_COUNTERS_EX2 memory{};memory.cb=sizeof(memory);
+            QVERIFY(GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory),sizeof(memory)));
+            qInfo()<<"ink-memory"<<cycle<<phase<<"privateWS"<<qulonglong(memory.PrivateWorkingSetSize)
+                   <<"privateBytes"<<qulonglong(memory.PrivateUsage);
+        };
+        auto* screen=QGuiApplication::primaryScreen();QVERIFY(screen);
+        const auto track=host.callIdentity+"/screen";
+        const bool physical=qEnvironmentVariableIsSet("NIMBO_TEST_MONITOR_INK");
+        QWidget backdrop;
+        if(physical){
+            backdrop.setWindowFlags(Qt::Tool|Qt::FramelessWindowHint|Qt::WindowStaysOnTopHint);
+            backdrop.setAttribute(Qt::WA_ShowWithoutActivating);
+            backdrop.setGeometry(QRect(screen->geometry().center()-QPoint(70,25),QSize(140,50)));
+            backdrop.setStyleSheet("background:#202020");backdrop.show();
+        }
+        auto decodedYellow=[&]{
+            const auto image=guest.trackFrames.value(track);
+            if(image.isNull())return false;
+            for(int dy=-3;dy<=3;++dy){
+                const auto c=image.pixelColor(image.width()/2,image.height()/2+dy);
+                if(c.red()>160 && c.green()>120 && c.blue()<130)return true;
+            }
+            return false;
+        };
+        sample(0,"call");
+        for(int cycle=1;cycle<=5;++cycle){
+            host.inkMonitor=screen->name();host.media->changeVideo(true,physical?3:1,{},screen->name(),{});
+            QTRY_VERIFY(!host.ownInkSession.isEmpty());QVERIFY(!host.presenterInk);
+            QTRY_VERIFY_WITH_TIMEOUT(guest.trackFrames.contains(track),9000);
+            if(cycle==1 && qEnvironmentVariableIsSet("NIMBO_TEST_MOVE_INK")){
+                const auto from=host.activeVoice,epoch=host.ownInkSession;
+                QString to;
+                for(auto value:host.rooms){
+                    auto room=value.toObject();if(room["kind"]=="voice" && room["id"]!=from)to=room["id"].toString();
+                }
+                QVERIFY(!to.isEmpty());QTest::qWait(5500);
+                host.requestVoiceMove(host.callIdentity,from,to);
+                QTRY_COMPARE_WITH_TIMEOUT(host.activeVoice,to,12000);
+                QCOMPARE(host.ownInkSession,epoch);
+                QTRY_VERIFY_WITH_TIMEOUT(host.displayMove.identity.isEmpty(),12000);
+                host.requestVoiceMove(guest.callIdentity,from,to);
+                QTRY_COMPARE_WITH_TIMEOUT(guest.activeVoice,to,12000);
+                QTRY_VERIFY_WITH_TIMEOUT(guest.trackFrames.contains(track),9000);
+            }
+            guest.viewTrack(track,"Presenter",false);
+            QTRY_VERIFY(guest.viewer->findChild<QWidget*>("inkToolbar"));
+            auto* tools=guest.viewer->findChild<QWidget*>("inkToolbar");
+            QTRY_VERIFY(!tools->isHidden());
+            auto* bar=static_cast<InkToolbar*>(tools);
+            QPushButton* pen=nullptr;
+            for(auto* b:bar->findChildren<QPushButton*>())if(b->accessibleName()==UiText::InkPen())pen=b;
+            QVERIFY(pen);
+            QTest::mouseClick(pen,Qt::LeftButton);QVERIFY(bar->expanded());
+            auto* hint=guest.viewer->findChild<QLabel*>("inkHint");QVERIFY(hint);
+            auto* surface=static_cast<StreamSurface*>(guest.viewer->findChild<QWidget*>("streamSurface"));
+            QTRY_VERIFY(surface && surface->drawing && !hint->isVisible());const auto point=surface->inkArea().center();
+            QTest::qWait(200);sample(cycle,"view");
+            if(!qEnvironmentVariableIsSet("NIMBO_QA_PEN_CONTROL")){
+            QTest::mousePress(surface,Qt::LeftButton,{},point-QPoint(35,0));
+            QMouseEvent move(QEvent::MouseMove,point+QPoint(35,0),surface->mapToGlobal(point+QPoint(35,0)),
+                             Qt::NoButton,Qt::LeftButton,Qt::NoModifier);
+            QApplication::sendEvent(surface,&move);
+            QTRY_VERIFY(host.presenterInk && host.presenterInk->surface() && host.presenterInk->surface()->isVisible());
+            const auto* presenter=host.presenterInk.get();
+            QVERIFY(host.viewer==nullptr || !host.viewer->isVisible());
+            QCOMPARE(presenter->strokes.size(),1);QVERIFY(!presenter->strokes.first().complete);
+            QCOMPARE(presenter->strokes.first().author,guest.callIdentity);
+            auto* canvas=presenter->surface();
+            QVERIFY(canvas->windowFlags().testFlag(Qt::WindowTransparentForInput));
+            QVERIFY(canvas->geometry().contains(screen->geometry().center()));
+            QVERIFY(canvas->width()<screen->geometry().width()/3);
+            const auto pix=canvas->grab(QRect(canvas->rect().center()-QPoint(12,12),QSize(24,24))).toImage();
+            bool yellow=false;
+            for(int y=0;y<pix.height();++y)for(int x=0;x<pix.width();++x){
+                auto c=pix.pixelColor(x,y);if(c.alpha()>80 && c.red()>180 && c.blue()<130)yellow=true;
+            }
+            QVERIFY(yellow);QTest::mouseRelease(surface,Qt::LeftButton,{},point+QPoint(35,0));
+            QTRY_VERIFY(host.presenterInk->strokes.first().complete);
+            if(physical)QTRY_VERIFY_WITH_TIMEOUT(decodedYellow(),5000);
+            sample(cycle,"ink");
+            auto* undo=guest.viewer->findChildren<QShortcut*>().first();
+            for(auto* shortcut:guest.viewer->findChildren<QShortcut*>())if(shortcut->key()==QKeySequence::Undo)undo=shortcut;
+            QCOMPARE(undo->key(),QKeySequence(QKeySequence::Undo));
+            if(cycle%2)undo->activated();else bar->onClear();
+            QTRY_VERIFY(!host.presenterInk);
+            if(physical)QTRY_VERIFY_WITH_TIMEOUT(!decodedYellow(),5000);
+            }else QTest::qWait(200);
+            sample(cycle,"cleared");guest.viewer->clear();
+            host.media->changeVideo(true,0,{},{},{});
+            QTRY_VERIFY(!host.presenterInk && host.ownInkSession.isEmpty());
+            QTest::qWait(800);sample(cycle,"stopped");
+        }
+        QTest::qWait(5000);sample(5,"rest-in-call");
+        host.leaveCall();guest.leaveCall();
+        QTRY_VERIFY(!host.inCall && !guest.inCall);
+    }
+    void presenterInkOnProgram(){
+        if(QGuiApplication::platformName()!="windows")QSKIP("Requires native Windows display");
+        QWidget program;program.resize(460,300);program.show();
+        HWND handle=reinterpret_cast<HWND>(program.winId());
+        PresenterInk controller(nullptr,handle);
+        ScreenInk::Board board;board.session="share";
+        QJsonArray points{QJsonArray{.4,.5},QJsonArray{.6,.5}};
+        QVERIFY(board.apply("viewer",false,{{"session","share"},{"type","stroke"},{"id","test"},
+                                             {"color",ScreenInk::colors.first()},{"points",points}}));
+        controller.strokes=board.strokes;controller.position();
+        QTRY_VERIFY(controller.surface() && controller.surface()->isVisible());
+        auto* canvas=controller.surface();
+        QVERIFY(canvas->windowFlags().testFlag(Qt::WindowTransparentForInput));
+        RECT window{},ink{};
+        QVERIFY(SUCCEEDED(DwmGetWindowAttribute(handle,DWMWA_EXTENDED_FRAME_BOUNDS,&window,sizeof(window))));
+        QVERIFY(GetWindowRect(reinterpret_cast<HWND>(canvas->winId()),&ink));
+        POINT center{(window.left+window.right)/2,(window.top+window.bottom)/2};
+        QVERIFY(PtInRect(&ink,center));QVERIFY(ink.right-ink.left<window.right-window.left);
+        controller.position();QVERIFY(canvas->isVisible());
+        program.hide();controller.position();QVERIFY(!canvas->isVisible());
+        controller.strokes.clear();controller.refresh();QVERIFY(!controller.surface());
+    }
+    void presenterPenOnMonitor(){
+        if(QGuiApplication::platformName()!="windows")QSKIP("Requires native Windows display");
+        auto* monitor=QGuiApplication::primaryScreen();QVERIFY(monitor);
+        for(int cycle=0;cycle<5;++cycle){
+            auto overlay=std::make_unique<PresenterInk>(monitor,nullptr);
+            QPointer<QObject> tracked=overlay.get();
+            ScreenInk::Board board;board.session="sample";
+            QVERIFY(board.apply("viewer",false,{{"session","sample"},{"type","stroke"},{"id","one"},
+                {"color",ScreenInk::colors.first()},{"points",QJsonArray{QJsonArray{.4,.5},QJsonArray{.6,.5}}}}));
+            overlay->strokes=board.strokes;overlay->refresh();
+            auto* canvas=overlay->surface();QVERIFY(canvas && canvas->isVisible());
+            auto handle=reinterpret_cast<HWND>(canvas->winId());
+            DWORD affinity=99;QVERIFY(GetWindowDisplayAffinity(handle,&affinity));QCOMPARE(affinity,DWORD(WDA_NONE));
+            auto screenshotHasMark=[&]{
+                const auto center=monitor->geometry().center()-monitor->geometry().topLeft();
+                const auto crop=monitor->grabWindow(0,center.x()-3,center.y()-3,7,7).toImage();
+                for(int y=0;y<crop.height();++y)for(int x=0;x<crop.width();++x){
+                    auto c=crop.pixelColor(x,y);if(c.red()>200 && c.green()>145 && c.blue()<100)return true;
+                }
+                return false;
+            };
+            QTRY_VERIFY(screenshotHasMark());
+            overlay.reset();QVERIFY(tracked.isNull());QVERIFY(!IsWindow(handle));
+        }
+    }
+    void screenInkSmoothing(){
+        const QList<QPointF> points={{0,.5},{.1,.501},{.2,.499},{.3,.501},{.4,.5}};
+        const auto path=ScreenInk::smoothPath(points);
+        QCOMPARE(path.pointAtPercent(0),points.first());QCOMPARE(path.currentPosition(),points.last());
+        for(int i=1;i<100;++i)QVERIFY(qAbs(path.pointAtPercent(i/100.).y()-.5)<.00065);
+        const auto straight=ScreenInk::smoothPath({points.first(),points.last()});
+        QCOMPARE(straight.elementCount(),2);
+    }
+    void screenInkProfileColor(){
+        QTemporaryDir directory;QVERIFY(directory.isValid());
+        auto open=[](DesktopWindow& w){
+            QImage frame(320,180,QImage::Format_RGB32);frame.fill(Qt::black);
+            w.callIdentity="presenter";w.ownInkSession="board";
+            w.trackFrames.insert("presenter/screen",frame);
+            w.viewTrack("presenter/screen","Presenter");
+        };
+        auto swatch=[](StreamViewer* viewer,const QString& color)->QPushButton*{
+            for(auto* b:viewer->findChildren<QPushButton*>())if(b->accessibleName()==color)return b;
+            return nullptr;
+        };
+        const QString violet="#b99aff",red="#ef7070",yellow=ScreenInk::colors.first();
+        QJsonObject backup;
+        {
+            DesktopWindow first(directory.path(),true);
+            first.profile={{"format","nimbo-profile"},{"version",1},{"name","First"},{"servers",QJsonArray{}}};
+            first.saveLocal();open(first);
+            QVERIFY(swatch(first.viewer,yellow)->isChecked());
+            QVERIFY(!first.profile.contains("screenInkColor"));
+            swatch(first.viewer,violet)->click();QCOMPARE(first.profile["screenInkColor"].toString(),violet);
+            first.viewer->setMini(true);first.viewer->setMini(false);QVERIFY(swatch(first.viewer,violet)->isChecked());
+            backup=DesktopProfile::open(DesktopProfile::seal(first.profile,"ink-test"),"ink-test");
+            QCOMPARE(backup["screenInkColor"].toString(),violet);
+        }
+        DesktopWindow second(directory.path(),true);open(second);
+        QVERIFY(swatch(second.viewer,violet)->isChecked());
+        auto* surface=static_cast<StreamSurface*>(second.viewer->findChild<QWidget*>("streamSurface"));
+        QCOMPARE(surface->inkColor,violet);
+        const auto firstId=second.localId;
+        second.profile={{"format","nimbo-profile"},{"version",1},{"name","Second"},{"servers",QJsonArray{}},{"screenInkColor","broken"}};
+        second.localId.clear();second.saveLocal();open(second);
+        QCOMPARE(surface->inkColor,yellow);QVERIFY(swatch(second.viewer,yellow)->isChecked());
+        swatch(second.viewer,red)->click();QCOMPARE(surface->inkColor,red);
+        QCOMPARE(Ui::byId(second.localProfiles,firstId)["profile"].toObject()["screenInkColor"].toString(),violet);
+    }
+    void screenInkSmallMarks(){
+        auto unit=[](double x,double y){return QPointF(x/1920.,y/1080.);};
+        const QTransform display=QTransform::fromScale(1920.,1080.);
+        QList<QPointF> line,loop,arrow;
+        for(int i=0;i<=80;++i){
+            const double angle=i*2*std::acos(-1.)/80;
+            line.append(unit(10+i*.4,16+.95*std::sin(angle*6)));
+            const double radius=10+std::sin(angle*8);
+            loop.append(unit(68+radius*std::cos(angle),16+radius*std::sin(angle)));
+        }
+        for(int i=0;i<=36;++i)arrow.append(unit(100+i*.5,30-i*.5));
+        for(int i=1;i<=20;++i)arrow.append(unit(118-i*.5,12+i*.1));
+        const auto smoothLine=display.map(ScreenInk::smoothPath(line));
+        const auto smoothLoop=display.map(ScreenInk::smoothPath(loop));
+        const auto smoothArrow=display.map(ScreenInk::smoothPath(arrow));
+        double jitter=0.,smallest=20.,largest=0.,tipDistance=100.;
+        for(int i=0;i<=200;++i){
+            const double t=i/200.;
+            jitter=qMax(jitter,qAbs(smoothLine.pointAtPercent(t).y()-16.));
+            const auto r=QLineF(QPointF(68,16),smoothLoop.pointAtPercent(t)).length();
+            smallest=qMin(smallest,r);largest=qMax(largest,r);
+            tipDistance=qMin(tipDistance,QLineF(QPointF(118,12),smoothArrow.pointAtPercent(t)).length());
+        }
+        qInfo()<<"small ink: jitter"<<jitter<<"loop radius"<<smallest<<largest<<"arrow tip error"<<tipDistance;
+        QVERIFY(jitter<.55);QVERIFY(smallest>8.8 && largest<10.8);QVERIFY(tipDistance<2.1);
+        QCOMPARE(smoothArrow.pointAtPercent(0),display.map(arrow.first()));
+        QCOMPARE(smoothArrow.currentPosition(),display.map(arrow.last()));
+    }
+    void screenInkUndo(){
+        ScreenInk::Board board;board.session="current";
+        auto draw=[&](QString who,QString id){return board.apply(who,who=="host",{
+            {"type","stroke"},{"session","current"},{"id",id},{"color",ScreenInk::colors.first()},
+            {"points",QJsonArray{QJsonArray{.2,.2},QJsonArray{.5,.4},QJsonArray{.8,.7}}}});};
+        QVERIFY(draw("guest","1"));QVERIFY(draw("host","1"));QVERIFY(draw("guest","2"));QVERIFY(draw("other","3"));
+        auto undo=QJsonObject{{"type","undo"},{"session","current"},{"author","other"}};
+        QVERIFY(board.apply("guest",false,undo));QCOMPARE(board.strokes.size(),3);
+        QCOMPARE(board.strokes[0].id,"1");QCOMPARE(board.strokes[1].author,"host");QCOMPARE(board.strokes[2].author,"other");
+        QVERIFY(board.apply("host",true,undo));QVERIFY(!board.apply("host",true,undo));
+        QVERIFY(board.apply("guest",false,undo));QVERIFY(!board.apply("guest",false,undo));
+        QCOMPARE(board.strokes.size(),1);QCOMPARE(board.strokes[0].author,"other");
+        QVERIFY(board.apply("host",true,{{"type","clear"},{"session","current"}}));QVERIFY(board.strokes.isEmpty());
+    }
+    void screenInkPresenterControls(){
+        QWidget window;window.setAttribute(Qt::WA_DontShowOnScreen);window.resize(1000,700);window.show();
+        StreamViewer viewer(&window,[]{},[&]{return window.rect();});
+        QImage frame(320,180,QImage::Format_RGB32);frame.fill(Qt::black);
+        viewer.open("host/screen","Presenter",frame,false,true,false);
+        viewer.setInkTransport(true);viewer.setInkSession("first",false);
+        auto* toolbar=static_cast<InkToolbar*>(viewer.findChild<QWidget*>("inkToolbar"));
+        QVERIFY(toolbar);toolbar->setExpanded(true);
+        QPushButton* erase=nullptr;
+        for(auto* button:toolbar->findChildren<QPushButton*>())
+            if(button->accessibleName()==UiText::InkClearAll())erase=button;
+        QVERIFY(erase && erase->isEnabled());QCOMPARE(toolbar->findChildren<QPushButton*>().size(),8);
+        QJsonObject sent;
+        viewer.onInk=[&](QString destination,QJsonObject command){QCOMPARE(destination,"host");sent=command;};
+        erase->click();QCOMPARE(sent["type"],"clear");QCOMPARE(sent["session"],"first");
+    }
+    void screenInkKeyboard(){
+        QWidget window;window.resize(880,600);
+        StreamViewer viewer(&window,[]{},[&]{return window.rect();});
+        QImage image(320,180,QImage::Format_RGB32);image.fill(Qt::black);
+        window.show();window.activateWindow();
+        viewer.open("host/screen","Host",image,false,false,true);
+        viewer.setInkTransport(true);viewer.setInkSession("board",true);
+        auto* toolbar=static_cast<InkToolbar*>(viewer.findChild<QWidget*>("inkToolbar"));
+        QVERIFY(toolbar);toolbar->setExpanded(true);
+        auto* surface=viewer.findChild<QWidget*>("streamSurface");
+        QStringList sent;viewer.onInk=[&](QString target,QJsonObject cmd){QCOMPARE(target,"host");sent<<cmd["type"].toString();};
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QTRY_VERIFY(window.isActiveWindow() && surface->hasFocus());
+        const auto point=static_cast<StreamSurface*>(surface)->inkArea().center();
+        QTest::mousePress(surface,Qt::LeftButton,{},point);
+        QTest::keyClick(surface,Qt::Key_Z,Qt::ControlModifier);
+        QTest::mouseRelease(surface,Qt::LeftButton,{},point);
+        QCOMPARE(sent,QStringList({"stroke","undo"}));
+        QTest::keyClick(surface,Qt::Key_Z,Qt::ControlModifier);
+        QCOMPARE(sent.size(),3);QCOMPARE(sent.last(),"undo");
+        viewer.setMini(true);QTest::keyClick(&viewer,Qt::Key_Z,Qt::ControlModifier);QCOMPARE(sent.size(),3);
+    }
+    void screenSharePen(){
+        QWidget window;window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.setStyleSheet("QWidget{background:#080808;color:#ededed}");window.resize(1024,720);
+        StreamViewer viewer(&window,[]{},[&]{return window.rect();});
+        QImage frame(640,360,QImage::Format_RGB32);frame.fill(QColor("#304050"));
+        window.show();
+        viewer.open("host/screen","Host",frame,false,false,false);
+        viewer.setInkTransport(true);viewer.setInkSession("current");
+        auto* surface=viewer.findChild<QWidget*>("streamSurface");QVERIFY(surface);
+        QPushButton* pen=nullptr;
+        for(auto* button:viewer.findChildren<QPushButton*>())if(button->accessibleName()==UiText::InkPen())pen=button;
+        QVERIFY(pen);
+        const auto corner=[&](QWidget* button){
+            const auto pixels=viewer.grab().toImage();
+            return pixels.pixelColor(button->mapTo(&viewer,QPoint(0,0))*pixels.devicePixelRatio());
+        };
+        QCOMPARE(corner(pen),QColor("#161616"));
+        QJsonObject command;QString destination;
+        viewer.onInk=[&](QString host,QJsonObject value){destination=host;command=value;};
+        pen->click();QCoreApplication::processEvents();
+        QPushButton* blue=nullptr;QPushButton* erase=nullptr;
+        for(auto* button:viewer.findChildren<QPushButton*>()){
+            if(button->accessibleName()=="#69b5ff")blue=button;
+            if(button->accessibleName()==UiText::InkClearMine())erase=button;
+        }
+        QVERIFY(blue && erase);QCOMPARE(corner(blue),QColor("#161616"));blue->click();
+        QTest::mouseClick(surface,Qt::LeftButton,{},QPoint(2,2));
+        QVERIFY(command.isEmpty());
+        QTest::mousePress(surface,Qt::LeftButton,{},surface->rect().center());
+        QTest::mouseRelease(surface,Qt::LeftButton,{},surface->rect().center()+QPoint(40,0));
+        QCOMPARE(destination,"host");QCOMPARE(command["session"].toString(),"current");
+        QCOMPARE(command["color"].toString(),"#69b5ff");
+        const auto start=command["points"].toArray().first().toArray();
+        QVERIFY(qAbs(start[0].toDouble()-.5)<.01 && qAbs(start[1].toDouble()-.5)<.01);
+        ScreenInk::Board board;board.session="current";
+        QVERIFY(board.apply("viewer",false,command));
+        QPainter painted(&frame);ScreenInk::paint(painted,frame.rect(),board.strokes);painted.end();
+        viewer.setFrame(frame);
+        if(const auto shot=qEnvironmentVariable("NIMBO_NATIVE_TEST_SCREENSHOT");!shot.isEmpty())
+            QVERIFY(viewer.grab().save(QFileInfo(shot).absolutePath()+"/ink045-viewer.png"));
+        QVERIFY(!board.apply("viewer",false,command));
+        QVERIFY(board.apply("host",true,command));
+        erase->click();QCOMPARE(command["type"].toString(),"clear");
+        QJsonObject clear=command;clear["session"]="old";clear["author"]="host";
+        QVERIFY(!board.apply("viewer",false,clear));
+        clear["session"]="current";
+        QVERIFY(board.apply("viewer",false,clear));QCOMPARE(board.strokes.size(),1);
+        QCOMPARE(board.strokes.first().author,"host");
+        QVERIFY(board.apply("host",true,clear));QVERIFY(board.strokes.isEmpty());
+        auto* toolbar=viewer.findChild<QWidget*>("inkToolbar");QVERIFY(toolbar);
+        QCOMPARE(blue->mapTo(&viewer,QPoint()).y()+blue->height()/2,pen->mapTo(&viewer,QPoint()).y()+pen->height()/2);
+        QVERIFY(blue->mapTo(&viewer,QPoint()).x()<pen->mapTo(&viewer,QPoint()).x());
+        const auto pencilPosition=pen->mapTo(&viewer,QPoint());
+        pen->click();QCoreApplication::processEvents();
+        QTRY_COMPARE(pen->mapTo(&viewer,QPoint()),pencilPosition);
+        viewer.setMini(true);QVERIFY(!viewer.findChild<QWidget*>("inkToolbar"));
+        viewer.setMini(false);toolbar=viewer.findChild<QWidget*>("inkToolbar");QVERIFY(toolbar);
+        QPointer<QWidget> released=toolbar;viewer.clear();QVERIFY(released.isNull());
+    }
+    void profileCardHitArea(){
+        QTemporaryDir dir; DesktopWindow win(dir.path(),true);
+        win.profile={{"name","Tester"},{"servers",QJsonArray{QJsonObject{{"url","https://example.invalid:8443"},{"name","Server"},{"role","owner"}}}}};
+        win.openLocalHome();win.show();QVERIFY(QTest::qWaitForWindowExposed(&win));
+        auto* button=win.localHome->findChild<QPushButton*>("openSavedServer");QVERIFY(button);
+        // Count only hits inside this button, without making an external server request.
+        QObject::disconnect(button,&QPushButton::clicked,nullptr,nullptr);
+        QSignalSpy clicks(button,&QPushButton::clicked);
+        int expected=0;
+        for(auto* label:button->findChildren<QLabel*>()){
+            auto p=label->mapTo(button,label->rect().center());
+            QCOMPARE(win.childAt(button->mapTo(&win,p)),button);
+            QTest::mouseClick(button,Qt::LeftButton,Qt::NoModifier,p);
+            QCOMPARE(clicks.size(),++expected);
+        }
+        QCOMPARE(expected,3);
+        QTest::mouseClick(button,Qt::LeftButton,Qt::NoModifier,button->rect().bottomRight()-QPoint(2,2));
+        QCOMPARE(clicks.size(),4);
+    }
+    void gameOverlayInWarcraft(){
+        if(!qEnvironmentVariableIsSet("NIMBO_QA_OVER_WOW"))QSKIP("Requires an open WoW window");
+        auto game=FindWindowW(nullptr,L"World of Warcraft");
+        if(!game || !IsWindowVisible(game))QSKIP("WoW window unavailable");
+        const auto previous=GetForegroundWindow();
+        bool switched=false;
+        auto restore=qScopeGuard([&]{if(switched && GetForegroundWindow()==game && previous)SetForegroundWindow(previous);});
+        MONITORINFOEXW monitor{};monitor.cbSize=sizeof(monitor);
+        QVERIFY(GetMonitorInfoW(MonitorFromWindow(game,MONITOR_DEFAULTTONEAREST),&monitor));
+        QTemporaryDir profileDir;QVERIFY(profileDir.isValid());
+        DesktopWindow win(profileDir.path());win.resize(1150,720);win.show();
+        win.pages->setCurrentIndex(1);win.selfId="qa";win.self["name"]="Nimbo";
+        QPixmap marker(64,64);marker.fill(QColor(247,33,181));
+        win.avatars.insert("qa",marker);
+        win.overlayPrefs.screen=QString::fromWCharArray(monitor.szDevice);
+        win.overlayPrefs.position={50,50};win.overlayPrefs.opacity=100;
+        win.openView("overlay");
+        auto* toggle=win.detailPage->findChild<QCheckBox*>();QVERIFY(toggle);
+        QTest::mouseClick(toggle,Qt::LeftButton);
+        QVERIFY(win.gameOverlay && win.previewingOverlay);
+        auto& hud=*win.gameOverlay;QVERIFY(QTest::qWaitForWindowExposed(&hud));
+        if(GetForegroundWindow()!=game)switched=SetForegroundWindow(game);
+        QElapsedTimer foregroundWait;foregroundWait.start();
+        while(GetForegroundWindow()!=game && foregroundWait.elapsed()<60000)QTest::qWait(100);
+        if(GetForegroundWindow()!=game)QSKIP("WoW did not receive foreground");
+        auto visible=[&]{
+            const auto handle=reinterpret_cast<HWND>(hud.winId());
+            const auto scale=GetDpiForWindow(handle)/96.;
+            POINT p{qRound(18*scale),qRound(22*scale)};ClientToScreen(handle,&p);
+            if(GetAncestor(WindowFromPoint(p),GA_ROOT)!=game)return false;
+            auto dc=GetDC(nullptr);const auto color=GetPixel(dc,p.x,p.y);ReleaseDC(nullptr,dc);
+            return color!=CLR_INVALID && abs(GetRValue(color)-247)<8 && abs(GetGValue(color)-33)<8 && abs(GetBValue(color)-181)<8;
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(visible(),4000);
+        for(int i=0;i<15;++i){QTest::qWait(1000);QVERIFY(GetForegroundWindow()==game);QVERIFY(visible());}
+    }
+    void gameOverlayLifecycle(){
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        UiText::setLanguage("ru");
+        DesktopWindow win(dir.path(),true);
+        UiText::setLanguage("ru");
+        win.openView("overlay");
+        auto* nav=win.findChild<QWidget*>("settingsNavPanel");
+        QVERIFY(nav);
+        auto tabIcon=[nav]{
+            for(auto* button:nav->findChildren<QPushButton*>())
+                if(button->text()==UiText::GameOverlay())return button->icon().pixmap(19,19);
+            return QPixmap{};
+        }();
+        QVERIFY(!tabIcon.isNull());
+        QCOMPARE(tabIcon.toImage(),Ui::icon("screen").pixmap(19,19).toImage());
+        QVERIFY(tabIcon.toImage()!=Ui::icon("game").pixmap(19,19).toImage());
+        QWidget settings;
+        QVBoxLayout layout(&settings);
+        win.renderOverlaySettings(&layout);
+        auto* enabled=settings.findChild<QCheckBox*>();
+        QVERIFY(enabled && !enabled->isChecked());
+        auto hasTitle=[&](QString title){for(auto* l:settings.findChildren<QLabel*>())if(l->text()==title)return true;return false;};
+        QVERIFY(hasTitle(UiText::EnableGameOverlay()));
+        enabled->setChecked(true);
+        QVERIFY(hasTitle(UiText::DisableGameOverlay()));
+        QVERIFY(win.gameOverlay && win.previewingOverlay);
+        auto* slider=settings.findChild<QSlider*>("opacity");
+        QVERIFY(slider);QCOMPARE(slider->minimum(),10);QCOMPARE(slider->maximum(),100);
+        auto* background=settings.findChild<QSlider*>("backgroundOpacity");QVERIFY(background);
+        QCOMPARE(background->minimum(),0);QCOMPARE(background->maximum(),100);QCOMPARE(background->value(),0);
+        for(int width:{320,640}){
+            settings.resize(width,550);layout.setGeometry(settings.rect());
+            QCOMPARE(slider->y(),background->y());
+            QCOMPARE(background->x()-slider->geometry().right()-1,16);
+            QVERIFY(qAbs(slider->width()-background->width())<=1);
+            for(auto* label:settings.findChildren<QLabel*>()){
+                if(label->buddy()!=slider && label->buddy()!=background)continue;
+                QVERIFY(label->height()>=label->heightForWidth(label->width()));
+                QVERIFY(label->geometry().bottom()<slider->y());
+            }
+        }
+        slider->setValue(10);
+        auto* preview=settings.findChild<QPushButton*>();QVERIFY(preview);QCOMPARE(preview->text(),UiText::StopOverlayPreview());
+        QVERIFY(win.gameOverlay && !win.inCall);
+        auto samplePixel=[&](int x,int y){
+            auto image=win.gameOverlay->grab().toImage();
+            return image.pixelColor(qRound(x*image.devicePixelRatio()),qRound(y*image.devicePixelRatio()));
+        };
+        const auto faceAlpha=samplePixel(18,22).alpha();
+        // The raster painter rounds constant opacity down during pixmap blending.
+        QVERIFY2(qAbs(faceAlpha-26)<=2,qPrintable(QString::number(faceAlpha)));
+        QCOMPARE(samplePixel(36,22).alpha(),0);
+        background->setValue(50);
+        QVERIFY(qAbs(samplePixel(36,22).alpha()-127)<=1);
+        slider->setValue(100);
+        QVERIFY(qAbs(samplePixel(36,22).alpha()-127)<=1);QCOMPARE(samplePixel(18,22).alpha(),255);
+        background->setValue(100);QCOMPARE(samplePixel(36,22),QColor("#101010"));
+        QCOMPARE(samplePixel(0,0).alpha(),0);
+        background->setValue(0);
+        preview->click();QVERIFY(!win.gameOverlay);QCOMPARE(preview->text(),UiText::TestGameOverlay());
+        preview->click();QVERIFY(win.gameOverlay);win.openView("general");QVERIFY(!win.gameOverlay);
+        slider->setValue(100);
+        win.overlayLocalName="Local";
+        win.api.server=QUrl("http://origin");
+        QPixmap testPhoto(80,80);testPhoto.fill(QColor("#f43daa"));
+        win.avatars.insert("self",testPhoto);
+        win.callIdentity="self";
+        win.callOrigin="http://origin";
+        win.inCall=true;
+        QWidget game(nullptr,Qt::FramelessWindowHint);
+        game.setStyleSheet("background:#273951");
+        game.setGeometry(QGuiApplication::primaryScreen()->availableGeometry());
+        game.show(); game.raise(); game.activateWindow();
+        QVERIFY(QTest::qWaitForWindowExposed(&game));
+        const auto foreground=GetForegroundWindow();
+        win.syncGameOverlay();
+        QVERIFY(win.gameOverlay);
+        auto* hud=win.gameOverlay.get();
+        QVERIFY(QTest::qWaitForWindowExposed(hud));
+        if (QGuiApplication::platformName()=="windows"){
+            QCOMPARE(GetForegroundWindow(),foreground);
+            const auto handle=reinterpret_cast<HWND>(hud->winId());
+            const auto styles=GetWindowLongPtr(handle,GWL_EXSTYLE);
+            QVERIFY(styles & WS_EX_TOPMOST);
+            QVERIFY(styles & WS_EX_TRANSPARENT);
+            RECT bounds{};QVERIFY(GetWindowRect(handle,&bounds));
+            const auto scale=GetDpiForWindow(handle)/96.;
+            POINT pt{bounds.left+qRound(18*scale),bounds.top+qRound(22*scale)};
+            QCOMPARE(GetAncestor(WindowFromPoint(pt),GA_ROOT),reinterpret_cast<HWND>(game.winId()));
+        }
+        QCOMPARE(hud->windowOpacity(),1.);
+        const int solo=hud->height();
+        win.updateCallRoster({});
+        // Browsing a different server must preserve the ongoing call's portrait.
+        win.api.server=QUrl("http://elsewhere");
+        QJsonObject peer{{"identity","peer"},{"name","Remote"},{"mic",true},{"micKnown",true}};
+        win.updateCallRoster({peer});
+        QVERIFY(hud->height()>solo);
+        auto quiet=hud->grab().toImage();
+        const auto scale=quiet.devicePixelRatio();
+        auto localPixel=quiet.pixelColor(qRound(18*scale),qRound(22*scale));
+        QVERIFY(localPixel.red()>160 && localPixel.red()<185 && localPixel.green()<55 && localPixel.blue()>110);
+        QCOMPARE(localPixel.alpha(),255);
+        QCOMPARE(quiet.pixelColor(qRound(36*scale),qRound(4*scale)).alpha(),0);
+        peer["speaking"]=true;
+        win.updateCallRoster({peer});
+        auto speaking=hud->grab().toImage();
+        QPoint sample(qRound(18*scale),qRound(51*scale));
+        QCOMPARE(speaking.pixelColor(sample).alpha(),quiet.pixelColor(sample).alpha());
+        QVERIFY(speaking.pixelColor(sample).lightness()>quiet.pixelColor(sample).lightness());
+        const auto previewPath=qEnvironmentVariable("NIMBO_QA_OVERLAY_PREVIEW");
+        if (!previewPath.isEmpty()){
+            background->setValue(55);
+            auto local=win.localPerson();local["name"]="Mira";
+            peer["name"]="Alex";
+            const QJsonObject third{{"identity","third"},{"name","Sasha"}};
+            QPixmap photo(QCoreApplication::applicationDirPath()+"/assets/room-preview.png");
+            QVERIFY(!photo.isNull());
+            QHash<QString,QPixmap> samples{{"self",photo.copy(0,0,photo.width()/2,photo.height())}};
+            hud->setPeople(local,{peer,third});
+            hud->syncPortraits(&samples,win.callStateApi);
+            QVERIFY(hud->grab().save(previewPath));
+        }
+        win.updateCallRoster({});
+        QCOMPARE(hud->height(),solo);
+        auto* placement=settings.findChild<QWidget*>("overlayPlacement");
+        QVERIFY(placement);
+        QTest::mouseClick(placement,Qt::LeftButton,{},placement->rect().bottomRight()-QPoint(2,2));
+        QCOMPARE(win.overlayPrefs.position,QPoint(100,100));
+        const auto available=hud->screen()->availableGeometry();
+        QCOMPARE(hud->geometry().bottomRight(),available.bottomRight()-QPoint(8,8));
+        QCOMPARE(hud->width(),8+28+8+hud->fontMetrics().horizontalAdvance("Local")+8);
+        QCOMPARE(hud->height(),8+28+8);
+        win.overlayLocalName=QString(100,'W');win.syncGameOverlay();QCOMPARE(hud->width(),228);
+        QCOMPARE(hud->geometry().right(),available.right()-8);
+        background->setValue(43);
+        QTest::keyClick(placement,Qt::Key_Left);
+        QCOMPARE(win.overlayPrefs.position,QPoint(95,100));
+        QPointer<QWidget> old=hud;
+        enabled->setChecked(false); QVERIFY(old.isNull());
+        enabled->setChecked(true); QVERIFY(win.gameOverlay);
+        win.setCall(false); QVERIFY(!win.gameOverlay);
+        DesktopWindow reopened(dir.path(),true);
+        QCOMPARE(reopened.overlayPrefs.position,QPoint(95,100));
+        QCOMPARE(reopened.overlayPrefs.opacity,100);
+        QCOMPARE(reopened.overlayPrefs.backgroundOpacity,43);
+        QVERIFY(reopened.overlayPrefs.enabled && !reopened.gameOverlay);
+    }
     void updateSurvivesSettingsAndCall_data(){
         QTest::addColumn<bool>("disconnectFirst");
         QTest::newRow("continuous")<<false;
@@ -1211,6 +2052,18 @@ private slots:
         win.workspace["chatActivity"]=QJsonObject{{"general",QJsonObject{{"id","m1"},{"createdAt",95}}}};
         win.updateChatSound(false);QVERIFY(win.chatSoundCooldown.isValid());
     }
+    void callCuesReleasedDuringCall(){
+        QTemporaryDir directory;DesktopWindow win(directory.path(),true);win.inCall=true;
+        for(int cycle=0;cycle<3;++cycle){
+            win.playCallCue("video-on");win.playCallCue("video-on");win.playCallCue("video-off");
+            QPointer<QSoundEffect> on=win.callSounds.value("voice-video-on");
+            QPointer<QSoundEffect> off=win.callSounds.value("voice-video-off");
+            QVERIFY(on && off);
+            QTRY_VERIFY_WITH_TIMEOUT(!on && !off && win.callSounds.isEmpty(),5000);
+            QVERIFY(win.inCall);
+        }
+        win.inCall=false;
+    }
     void interruptedVoiceJoin(){
         const auto url=qEnvironmentVariable("NIMBO_NATIVE_TEST_URL4");
         if(url.isEmpty())QSKIP("Run test-native-desktop.py for an isolated server");
@@ -1555,6 +2408,13 @@ private slots:
         for(auto* b:buttons)if(b->objectName()=="logout")b->click();
         QTRY_COMPARE_WITH_TIMEOUT(pages->currentIndex(),0,10000);
         DesktopWindow restored(directory.path(),true);restored.setAttribute(Qt::WA_DontShowOnScreen);restored.resize(1264,784);restored.show();
+        QSet<QString> playedCues;
+        QTimer cueObserver;
+        connect(&cueObserver,&QTimer::timeout,&restored,[&]{
+            for(auto it=restored.callSounds.cbegin();it!=restored.callSounds.cend();++it)
+                if(it.value()->status()==QSoundEffect::Ready)playedCues.insert(it.key());
+        });
+        cueObserver.start(10);
         QSignalSpy transitions(restored.pages,&QStackedWidget::currentChanged);
         auto invalid=restored.profile["servers"].toArray().first().toObject();
         invalid["profileKey"]=QString::fromLatin1(DesktopProfile::randomKey());
@@ -1638,10 +2498,10 @@ private slots:
             return nullptr;
         };
         QTRY_VERIFY(controls());
-        auto* channelLabel=controls()->findChild<QLabel*>();QVERIFY(channelLabel);
         const auto rowRect=restored.channels->visualItemRect(restored.channels->currentItem());
-        QCOMPARE(channelLabel->mapTo(restored.channels->viewport(),QPoint()).x(),rowRect.left()+40);
-        QVERIFY(channelLabel->width()>=channelLabel->fontMetrics().horizontalAdvance(channelLabel->text()));
+        QCOMPARE(controls()->objectName(),QStringLiteral("channelLeave"));
+        QCOMPARE(controls()->geometry(),QRect(rowRect.right()-35,rowRect.top()+(rowRect.height()-30)/2,30,30));
+        QVERIFY(!controls()->geometry().contains(rowRect.center()));
         QTRY_VERIFY(ownSidebarRow());
         const auto selectedBeforeClick=restored.selected;
         const auto ownPoint=restored.channels->visualItemRect(ownSidebarRow()).center();
@@ -1698,6 +2558,9 @@ private slots:
             QVERIFY(!restored.trackFrames.contains(restored.callIdentity+"/camera"));
             QTRY_VERIFY(sameProfile.localPerson()["speaking"].toBool());
             sameProfile.muteButton->click();
+            QPointer<QSoundEffect> localMute=sameProfile.callSounds.value("voice-mute");
+            QVERIFY(localMute);
+            QTRY_VERIFY_WITH_TIMEOUT(localMute && localMute->status()==QSoundEffect::Ready,4000);
             QVERIFY(!sameProfile.localPerson()["speaking"].toBool());
             QVERIFY(!sameProfile.localPerson()["mic"].toBool());
             auto remoteMic=[&]{
@@ -1706,8 +2569,6 @@ private slots:
                 return true;
             };
             QTRY_VERIFY_WITH_TIMEOUT(!remoteMic(),5000);
-            QVERIFY(sameProfile.callSounds.contains("voice-mute"));
-            QTRY_COMPARE_WITH_TIMEOUT(sameProfile.callSounds["voice-mute"]->status(),QSoundEffect::Ready,4000);
             sameProfile.muteButton->click();
             QTRY_VERIFY_WITH_TIMEOUT(remoteMic(),5000);
             sameProfile.media->changeVideo(false,0,{},{},{});
@@ -1724,8 +2585,7 @@ private slots:
             QVERIFY(restored.inCall);
             for(const auto cue:{"join","leave","mute","unmute","video-on","video-off"}){
                 const QString key=QStringLiteral("voice-")+cue;
-                QTRY_VERIFY2_WITH_TIMEOUT(restored.callSounds.contains(key),qPrintable(key),4000);
-                QTRY_COMPARE_WITH_TIMEOUT(restored.callSounds[key]->status(),QSoundEffect::Ready,4000);
+                QTRY_VERIFY2_WITH_TIMEOUT(playedCues.contains(key),qPrintable(key),4000);
             }
         }
         restored.media->changeVideo(false,1,{},{},{});
@@ -1998,7 +2858,7 @@ int main(int argc,char** argv){
         wav.writeRawData(reinterpret_cast<const char*>(pcm.data()),bytes);
         return wav.status()==QDataStream::Ok && file.flush()?0:2;
     }
-    if(arguments.size()==4 && arguments[1]=="--measure-output")return measureProcessOutput(arguments[2].toULong(),arguments[3]);
+    if((arguments.size()==4 || arguments.size()==5) && arguments[1]=="--measure-output")return measureProcessOutput(arguments[2].toULong(),arguments[3],arguments.value(4));
     if(arguments.size()==3 && arguments[1]=="--probe-fonts")return NativeDesktopTests::fontSamples(arguments[2])?0:1;
     if(arguments.size()==3 && arguments[1]=="--capture-target"){
         QWidget pattern;

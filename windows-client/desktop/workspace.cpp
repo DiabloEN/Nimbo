@@ -9,7 +9,9 @@
 #include "profile.h"
 #include "ui.h"
 #include "voice_card.h"
+#include "voice_channel_list.h"
 #include "stream_viewer.h"
+#include "presenter_ink.h"
 #include "server_picker.h"
 #include <QSystemTrayIcon>
 
@@ -46,9 +48,21 @@ private:
 };
 class ChannelDelegate final : public QStyledItemDelegate {
 public:
-    using QStyledItemDelegate::QStyledItemDelegate;
+    explicit ChannelDelegate(QListWidget* list):QStyledItemDelegate(list){
+        list->viewport()->installEventFilter(this);
+        connect(list->model(),&QAbstractItemModel::modelReset,this,[this]{voiceSheets.clear();});
+    }
+    bool eventFilter(QObject* object,QEvent* event) override{
+        if(event->type()==QEvent::Hide && object==static_cast<QListWidget*>(parent())->viewport())
+            voiceSheets.clear();
+        return QStyledItemDelegate::eventFilter(object,event);
+    }
     void updateEditorGeometry(QWidget* widget,const QStyleOptionViewItem& option,const QModelIndex& index)const override{
-        if(widget->objectName()=="voiceChannelControls"){widget->setGeometry(option.rect);return;}
+        if(widget->objectName()=="channelLeave"){
+            const QRect row=option.rect;
+            widget->setGeometry(row.right()-35,row.top()+(row.height()-30)/2,30,30);
+            return;
+        }
         QStyledItemDelegate::updateEditorGeometry(widget,option,index);
     }
     void paint(QPainter* painter,const QStyleOptionViewItem& option,const QModelIndex& index)const override {
@@ -56,16 +70,26 @@ public:
         const auto person=index.data(Qt::UserRole+2).toJsonObject();
         if(!person.isEmpty()){
             painter->save();
+            if(parent()->property("voiceDrag").toString()==person["identity"].toString())painter->setOpacity(.45);
             const QRect avatarRect(option.rect.left()+27,option.rect.top()+8,22,22);
-            index.data(Qt::DecorationRole).value<QIcon>().paint(painter,avatarRect);
+            const auto avatarIcon=index.data(Qt::DecorationRole).value<QIcon>();
+            if(avatarIcon.isNull()){
+                painter->setRenderHint(QPainter::Antialiasing);
+                painter->setPen(Qt::NoPen);painter->setBrush(QColor("#303030"));
+                painter->drawEllipse(QRectF(avatarRect));
+                auto font=option.font;font.setPixelSize(8);font.setWeight(QFont::Normal);
+                painter->setFont(font);painter->setPen(QColor("#ddd"));
+                const auto initials=person["name"].toString().trimmed().left(2).toUpper();
+                painter->drawText(avatarRect,Qt::AlignCenter,initials.isEmpty()?QStringLiteral("Н"):initials);
+            }else avatarIcon.paint(painter,avatarRect);
             int right=option.rect.right()-6;
             static const QHash<QString,QIcon> icons{
-                {"screen",tintedIcon("screen",QColor("#888"))},{"camera",tintedIcon("camera",QColor("#888"))},
-                {"mic-off",tintedIcon("mic-off",QColor("#888"))}
+                {"screen",tintedIcon("screen",QColor("#777"))},{"camera",tintedIcon("camera",QColor("#777"))},
+                {"mic-off",tintedIcon("mic-off",QColor("#777"))}
             };
             auto hint=[&](const QString& glyph){
                 icons.value(glyph).paint(painter,QRect(right-11,avatarRect.center().y()-5,12,12));
-                right-=16;
+                right-=17;
             };
             if(person["screen"].toBool())hint("screen");
             if(person["camera"].toBool())hint("camera");
@@ -84,16 +108,46 @@ public:
         const bool hovered=option.state.testFlag(QStyle::State_MouseOver);
         painter->save();
         painter->setRenderHint(QPainter::Antialiasing);
-        if(selected || hovered || focused){
+        const bool drop=parent()->property("voiceDrop").toString()==room["id"].toString();
+        const bool voice=room["kind"]=="voice";
+        const bool keyboardFocus=focused && !drop;
+        // The variable-width middle contains only the fill. Both ends retain the
+        // CSS corner coverage and the original Iconsax glyph at display scale.
+        bool paintedVoice=false;
+        if(voice && !keyboardFocus && option.rect.width()>=64){
+            const auto dpr=painter->device()->devicePixelRatioF();
+            const int scale=dpr<=1?1:2;
+            const auto glyph=room["icon"].toString();
+            const QString path=QStringLiteral(":/voice-rows/%1@%2.png").arg(glyph.isEmpty()?QStringLiteral("sound"):glyph).arg(scale);
+            auto* cached=voiceSheets.object(path);
+            if(!cached){
+                const QImage image(path);
+                if(!image.isNull()){
+                    cached=new QPixmap(QPixmap::fromImage(image));voiceSheets.insert(path,cached);
+                }
+            }
+            const QPixmap sheet=cached?*cached:QPixmap{};
+            if(!sheet.isNull()){
+                const int state=drop?3:selected?2:hovered?1:0;
+                const auto row=option.rect;
+                const int y=45*scale*state,h=45*scale;
+                painter->setRenderHint(QPainter::SmoothPixmapTransform,true);
+                painter->drawPixmap(QRect(row.left(),row.top(),34,row.height()),sheet,QRect(0,y,34*scale,h));
+                painter->drawPixmap(row.adjusted(34,0,-12,0),sheet,QRect(34*scale,y,scale,h));
+                painter->drawPixmap(QRect(row.right()-11,row.top(),12,row.height()),sheet,QRect(52*scale,y,12*scale,h));
+                paintedVoice=true;
+            }
+        }
+        if(!paintedVoice && (selected || hovered || focused || drop)){
             painter->setPen(Qt::NoPen);
-            painter->setBrush(QColor(focused?"#3b4140":selected?"#252525":"#303030"));
+            painter->setBrush(QColor(drop?"#080808":focused?"#3b4140":selected?"#252525":"#303030"));
             painter->drawRoundedRect(option.rect,11,11);
         }
         const QRect content=option.rect.adjusted(12,0,-12,0);
         const QRect mark(content.left(),content.top()+qRound((content.height()-18)/2.),18,18);
         const auto icon=index.data(Qt::DecorationRole).value<QIcon>();
-        icon.paint(painter,mark,Qt::AlignCenter,activeText?QIcon::Selected:QIcon::Normal);
-        if(index.data(Qt::UserRole+3).toBool()){painter->restore();return;}
+        if(!paintedVoice)icon.paint(painter,mark,Qt::AlignCenter,activeText?QIcon::Selected:QIcon::Normal);
+
         const int indicators=index.data(Qt::UserRole+1).toInt();
         if(indicators&1){
             painter->setBrush(QColor("#81bc96"));painter->setPen(QPen(QColor("#101010"),1));
@@ -103,11 +157,25 @@ public:
             painter->setBrush(QColor("#f05261"));painter->setPen(Qt::NoPen);
             painter->drawEllipse(QRectF(content.right()-6,content.center().y()-3,6,6));
         }
-        const auto area=content.adjusted(28,0,-((indicators&2)?15:0),0);
+        auto area=content.adjusted(28,0,-((indicators&2)?15:0),0);
+        if(room["kind"]=="voice"){
+            area.setRight(option.rect.right()-6-(index.data(Qt::UserRole+3).toBool()?36:0));
+            const auto since=index.data(Qt::UserRole+6).toLongLong();
+            if(since>0){
+                const auto seconds=qMax<qint64>(0,(QDateTime::currentMSecsSinceEpoch()-since)/1000);
+                const auto elapsed=(seconds>=3600?QString::number(seconds/3600)+":":QString())+
+                    QString("%1:%2").arg(seconds/60%60,2,10,QChar('0')).arg(seconds%60,2,10,QChar('0'));
+                auto font=option.font;font.setPixelSize(10);painter->setFont(font);painter->setPen(QColor("#a0a0a0"));
+                painter->drawText(area,Qt::AlignRight|Qt::AlignVCenter,elapsed);
+                area.adjust(0,0,-painter->fontMetrics().horizontalAdvance(elapsed)-6,0);
+            }
+        }
         painter->setFont(option.font);painter->setPen(QColor(activeText?"#eeeeee":"#a0a0a0"));
         painter->drawText(area,Qt::AlignLeft|Qt::AlignVCenter,option.fontMetrics.elidedText(index.data().toString(),Qt::ElideRight,area.width()));
         painter->restore();
     }
+private:
+    mutable QCache<QString,QPixmap> voiceSheets{8};
 };
 QStringList emojiPalette() {
     return QStringLiteral("😀 😃 😄 😁 😆 😅 😂 🤣 🙂 😉 😊 😍 🥰 😘 😎 🤔 😮 😢 😭 😡 🤯 🥳 😴 🤝 👍 👎 👏 🙌 🙏 💪 👀 ❤️ 💔 🔥 ✨ 🎉 💯 ✅ ❌ 🚀 ☕ 🎮 🐈 🐕 🌈 🎵").split(' ');
@@ -150,7 +218,11 @@ void DesktopWindow::buildWorkspace() {
     summary->addLayout(meta,1);
     updateNetworkIndicator();
     nav->addWidget(serverBox);nav->addSpacing(22);
-    channels=new QListWidget;channels->setObjectName("channels");channels->setIconSize({18,18});channels->setItemDelegate(new ChannelDelegate(channels));channels->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto* voiceList=new VoiceChannelList;
+    voiceList->origin=[this]{return api.server.toString();};
+    voiceList->canMove=[this](auto id){return canDragVoice(id);};
+    voiceList->moveMember=[this](auto id,auto from,auto to){requestVoiceMove(id,from,to);};
+    channels=voiceList;channels->setObjectName("channels");channels->setIconSize({18,18});channels->setItemDelegate(new ChannelDelegate(channels));channels->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     channels->setStyleSheet("font-size:12px");nav->addWidget(channels,1);
     auto* footer=new QHBoxLayout;footer->setSpacing(3);footer->setContentsMargins(0,6,0,4);
     profileButton=new QPushButton;profileButton->setObjectName("profileNav");profileButton->setProperty("profileLink",true);
@@ -392,13 +464,11 @@ void DesktopWindow::translateSidebar(){
         const auto person=item->data(Qt::UserRole+2).toJsonObject();
         if(!person.isEmpty() && person["identity"].toString().section('.',0,0)==selfId)
             item->setText(person["name"].toString()+UiText::You());
-        if(widget && item->data(Qt::UserRole+3).toBool()){
-            if(auto* clock=widget->findChild<QLabel*>("activityClock"))clock->setToolTip(UiText::RoomActivityTime());
-            if(auto* leave=widget->findChild<QPushButton*>("channelLeave")){
-                const QString tip=UiText::LeaveRoom()+item->text();
-                leave->setAccessibleName(tip);leave->setToolTip(tip);
-            }
+        if(auto* leave=qobject_cast<QPushButton*>(widget);leave && leave->objectName()=="channelLeave"){
+            const QString tip=UiText::LeaveRoom()+item->text();
+            leave->setAccessibleName(tip);leave->setToolTip(tip);
         }
+        if(item->data(Qt::UserRole+6).toLongLong()>0)item->setToolTip(UiText::RoomActivityTime());
     }
     if(!workspace.isEmpty() && workspace["description"].toString().isEmpty())serverDescription->setText(UiText::APlaceForFriends());
 }
@@ -440,10 +510,19 @@ void DesktopWindow::renderWorkspace(const QJsonObject& incoming,WorkspaceRefresh
     if(view=="roles" && detailLayout->count() && (previous["members"]!=data["members"] || previous["roles"]!=data["roles"]))
         if(auto* panel=detailLayout->itemAt(0)->widget()->findChild<QWidget*>("memberSettings"))
             static_cast<MemberSettings*>(panel)->render();
+    if(!displayMove.identity.isEmpty()){
+        auto contains=[this](QString room){
+            const auto people=rawRoomPeople(room);
+            return std::any_of(people.begin(),people.end(),[this](const auto& p){return p.toObject()["identity"]==displayMove.identity;});
+        };
+        if(displayMove.origin!=api.server.toString() || (contains(displayMove.to) && !contains(displayMove.from))){
+            displayMove={};moveDisplayTimer.stop();refresh=WorkspaceRefresh::Channels;
+        }
+    }
     auto presence=data["presence"].toObject();
     if(refresh!=WorkspaceRefresh::Changed||previous["channels"]!=data["channels"]||previous["sections"]!=data["sections"]||previous["sectionOrder"]!=data["sectionOrder"]||
        previous["channelSections"]!=data["channelSections"]||previous["presence"]!=data["presence"]){
-        rooms=data["channels"].toArray();QSignalBlocker block(channels);channels->clear();int next=-1,first=-1;
+        rooms=data["channels"].toArray();QSignalBlocker block(channels);channels->clear();int next=-1,first=-1;bool hasActivity=false;
         auto groups=data["sections"].toArray(),order=data["sectionOrder"].toArray();
         if(order.isEmpty())order={"text","voice"};
         for(auto groupId:order){
@@ -481,38 +560,30 @@ void DesktopWindow::renderWorkspace(const QJsonObject& incoming,WorkspaceRefresh
                 const auto people=roomPeople(rid);
                 const bool canLeave=!leavingVoice&&(inCall||joining)&&activeVoice==rid&&callOrigin==api.server.toString();
                 const auto since=activity["since"].toInteger();
-                if(canLeave || (since>0&&!people.isEmpty())){
-                    auto* tools=new QWidget;tools->setStyleSheet("background:transparent");tools->setObjectName("voiceChannelControls");
-                    auto* right=new QHBoxLayout(tools);right->setContentsMargins(40,0,6,0);right->setSpacing(8);
-                    auto* channelName=text(room["name"].toString(),"font-size:12px;color:#a0a0a0");
-                    channelName->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);
-                    channelName->setAttribute(Qt::WA_TransparentForMouseEvents);
-                    right->addWidget(channelName,1);
-                    if(since>0&&!people.isEmpty()){
-                        auto* clock=text("","color:#a0a0a0;font-size:10px");
-                        clock->setObjectName("activityClock");clock->setToolTip(UiText::RoomActivityTime());right->addWidget(clock);
-                        auto tick=[clock,since]{const auto t=qMax<qint64>(0,(QDateTime::currentMSecsSinceEpoch()-since)/1000);
-                            clock->setText((t>=3600?QString::number(t/3600)+":":QString())+QString("%1:%2").arg(t/60%60,2,10,QChar('0')).arg(t%60,2,10,QChar('0')));};
-                        tick();auto* timer=new QTimer(clock);connect(timer,&QTimer::timeout,clock,tick);timer->start(1000);
-                    }
-                    if(canLeave){
-                        auto* leave=action("exit",UiText::LeaveRoom()+room["name"].toString(),30);
-                        leave->setObjectName("channelLeave");leave->setHoverIcons(tintedIcon("exit",QColor("#a0a0a0")),tintedIcon("exit",QColor("#f4b5b5")));leave->setStyleSheet("QPushButton{background:transparent;border:0;border-radius:8px;padding:0} QPushButton:hover{background:#39282a}");right->addWidget(leave);
-                        connect(leave,&QPushButton::clicked,leave,[this]{leaveCall();});
-                    }
+                if(since>0 && !people.isEmpty()){
+                    item->setData(Qt::UserRole+6,since);
+                    item->setToolTip(UiText::RoomActivityTime());
+                    hasActivity=true;
+                }
+                if(canLeave){
+                    auto* leave=action("exit",UiText::LeaveRoom()+room["name"].toString(),30);
+                    leave->setObjectName("channelLeave");leave->setHoverIcons(tintedIcon("exit",QColor("#a0a0a0")),tintedIcon("exit",QColor("#f4b5b5")));leave->setStyleSheet("QPushButton{background:transparent;border:0;border-radius:8px;padding:0} QPushButton:hover{background:#39282a}");
                     item->setData(Qt::UserRole+3,true);
-                    channels->setItemWidget(item,tools);
+                    channels->setItemWidget(item,leave);
+                    connect(leave,&QPushButton::clicked,leave,[this]{leaveCall();});
                 }
                 for(auto p:people){
                     auto person=p.toObject();auto name=person["name"].toString();auto mid=person["identity"].toString().section('.',0,0);
-                    auto* entry=new QListWidgetItem(QIcon(avatar(name,avatars.value(mid),22)),name+(mid==selfId?UiText::You():""),channels);
-                    entry->setData(Qt::UserRole+2,person);entry->setFlags(Qt::NoItemFlags);entry->setSizeHint({0,30});
+                    const auto photo=avatars.value(mid);
+                    auto* entry=new QListWidgetItem(photo.isNull()?QIcon{}:QIcon(avatar(name,photo,22)),name+(mid==selfId?UiText::You():""),channels);
+                    entry->setData(Qt::UserRole+2,person);entry->setData(Qt::UserRole+5,rid);entry->setFlags(Qt::NoItemFlags);entry->setSizeHint({0,30});
                 }
                 if(!people.isEmpty()){
-                    auto* space=new QListWidgetItem(channels);space->setFlags(Qt::NoItemFlags);space->setSizeHint({0,8});
+                    auto* space=new QListWidgetItem(channels);space->setFlags(Qt::NoItemFlags);space->setSizeHint({0,8});space->setData(Qt::UserRole+5,rid);
                 }
             }
         }
+        static_cast<VoiceChannelList*>(channels)->setActivityVisible(hasActivity);
         channels->setCurrentRow(next<0?first:next);selectChannel();
     }
     if(refresh==WorkspaceRefresh::All||previous["selfId"]!=selfId||previous["members"]!=data["members"]||previous["roles"]!=data["roles"]){
@@ -553,6 +624,7 @@ void DesktopWindow::updateAvatars(){
     }
     avatarVersions.removeIf([&](QHash<QString,QString>::iterator it){return !present.contains(it.key());});
     avatars.removeIf([&](QHash<QString,QPixmap>::iterator it){return !present.contains(it.key());});
+    if(gameOverlay && callOrigin==api.server.toString())gameOverlay->syncPortraits(&avatars,callStateApi);
 }
 void DesktopWindow::setMemberPanel(bool expanded,bool animate){
     expandedMembers=expanded;memberToggle->setChecked(expanded);
@@ -591,6 +663,7 @@ QJsonObject DesktopWindow::localPerson() const {
             {"speaking",localSpeaking&&!muted},{"camera",cameraMode!=0},{"screen",screenMode!=0}};
 }
 void DesktopWindow::updateLocalPerson(){
+    if(gameOverlay)syncGameOverlay();
     if(!inCall || callOrigin!=api.server.toString())return;
     updateSpeakingPerson(localPerson());
 }
@@ -605,9 +678,48 @@ void DesktopWindow::updateSpeakingPerson(const QJsonObject& person){
     }
     if(auto card=frameHosts.value(identity+"/camera"))card->setMicrophone(person["speaking"].toBool() && person["mic"].toBool(),person["micKnown"].toBool()&&!person["mic"].toBool());
 }
+bool DesktopWindow::canDragVoice(const QString& identity) const{
+    auto member=byId(workspace["members"].toArray(),identity.section('.',0,0));
+    return displayMove.identity.isEmpty() && allowed("move_members") && identity.contains('.') &&
+           !member.isEmpty() && !member["blocked"].toBool();
+}
+void DesktopWindow::requestVoiceMove(QString id,QString from,QString to){
+    if(!canDragVoice(id) || from==to || byId(rooms,to)["kind"]!="voice")return;
+    const auto origin=api.server.toString();
+    for(const auto value:rawRoomPeople(from)){
+        auto person=value.toObject();
+        if(person["identity"]!=id)continue;
+        displayMove={origin,id,from,to,person};moveDisplayTimer.start(15000);
+        renderWorkspace(workspace,WorkspaceRefresh::Channels);
+        api.request("POST","/api/voice-move",{{"identity",id},{"from",from},{"to",to}},
+            [this,origin,id,from,to](QJsonObject,QString error){
+            if(error.isEmpty() || origin!=api.server.toString())return;
+            if(displayMove.identity==id && displayMove.from==from && displayMove.to==to){
+                displayMove={};moveDisplayTimer.stop();renderWorkspace(workspace,WorkspaceRefresh::Channels);
+            }
+            note(error);
+        });
+        return;
+    }
+}
 QJsonArray DesktopWindow::roomPeople(const QString& room) const{
+    auto people=rawRoomPeople(room);
+    if(displayMove.identity.isEmpty() || displayMove.origin!=api.server.toString())return people;
+    auto person=displayMove.person;
+    for(int i=people.size()-1;i>=0;--i){
+        if(people[i].toObject()["identity"]==displayMove.identity){person=people[i].toObject();people.removeAt(i);}
+    }
+    if(room==displayMove.to)people.append(person);
+    return people;
+}
+QJsonArray DesktopWindow::rawRoomPeople(const QString& room) const{
     if(!inCall || callOrigin!=api.server.toString() || activeVoice!=room)
-        return workspace["presence"].toObject().value(room).toObject()["people"].toArray();
+    {
+        auto people=workspace["presence"].toObject().value(room).toObject()["people"].toArray();
+        if(inCall && callOrigin==api.server.toString())
+            for(int i=people.size()-1;i>=0;--i)if(people[i].toObject()["identity"]==callIdentity)people.removeAt(i);
+        return people;
+    }
     QJsonArray people;
     if(!leavingVoice)people.append(localPerson());
     for(const auto entry:liveRoster){
@@ -713,6 +825,17 @@ void DesktopWindow::frameArrived(QString id,bool screen,const QImage& frame){
     if(had!=!frame.isNull()){stageSignature.clear();refreshStage();}
     if(auto host=frameHosts.value(key);host&&!frame.isNull())host->setFrame(frame);
 }
+void DesktopWindow::displayInk(const ScreenInk::Strokes& strokes){
+    if(ownInkSession.isEmpty() || strokes.isEmpty()){presenterInk.reset();return;}
+    if(!presenterInk){
+        QScreen* screen=nullptr;
+        for(auto* candidate:QGuiApplication::screens())if(candidate->name()==inkMonitor)screen=candidate;
+        if(!screen && !inkProgram)return;
+        presenterInk=std::make_unique<PresenterInk>(screen,reinterpret_cast<HWND>(inkProgram));
+    }
+    presenterInk->strokes=strokes;
+    presenterInk->refresh();
+}
 void DesktopWindow::viewTrack(QString key,QString name,bool mini){
     if(!trackFrames.contains(key))return;
     if(!viewer)viewer=new StreamViewer(this,[this]{
@@ -726,7 +849,16 @@ void DesktopWindow::viewTrack(QString key,QString name,bool mini){
         QWidget* area=messages->isVisible()?messages->viewport():content->currentWidget();
         return QRect(area->mapTo(this,QPoint()),area->size());
     });
+    viewer->restoreInkColor(profile.value("screenInkColor").toString());
+    viewer->onInkColorChanged=[this](const QString& color){
+        profile["screenInkColor"]=color;
+        saveLocal();
+    };
     viewer->open(key,name,trackFrames[key],mini,key==callIdentity+"/screen",!mini);
+    viewer->onInk=[this](QString host,QJsonObject command){if(media)media->sendInk(host,command);};
+    viewer->setInkTransport(inkTransport);
+    if(key==callIdentity+"/screen")viewer->setInkSession(ownInkSession,true);
+    else if(media)media->sendInk(key.chopped(7),{{"type","query"}});
     viewer->position(view=="room" && expandedMembers);
     if(viewer->track==callIdentity+"/screen")viewer->setSound(screenMode==3,sharingSound);
     else viewer->setSound(true,!mutedStreams.contains(viewer->track.chopped(7)));
@@ -1045,7 +1177,7 @@ void DesktopWindow::usePreparedServer(const QUrl& target,QJsonObject entry){
     }
     workspaceReceived=ready.received;
     const auto section=route["view"].toString();
-    if(QStringList{"general","audio","video","roles","keys","profile"}.contains(section) ||
+    if(QStringList{"general","audio","video","roles","keys","overlay","profile"}.contains(section) ||
        (section=="channels" && (allowed("manage_server") || allowed("manage_channels")))){
         openView(section);
         auto* current=detailLayout->itemAt(0)->widget();

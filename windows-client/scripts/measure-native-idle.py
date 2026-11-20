@@ -45,7 +45,7 @@ def working_set_map(process_id):
             if c.get_last_error() != 24 or capacity > 4000000:
                 raise c.WinError(c.get_last_error())
             capacity = max(capacity * 2, pages[0] + 1)
-        totals, group, end = Counter(), "", 0
+        totals, private, private_images, anonymous, group, end = Counter(), Counter(), Counter(), Counter(), "", 0
         for page in sorted(pages[1:pages[0]+1]):
             address = page & ~(PAGESIZE - 1)
             if address >= end:
@@ -58,12 +58,18 @@ def working_set_map(process_id):
                     psapi.GetMappedFileNameW(handle, region.allocation, path, len(path))
                     file = Path(path.value).name.lower()
                     if file.startswith(("qt6", "qwindows")): group = "Qt code and data"
-                    elif file == "nimbodesktop.exe": group = "Nimbo executable"
+                    elif file in ("nimbo.exe","nimbodesktop.exe"): group = "Nimbo executable"
                     elif file.startswith(("avcodec","avutil","avformat","swresample","swscale","ffmpeg","livekit","libmediapipe")): group = "Media libraries"
                     else: group = "Other loaded images"
                 elif region.kind == 0x20000: group = "Private allocations including heaps and stacks"
                 else: group = "Other mappings"
             totals[group] += PAGESIZE
+            if not page & 0x100:  # PSAPI_WORKING_SET_BLOCK.Shared
+                private[group] += PAGESIZE
+                if region.kind == 0x1000000:
+                    private_images[file] += PAGESIZE
+                elif region.kind == 0x20000:
+                    anonymous[hex(region.allocation)] += PAGESIZE
         # Group surviving threads by their OS description. Read only metadata
         # from this fixture's process, never stacks or captured media.
         import psutil
@@ -90,7 +96,8 @@ def working_set_map(process_id):
             finally:
                 if address.value:kernel.LocalFree(address)
                 kernel.CloseHandle(h)
-        return {**totals,"threadCounts":dict(names)}
+        return {**totals,"privateResident":dict(private),"privateImages":dict(private_images),
+                "anonymousAllocations":dict(anonymous),"threadCounts":dict(names)}
     finally:
         kernel.CloseHandle(handle)
 
@@ -124,6 +131,10 @@ def main():
     locale_mode.add_argument("--language-control", action="store_true", help="Repeat the same popup interactions while keeping Russian selected")
     locale_mode.add_argument("--language-cycles", action="store_true", help="Switch the running Portable between English and Russian and sample private memory")
     parser.add_argument("--chat-call-close", action="store_true", help="Switch between a quiet server, mixed chat and voice, then close the window during the call")
+    parser.add_argument("--game-overlay", action="store_true", help="In the chat/call fixture, toggle the game overlay five times while staying in the call")
+    parser.add_argument("--retention-route", choices=("quiet","chat","voice","both"), help="Isolate the quiet, history and call contributions on the same two servers")
+    parser.add_argument("--retention-rounds",type=int,choices=range(1,7),default=2)
+    parser.add_argument("--vmmap",type=Path,help="Signed Sysinternals VMMap executable for the fixture PID")
     parser.add_argument("--active-capture", action="store_true", help="During each local call, start and stop the first monitor and the default camera")
     parser.add_argument("--play-chat-video", action="store_true", help="Play and pause the last clip during each large-chat pass")
     parser.add_argument("--player-smoke", action="store_true", help="Play a real MP4 and YouTube in the supplied portable EXE on an isolated server")
@@ -137,6 +148,11 @@ def main():
     parser.add_argument("--heap-stages", nargs="+", help="Stages at which to report live allocations made since the previous snapshot")
     parser.add_argument("--pause-rest", action="store_true", help="Measure 30 seconds after the first video pause without opening another attachment")
     args = parser.parse_args()
+    if args.game_overlay:
+        if args.retention_route not in (None,"both","voice"):
+            parser.error("--game-overlay requires a voice call")
+        args.retention_route=args.retention_route or "both"
+    if args.retention_route: args.chat_call_close=True
     if args.capture_counters and not args.capture_cycles:
         parser.error("--capture-counters requires --capture-cycles")
     if args.wpr_heap and (not args.capture_cycles or args.heap_profiler):
@@ -173,6 +189,11 @@ def main():
         temp = Path(directory)
         api = args.server.resolve(strict=True) if args.server else ROOT / ("artifacts/native-desktop/api-web67.exe" if args.player_smoke else "artifacts/native-desktop/api-ff2b773.exe")
         with isolated(ROOT, temp, api, suffixes=("", "2") if args.large_chat else ("",)) as env:
+            if args.game_overlay: env["NIMBO_QA_GAME_OVERLAY"]="1"
+            if args.retention_route:
+                env["NIMBO_QA_RETENTION_ROUTE"]=args.retention_route
+                env["NIMBO_QA_RETENTION_ROUNDS"]=str(args.retention_rounds)
+            if args.vmmap: env["NIMBO_QA_VMMAP"]=str(args.vmmap.resolve(strict=True))
             if args.heap_profiler:
                 env["NIMBO_QA_HEOB"] = str(args.heap_profiler.resolve(strict=True))
                 env["NIMBO_QA_HEAP_STAGES"] = ",".join(args.heap_stages or ("idle","voice","capture-rest","left"))

@@ -112,7 +112,7 @@ def build_installer(compiler, work, stage, output):
         f'OutFile "{path_value(output)}"', r'InstallDir "$LOCALAPPDATA\Programs\Nimbo"',
         r'InstallDirRegKey HKCU "Software\Nimbo\DesktopPreview" "InstallDir"',
         *mui_icons,
-        '!insertmacro MUI_PAGE_WELCOME', '!insertmacro MUI_PAGE_INSTFILES', '!define MUI_FINISHPAGE_RUN "$INSTDIR\\NimboDesktop.exe"',
+        '!insertmacro MUI_PAGE_WELCOME', '!insertmacro MUI_PAGE_INSTFILES', '!define MUI_FINISHPAGE_RUN "$INSTDIR\\Nimbo.exe"',
         '!insertmacro MUI_PAGE_FINISH', '!insertmacro MUI_UNPAGE_CONFIRM', '!insertmacro MUI_UNPAGE_INSTFILES',
         '!insertmacro MUI_LANGUAGE "Russian"', '!insertmacro MUI_LANGUAGE "English"', f'VIProductVersion "{VERSION}.0"',
         f'VIAddVersionKey "FileVersion" "{VERSION}"', 'VIAddVersionKey "FileDescription" "Nimbo"',
@@ -122,9 +122,10 @@ def build_installer(compiler, work, stage, output):
         'Section "Nimbo"',
         'SetShellVarContext current', 'SetOutPath "$INSTDIR"', f'File /r "{path_value(stage)}\\*"',
         'WriteUninstaller "$INSTDIR\\Uninstall.exe"',
+        r'Delete "$INSTDIR\NimboDesktop.exe"',
         r'Delete "$SMPROGRAMS\Nimbo Desktop Preview.lnk"',
         r'Delete "$SMPROGRAMS\Nimbo Desktop.lnk"',
-        r'CreateShortcut "$SMPROGRAMS\Nimbo.lnk" "$INSTDIR\NimboDesktop.exe" "" "$INSTDIR\assets\nimbo.ico"',
+        r'CreateShortcut "$SMPROGRAMS\Nimbo.lnk" "$INSTDIR\Nimbo.exe" "" "$INSTDIR\assets\nimbo.ico"',
         r'WriteRegStr HKCU "Software\Nimbo\DesktopPreview" "InstallDir" "$INSTDIR"',
     ]
     uninstall_key = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\NimboDesktopPreview"
@@ -135,7 +136,7 @@ def build_installer(compiler, work, stage, output):
     for path in sorted(stage.rglob("*"),key=lambda p:len(p.parts),reverse=True):
         command = "RMDir" if path.is_dir() else "Delete"
         lines.append(f'{command} "$INSTDIR\\{path_value(path.relative_to(stage))}"')
-    lines += [r'Delete "$SMPROGRAMS\Nimbo.lnk"',r'Delete "$INSTDIR\uninstall-update.bin"',r'Delete "$INSTDIR\Uninstall.exe"',
+    lines += [r'Delete "$INSTDIR\NimboDesktop.exe"',r'Delete "$SMPROGRAMS\Nimbo.lnk"',r'Delete "$INSTDIR\uninstall-update.bin"',r'Delete "$INSTDIR\Uninstall.exe"',
               'RMDir "$INSTDIR"',r'DeleteRegKey HKCU "Software\Nimbo\DesktopPreview"',
               f'DeleteRegKey HKCU "{uninstall_key}"','SectionEnd']
     script=work/"setup.nsi"
@@ -155,6 +156,52 @@ def build_installer(compiler, work, stage, output):
     subprocess.run([emitter],check=True)
 
 
+def write_inventory(stage):
+    binaries = sorted(p for p in stage.rglob("*") if p.suffix.lower() in (".exe", ".dll"))
+    with (stage/"licenses/windows-binaries.sha256").open("w", encoding="utf-8", newline="\n") as inventory:
+        for binary in binaries:
+            with binary.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            inventory.write(f"{digest}  {binary.relative_to(stage).as_posix()}\n")
+    # Used only to discard a verified, unmodified backup after a successful update.
+    receipt = {p.relative_to(stage).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+               for p in sorted(stage.rglob("*")) if p.is_file() and p.relative_to(stage).as_posix() not in ("licenses/windows-files.json","uninstall-update.bin")}
+    (stage/"licenses/windows-files.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+
+
+def package_client(compiler, work, stage, dist):
+    write_inventory(stage)
+    out=dist/f"Nimbo-{VERSION}-Setup.exe"
+    build_installer(compiler,work,stage,out)
+    # The ZIP also permits a clean extracted-runtime test without an existing installation.
+    portable_zip=Path(shutil.make_archive(str(dist/f"Nimbo-Desktop-{VERSION}-portable"),"zip",stage))
+    write_manifest(portable_zip)
+    portable=dist/f"Nimbo-Desktop-{VERSION}-portable"
+    # Some vendored license files are read-only, including their packaged copies.
+    for source in stage.rglob("*"):
+        target=portable/source.relative_to(stage)
+        if target.is_file() and target.stat().st_file_attributes & stat.FILE_ATTRIBUTE_READONLY:
+            target.chmod(stat.S_IWRITE | stat.S_IREAD)
+    shutil.copytree(stage,portable,dirs_exist_ok=True)
+    # Published updaters through 0.3.38 require the old filename inside the ZIP.
+    # Keep the legacy release asset separate from the human-facing Portable.
+    updates=dist/"updates"
+    updates.mkdir(exist_ok=True)
+    (stage/"Nimbo.exe").rename(stage/"NimboDesktop.exe")
+    write_inventory(stage)
+    archive=updates/f"Nimbo-Desktop-{VERSION}-portable.zip"
+    shutil.make_archive(str(archive.with_suffix("")),"zip",stage)
+    write_manifest(archive)
+    print(out)
+
+
+def write_manifest(archive):
+    with archive.open("rb") as zipped:
+        digest=hashlib.file_digest(zipped,"sha256").hexdigest()
+    manifest={"schema":1,"platform":"windows-x64","version":VERSION,"size":archive.stat().st_size,"sha256":digest}
+    (archive.parent/"windows-x64.json").write_text(json.dumps(manifest,indent=2)+"\n",encoding="utf-8")
+
+
 def main():
     p=argparse.ArgumentParser()
     p.add_argument("--web",type=Path,required=True)
@@ -165,9 +212,9 @@ def main():
     with tempfile.TemporaryDirectory(dir=ROOT/"build-media") as tmp:
         work=Path(tmp); stage=work/"client"; stage.mkdir()
         runtime=ROOT/"build-media"
-        shutil.copy2(runtime/"NimboDesktop.exe",stage)
+        shutil.copy2(runtime/"NimboDesktop.exe",stage/"Nimbo.exe")
         subprocess.run([ROOT/".tools/qt-msvc/bin/windeployqt.exe","--release","--no-translations","--no-compiler-runtime",
-                        "--no-opengl-sw","--no-system-d3d-compiler","--dir",stage,stage/"NimboDesktop.exe"],check=True)
+                        "--no-opengl-sw","--no-system-d3d-compiler","--dir",stage,stage/"Nimbo.exe"],check=True)
         shutil.copy2(ROOT/".tools/media/mediapipe/libmediapipe.dll",stage/"libmediapipe.dll")
         for pattern in ["livekit*.dll","msvcp*.dll","vcruntime*.dll","concrt*.dll","vccorlib*.dll","dxcompiler.dll","dxil.dll"]:
             for library in runtime.glob(pattern): shutil.copy2(library,stage)
@@ -184,33 +231,7 @@ def main():
         shutil.copy2(ROOT/"desktop/THIRD_PARTY.md",stage)
         for module in ("qtbase", "qtmultimedia"):
             shutil.copy2(ROOT/f".tools/qt-msvc/sbom/{module}-6.8.3.spdx.json",stage/"licenses/qt")
-        binaries = sorted(p for p in stage.rglob("*") if p.suffix.lower() in (".exe", ".dll"))
-        with (stage/"licenses/windows-binaries.sha256").open("w", encoding="utf-8", newline="\n") as inventory:
-            for binary in binaries:
-                with binary.open("rb") as stream:
-                    digest = hashlib.file_digest(stream, "sha256").hexdigest()
-                inventory.write(f"{digest}  {binary.relative_to(stage).as_posix()}\n")
-        # Used only to discard a verified, unmodified backup after a successful update.
-        receipt = {p.relative_to(stage).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
-                   for p in sorted(stage.rglob("*")) if p.is_file()}
-        (stage/"licenses/windows-files.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")
-        out=dist/f"Nimbo-{VERSION}-Setup.exe"
-        build_installer(args.nsis,work,stage,out)
-        # The ZIP also permits a clean extracted-runtime test without an existing installation.
-        shutil.make_archive(str(dist/f"Nimbo-Desktop-{VERSION}-portable"),"zip",stage)
-        portable=dist/f"Nimbo-Desktop-{VERSION}-portable"
-        # Some vendored license files are read-only, including their packaged copies.
-        for source in stage.rglob("*"):
-            target=portable/source.relative_to(stage)
-            if target.is_file() and target.stat().st_file_attributes & stat.FILE_ATTRIBUTE_READONLY:
-                target.chmod(stat.S_IWRITE | stat.S_IREAD)
-        shutil.copytree(stage,portable,dirs_exist_ok=True)
-        archive=dist/f"Nimbo-Desktop-{VERSION}-portable.zip"
-        with archive.open("rb") as zipped:
-            digest=hashlib.file_digest(zipped,"sha256").hexdigest()
-        manifest={"schema":1,"platform":"windows-x64","version":VERSION,"size":archive.stat().st_size,"sha256":digest}
-        (dist/"windows-x64.json").write_text(json.dumps(manifest,indent=2)+"\n",encoding="utf-8")
-        print(out)
+        package_client(args.nsis,work,stage,dist)
 
 
 if __name__=="__main__":

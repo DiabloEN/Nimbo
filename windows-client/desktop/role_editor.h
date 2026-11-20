@@ -20,7 +20,8 @@ public:
 private:
     const QList<QPair<QString,QString>> permissions={
         {"manage_server",UiText::ServerNameDescriptionAndAvatar()},{"manage_channels",UiText::CreateAndEditChannels()},
-        {"manage_chat",UiText::DeleteMessagesAndTemporarilyRestrictPosting()},{"kick_members",UiText::DisableMediaAndDisconnectMembersFromVoice()},
+        {"manage_chat",UiText::DeleteMessagesAndTemporarilyRestrictPosting()},{"move_members",UiText::MoveMembers()},
+        {"kick_members",UiText::DisableMediaAndDisconnectMembersFromVoice()},
         {"ban_members",UiText::BlockAccessToTheServer()},{"manage_roles",UiText::CreateAndAssignRoles()}};
     bool allowed(QString permission) const {
         return !actor["blocked"].toBool() && (actor["role"]=="owner" || actor["permissions"].toArray().contains(permission));

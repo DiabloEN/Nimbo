@@ -29,6 +29,16 @@ func (p *presenceService) voiceState(w http.ResponseWriter, r *http.Request, id 
 	}
 	p.store.mu.Lock()
 	m := findMember(&p.store.data, id)
+	// Membership can be revoked after the authentication middleware checked it,
+	// especially when a late pagehide request races with leaving the server.
+	if m == nil || isBlocked(m) {
+		p.store.mu.Unlock()
+		jsonReply(w, http.StatusUnauthorized, map[string]string{
+			"error": "Доступ участника к серверу прекращён",
+			"code":  "VOICE_MEMBER_UNAVAILABLE",
+		})
+		return
+	}
 	name := m.Name
 	p.store.mu.Unlock()
 	p.mu.Lock()

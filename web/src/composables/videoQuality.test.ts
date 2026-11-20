@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { VideoQuality, type RemoteTrackPublication } from 'livekit-client';
+import { Track, VideoQuality, type RemoteTrackPublication } from 'livekit-client';
 import { applyReceiveLimit, createVideoLimiter } from './videoQuality';
 
 function videoSender() {
@@ -23,6 +23,34 @@ function videoSender() {
 }
 
 describe('outgoing video encoding limits', () => {
+  it('preserves 1080p screen motion after lowering and restoring quality', async () => {
+    let encodings = [
+      { rid: 'q', maxBitrate: 450_000, maxFramerate: 20, scaleResolutionDownBy: 3 },
+      { rid: 'h', maxBitrate: 1_700_000, maxFramerate: 30, scaleResolutionDownBy: 1.5 },
+      { rid: 'f', maxBitrate: 5_000_000, maxFramerate: 30, scaleResolutionDownBy: 1 },
+    ];
+    const sender = {
+      getParameters: () => ({ encodings: encodings.map((e) => ({ ...e })) }),
+      setParameters: vi.fn(async (p) => {
+        encodings = p.encodings;
+      }),
+    } as unknown as RTCRtpSender;
+    const track = {
+      sender,
+      source: Track.Source.ScreenShare,
+      mediaStreamTrack: { getSettings: () => ({ width: 1920, height: 1080 }) },
+    };
+    const limiter = createVideoLimiter();
+    await limiter.apply(track, '720');
+    expect(encodings.reduce((sum, e) => sum + e.maxBitrate, 0)).toBeLessThanOrEqual(3_000_000);
+    expect(encodings[2]!.scaleResolutionDownBy).toBe(1.5);
+    await limiter.apply(track, 'auto');
+    expect(encodings[2]).toMatchObject({
+      maxBitrate: 5_000_000,
+      maxFramerate: 30,
+      scaleResolutionDownBy: 1,
+    });
+  });
   it('caps the sum of simulcast bitrates, preserves active layers and restores resolution', async () => {
     const video = videoSender(),
       limiter = createVideoLimiter();

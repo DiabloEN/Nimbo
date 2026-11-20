@@ -1,4 +1,4 @@
-import { VideoQuality, type RemoteTrackPublication } from 'livekit-client';
+import { Track, VideoQuality, type RemoteTrackPublication } from 'livekit-client';
 
 export type SendQuality = 'auto' | '360' | '720' | '1080';
 export type ReceiveQuality = SendQuality | 'audio';
@@ -8,7 +8,16 @@ export const videoModes = {
   '720': { height: 720, bitrate: 1_700_000 },
   '1080': { height: 1080, bitrate: 3_000_000 },
 };
+// Screen motion needs a separate budget. Keep room for the 360p/720p layers
+// without cutting the 5 Mbps main stream down to the camera's aggregate cap.
+const screenModes = {
+  auto: { height: 1080, bitrate: 8_000_000 },
+  '360': { height: 360, bitrate: 1_000_000 },
+  '720': { height: 720, bitrate: 3_000_000 },
+  '1080': { height: 1080, bitrate: 8_000_000 },
+};
 type VideoSender = {
+  source?: Track.Source;
   sender?: RTCRtpSender;
   mediaStreamTrack: Pick<MediaStreamTrack, 'getSettings'>;
 };
@@ -33,7 +42,9 @@ export function createVideoLimiter() {
             baseline = parameters.encodings.map((encoding) => ({ ...encoding }));
             originals.set(sender, baseline);
           }
-          const mode = videoModes[quality];
+          const mode = (track.source === Track.Source.ScreenShare ? screenModes : videoModes)[
+            quality
+          ];
           const settings = track.mediaStreamTrack.getSettings();
           const shortSide = Math.min(settings.width || 1920, settings.height || 1080);
           const total = baseline.reduce(

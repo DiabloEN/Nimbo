@@ -27,6 +27,7 @@ import {
   type ReceiveQuality,
 } from './videoQuality';
 import { startScreenShare } from './shareScreen';
+import { screenSurface } from './screenSource';
 import { useCameraEffects } from './useCameraEffects';
 
 import { createSpeakingMeter } from './speakingMeter';
@@ -56,6 +57,7 @@ export type VideoTile = {
   aspectRatio?: number;
   streamId?: string;
   displaySurface?: string;
+  paused?: boolean;
 };
 type MediaTrack = Track;
 const screenUnavailable =
@@ -125,14 +127,29 @@ export function useCall(
       (entry) => entry.origin === origin && entry.identity === identity,
     );
   }
+  const cueCleanups = new Set<() => void>();
   async function playCue(active: Room, url: string) {
+    let cleanup: (() => void) | undefined;
     try {
       if (room !== active || active.state !== 'connected') return;
       const cue = new Audio(url);
+      const timer = setTimeout(() => cleanup?.(), 8000);
+      cleanup = () => {
+        clearTimeout(timer);
+        cue.onended = cue.onerror = null;
+        cue.pause?.();
+        cue.removeAttribute?.('src');
+        cue.load?.();
+        cueCleanups.delete(cleanup!);
+      };
+      cueCleanups.add(cleanup);
+      cue.onended = cue.onerror = cleanup;
       const output = devices.outputId.value;
       if (output && output !== 'default' && cue.setSinkId) await cue.setSinkId(output);
       if (room === active && active.state === 'connected') await cue.play();
+      else cleanup();
     } catch {
+      cleanup?.();
       /* Optional feedback must not interrupt the call. */
     }
   }
@@ -396,6 +413,10 @@ export function useCall(
     if (item) {
       item.cleanup?.();
       track.detach(item.element);
+      item.element.pause?.();
+      item.element.srcObject = null;
+      item.element.removeAttribute?.('src');
+      item.element.load?.();
       voiceOutputs.delete(track);
       voiceMeters.delete(track);
       if (!voiceMeters.size) {
@@ -417,7 +438,7 @@ export function useCall(
     if (
       attachments.has(track) ||
       (local && track.kind === 'audio') ||
-      (track.kind === 'video' && track.isMuted)
+      (track.kind === 'video' && track.isMuted && track.source !== Track.Source.ScreenShare)
     )
       return;
     if (
@@ -459,7 +480,10 @@ export function useCall(
         source: track.source === 'screen_share' ? 'screen' : 'camera',
         local,
         streamId: track.sid,
-        displaySurface: local ? track.mediaStreamTrack?.getSettings?.().displaySurface : undefined,
+        displaySurface: local
+          ? track.mediaStreamTrack?.getSettings?.().displaySurface
+          : screenSurface(publication?.trackName),
+        paused: !!(publication?.isMuted || track.isMuted),
       };
       (element as HTMLVideoElement).playsInline = true;
       element.muted = local;
@@ -515,6 +539,7 @@ export function useCall(
       movingTracks = [];
     }
     mutedScreens.value.clear();
+    for (const cleanup of cueCleanups) cleanup();
     speakingMeter.stop();
     linkQuality.value = 'unknown';
     ++generation;
@@ -697,7 +722,14 @@ export function useCall(
       room = active;
       sync();
       active.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
-        if (room === active && !(track.kind === 'video' && publication.isMuted)) {
+        if (
+          room === active &&
+          !(
+            track.kind === 'video' &&
+            publication.isMuted &&
+            track.source !== Track.Source.ScreenShare
+          )
+        ) {
           attachTrack(track, participant, false, publication);
           applyReceive();
         }
@@ -754,7 +786,15 @@ export function useCall(
       active.on(RoomEvent.TrackMuted, (publication, participant) => {
         if (room !== active) return;
         if (participant) trackMedia(participant, publication.source, false);
-        if (publication.track?.kind === 'video') removeTrack(publication.track);
+        if (publication.track?.kind === 'video') {
+          const tile = attachments.get(publication.track)?.tile;
+          if (tile?.source === 'screen') {
+            // A browser capture pause is not the end of the publication. Keep its
+            // host and viewer selection so resuming does not lose the open player.
+            tile.paused = true;
+            syncVideoTiles();
+          } else removeTrack(publication.track);
+        }
         if (publication === active.localParticipant.getTrackPublication(Track.Source.ScreenShare)) {
           const audio = active.localParticipant.getTrackPublication(Track.Source.ScreenShareAudio);
           if (audio) void audio.mute().catch(() => audio.track?.stop());
@@ -764,6 +804,11 @@ export function useCall(
       active.on(RoomEvent.TrackUnmuted, (publication, participant) => {
         if (room !== active) return;
         trackMedia(participant, publication.source, true);
+        const tile = publication.track && attachments.get(publication.track)?.tile;
+        if (tile) {
+          tile.paused = false;
+          syncVideoTiles();
+        }
         if (publication.track?.kind === 'video')
           attachTrack(
             publication.track,
@@ -962,12 +1007,12 @@ export function useCall(
           }
           return result;
         });
-      else if (kind === 'camera')
+      else if (kind === 'camera') {
         publication = await participant.setCameraEnabled(
           !participant.isCameraEnabled,
           cameraCapture(),
         );
-      else {
+      } else {
         screenAudioNote.value = '';
         publication = participant.isScreenShareEnabled
           ? await participant.setScreenShareEnabled(false)
@@ -998,7 +1043,7 @@ export function useCall(
           !participant.getTrackPublication(Track.Source.ScreenShareAudio)?.track
         )
           screenAudioNote.value =
-            'Экран передаётся без звука. Чтобы поделиться звуком, выберите отдельную вкладку со звуком в поддерживаемом браузере.';
+            'Браузер не передал звук. Запустите показ заново, выберите окно игры или приложения и включите передачу звука в окне выбора. Звук окна доступен в браузерах с поддержкой захвата звука приложения.';
       }
     } catch (error) {
       if (room === current) status.value = captureError(kind, error);

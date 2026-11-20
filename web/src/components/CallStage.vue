@@ -4,6 +4,7 @@ import { useMiniPlayer } from '../composables/useMiniPlayer';
 import AppIcon from './AppIcon.vue';
 import ScreenAudioButton from './ScreenAudioButton.vue';
 import type { VideoTile } from '../composables/useCall';
+import { screenSourceLabel } from '../composables/screenSource';
 
 type Person = {
   identity: string;
@@ -215,9 +216,12 @@ onBeforeUnmount(() => {
         <div
           :ref="(el) => host(tile.id, el)"
           class="media-slot screen-slot"
+          :class="{ 'capture-paused': tile.paused }"
           :style="{ aspectRatio: tile.aspectRatio || 16 / 9 }"
-          :aria-label="`Экран: ${person.name}`"
-        ></div>
+          :aria-label="`Демонстрация: ${person.name}`"
+        >
+          <span v-if="tile.paused" class="capture-pause-note">Трансляция приостановлена</span>
+        </div>
         <div v-if="person.canModerateMedia" class="media-admin-actions screen-admin-actions">
           <button
             type="button"
@@ -230,7 +234,8 @@ onBeforeUnmount(() => {
           </button>
         </div>
         <div class="screen-caption">
-          <AppIcon name="screen" :size="16" /><span>{{ person.name }} · экран</span
+          <AppIcon name="screen" :size="16" /><span
+            >{{ person.name }} · {{ screenSourceLabel(tile.displaySurface) }}</span
           ><ScreenAudioButton
             v-if="tile.local"
             :enabled="screenAudio"
@@ -241,8 +246,8 @@ onBeforeUnmount(() => {
         </div>
         <button
           class="expand-screen"
-          :aria-label="`Развернуть экран: ${person.name}`"
-          title="Развернуть экран"
+          :aria-label="`Развернуть трансляцию: ${person.name}`"
+          title="Развернуть трансляцию"
           @click="enlarge(tile)"
         >
           <AppIcon name="expand" :size="18" /><span>Развернуть</span>
@@ -263,7 +268,7 @@ onBeforeUnmount(() => {
     >
       <header>
         <h2 :class="{ 'drag-title': minimized }" @pointerdown="mini.start($event, 'move')">
-          {{ expanded?.name }} · экран
+          {{ expanded?.name }} · {{ screenSourceLabel(expanded?.displaySurface) }}
         </h2>
         <button
           v-if="expanded && !expanded.local && audibleScreens?.has(expanded.participantId)"
@@ -327,7 +332,13 @@ onBeforeUnmount(() => {
         </button>
       </header>
       <div class="stream-viewer-body" @pointerdown="mini.start($event, 'move')">
-        <div ref="enlargedHost" class="media-slot enlarged-slot"></div>
+        <div
+          ref="enlargedHost"
+          class="media-slot enlarged-slot"
+          :class="{ 'capture-paused': expanded?.paused }"
+        >
+          <span v-if="expanded?.paused" class="capture-pause-note">Трансляция приостановлена</span>
+        </div>
       </div>
       <button
         v-if="minimized"
@@ -434,6 +445,22 @@ onBeforeUnmount(() => {
 }
 .screen-slot :deep(video) {
   object-fit: contain;
+}
+.capture-paused {
+  position: relative;
+}
+.capture-pause-note {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: #141414;
+  color: #aaa;
+  font-size: 12px;
+  text-align: center;
+  pointer-events: none;
 }
 .participant-group.has-screen .person-caption {
   display: flex;

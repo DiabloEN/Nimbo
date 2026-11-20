@@ -1,32 +1,26 @@
 import { AudioPresets, Track, type LocalParticipant } from 'livekit-client';
+import { screenTrackName } from './screenSource';
+import { captureScreen } from './captureScreen';
 
 /** Check the actual capture before any audio reaches the room. */
 export async function startScreenShare(participant: LocalParticipant, stillCurrent: () => boolean) {
-  const tracks = await participant.createScreenTracks({
-    selfBrowserSurface: 'exclude',
-    surfaceSwitching: 'exclude',
-    systemAudio: 'exclude',
-    audio: {
-      restrictOwnAudio: true,
-      echoCancellation: false,
-      noiseSuppression: false,
-      autoGainControl: false,
-    },
-  });
+  const tracks = await captureScreen();
   const video = tracks.find((track) => track.source === Track.Source.ScreenShare);
   const audio = tracks.find((track) => track.source === Track.Source.ScreenShareAudio);
   const surface = video?.mediaStreamTrack.getSettings().displaySurface;
-  // A system mix can contain RTC playback even when restrictOwnAudio is reported true.
-  // Chrome 107 introduced selfBrowserSurface. Older pickers can ignore the
-  // exclusion and offer the tab playing the call as a capture source.
-  const chromium = /(?:Chrome|Chromium)\/(\d+)/.exec(navigator.userAgent);
-  const isolatedTab = surface === 'browser' && Number(chromium?.[1]) >= 107;
-  const safeAudio = isolatedTab;
+  // The picker requests per-application audio for windows and excludes this tab.
+  // A monitor mix can include the call, so do not publish it as application audio.
+  const safeAudio = surface === 'browser' || surface === 'window';
   const published = [];
   let keep = false;
   try {
     if (!video || !stillCurrent()) return;
-    const publication = await participant.publishTrack(video);
+    video.mediaStreamTrack.contentHint = 'motion';
+    const publication = await participant.publishTrack(video, {
+      name: screenTrackName(surface),
+      // The SDK defaults to 1080p/15, which is unsuitable for moving games.
+      screenShareEncoding: { maxBitrate: 5_000_000, maxFramerate: 30 },
+    });
     published.push(video);
     if (audio && safeAudio && stillCurrent()) {
       await participant.publishTrack(audio, {

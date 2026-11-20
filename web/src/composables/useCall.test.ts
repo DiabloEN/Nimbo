@@ -96,6 +96,10 @@ vi.mock('livekit-client', () => ({
   setLogLevel: vi.fn(),
 }));
 
+vi.mock('./captureScreen', () => ({
+  captureScreen: () => sdk.MockRoom.instances.at(-1)!.localParticipant.createScreenTracks(),
+}));
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => {
@@ -502,6 +506,17 @@ describe('useCall lifecycle and audio devices', () => {
     expect(screenTrack.stop).not.toHaveBeenCalled();
     expect(figures[1].parentElement).toBe(inline);
     expect(room.localParticipant.setScreenShareEnabled).not.toHaveBeenCalled();
+    for (let i = 0; i < 5; i++) {
+      screenTrack.isMuted = true;
+      room.emit('TrackMuted', { track: screenTrack });
+      expect(call.videoTiles.value.find((t) => t.id === screenTile.id)?.paused).toBe(true);
+      screenTrack.isMuted = false;
+      room.emit('TrackUnmuted', { track: screenTrack }, room.localParticipant);
+      expect(call.videoTiles.value.find((t) => t.id === screenTile.id)?.paused).toBe(false);
+    }
+    expect(screenTrack.attach).toHaveBeenCalledOnce();
+    expect(screenTrack.detach).not.toHaveBeenCalled();
+    expect(figures[1].parentElement).toBe(inline);
     cameraTrack.isMuted = true;
     room.emit('TrackMuted', { track: cameraTrack });
     expect(call.videoTiles.value.map((t) => t.source)).toEqual(['screen']);
@@ -545,16 +560,15 @@ describe('useCall lifecycle and audio devices', () => {
     const { call } = create();
     await call.join(form);
     const capture = call.toggle('screen');
-    expect(sdk.MockRoom.instances[0]!.localParticipant.createScreenTracks).toHaveBeenCalledWith(
-      expect.objectContaining({ audio: expect.objectContaining({ noiseSuppression: false }) }),
-    );
+    expect(sdk.MockRoom.instances[0]!.localParticipant.createScreenTracks).toHaveBeenCalledOnce();
     await capture;
   });
 
   it.each([
     ['monitor', false, false],
     ['monitor', true, false],
-    ['window', undefined, false],
+    ['window', undefined, true],
+    ['window', true, true],
     ['browser', false, true],
   ])(
     'only publishes isolated audio for %s with restrictOwnAudio=%s',
@@ -581,7 +595,10 @@ describe('useCall lifecycle and audio devices', () => {
       };
       me.createScreenTracks.mockResolvedValue([video, audio]);
       await call.toggle('screen');
-      expect(me.publishTrack).toHaveBeenCalledWith(video);
+      expect(me.publishTrack).toHaveBeenCalledWith(
+        video,
+        expect.objectContaining({ name: `nimbo-screen:${surface}` }),
+      );
       expect(me.publishTrack.mock.calls.some(([track]) => track === audio)).toBe(expected);
       expect(audio.stop).toHaveBeenCalledTimes(expected ? 0 : 1);
     },

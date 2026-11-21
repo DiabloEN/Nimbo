@@ -395,7 +395,7 @@ describe('useCall lifecycle and audio devices', () => {
     expect(devices.refresh).not.toHaveBeenCalled();
   });
 
-  it('removes a muted camera tile and restores it once when the camera resumes', async () => {
+  it.each(['camera', 'screen'])('removes a stopped native %s until it restarts', async (source) => {
     const figures: { remove: ReturnType<typeof vi.fn> }[] = [];
     vi.stubGlobal('document', {
       createElement: (tag: string) => {
@@ -410,9 +410,17 @@ describe('useCall lifecycle and audio devices', () => {
       play: vi.fn().mockResolvedValue(undefined),
       getBoundingClientRect: () => ({ width: 640, height: 360, top: 0, bottom: 360 }),
     };
-    const track = { kind: 'video', isMuted: false, attach: vi.fn(() => element), detach: vi.fn() };
+    const track = {
+      kind: 'video',
+      source,
+      isMuted: false,
+      attach: vi.fn(() => element),
+      detach: vi.fn(),
+    };
     const publication = {
       track,
+      source,
+      trackName: source,
       isMuted: false,
       kind: 'video',
       setEnabled: vi.fn(),
@@ -427,6 +435,10 @@ describe('useCall lifecycle and audio devices', () => {
     room.emit('TrackMuted', publication, { name: 'Remote' });
     expect(figures[0]!.remove).toHaveBeenCalledOnce();
     expect(track.detach).toHaveBeenCalledWith(element);
+    // A late subscriber can receive a track before its mute flag catches up.
+    track.isMuted = false;
+    room.emit('TrackSubscribed', track, publication, { name: 'Remote' });
+    expect(call.videoTiles.value).toHaveLength(0);
     track.isMuted = publication.isMuted = false;
     room.emit('TrackUnmuted', publication, { name: 'Remote' });
     room.emit('TrackSubscribed', track, publication, { name: 'Remote' });
@@ -472,7 +484,7 @@ describe('useCall lifecycle and audio devices', () => {
       stop: vi.fn(),
     });
     const cameraTrack = makeTrack('camera'),
-      screenTrack = makeTrack('screen_share');
+      screenTrack = makeTrack('screen');
     const { call } = create();
     await call.join(form);
     const room = sdk.MockRoom.instances[0]!;
@@ -665,7 +677,7 @@ describe('useCall lifecycle and audio devices', () => {
     };
     const track = {
       kind: 'video',
-      source: 'screen_share',
+      source: 'screen',
       isMuted: false,
       attach: vi.fn(() => video),
       detach: vi.fn(),

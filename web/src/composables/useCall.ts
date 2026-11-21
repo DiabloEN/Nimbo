@@ -60,6 +60,11 @@ export type VideoTile = {
   paused?: boolean;
 };
 type MediaTrack = Track;
+// Windows keeps its "screen" publication between captures. Muting it ends
+// the current share; other screen publications can pause and resume in place.
+function retainedWindowsScreen(publication?: { source: Track.Source; trackName: string }) {
+  return publication?.source === Track.Source.ScreenShare && publication.trackName === 'screen';
+}
 const screenUnavailable =
   'Этот браузер не поддерживает показ своего экрана. Вы можете смотреть экран собеседника, а для своей демонстрации подключиться с компьютера.';
 type Devices = {
@@ -438,7 +443,9 @@ export function useCall(
     if (
       attachments.has(track) ||
       (local && track.kind === 'audio') ||
-      (track.kind === 'video' && track.isMuted && track.source !== Track.Source.ScreenShare)
+      (track.kind === 'video' &&
+        (track.isMuted || publication?.isMuted) &&
+        (track.source !== Track.Source.ScreenShare || retainedWindowsScreen(publication)))
     )
       return;
     if (
@@ -477,7 +484,7 @@ export function useCall(
         id: 'media-' + ++tileCounter,
         participantId: participant.identity,
         name: participant.name || 'Гость',
-        source: track.source === 'screen_share' ? 'screen' : 'camera',
+        source: track.source === Track.Source.ScreenShare ? 'screen' : 'camera',
         local,
         streamId: track.sid,
         displaySurface: local
@@ -722,14 +729,7 @@ export function useCall(
       room = active;
       sync();
       active.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
-        if (
-          room === active &&
-          !(
-            track.kind === 'video' &&
-            publication.isMuted &&
-            track.source !== Track.Source.ScreenShare
-          )
-        ) {
+        if (room === active) {
           attachTrack(track, participant, false, publication);
           applyReceive();
         }
@@ -788,7 +788,7 @@ export function useCall(
         if (participant) trackMedia(participant, publication.source, false);
         if (publication.track?.kind === 'video') {
           const tile = attachments.get(publication.track)?.tile;
-          if (tile?.source === 'screen') {
+          if (tile?.source === 'screen' && !retainedWindowsScreen(publication)) {
             // A browser capture pause is not the end of the publication. Keep its
             // host and viewer selection so resuming does not lose the open player.
             tile.paused = true;

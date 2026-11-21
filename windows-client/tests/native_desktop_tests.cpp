@@ -1652,6 +1652,7 @@ private slots:
             QCOMPARE(SendInput(2,click,sizeof(INPUT)),2u);
         }
         QTRY_COMPARE(GetForegroundWindow(),ordinary);
+        QVERIFY(SetWindowPos(ordinary,HWND_NOTOPMOST,0,0,0,0,SWP_NOACTIVATE|SWP_NOSIZE|SWP_NOMOVE));
         win.inCall=true;win.callIdentity="solo";win.overlayLocalName="Player";
         win.overlayPrefs.enabled=true;
         win.syncGameOverlay();
@@ -1667,13 +1668,15 @@ private slots:
             UnregisterClassW(wc.lpszClassName,instance);
         });
         QVERIFY(game);
-        // No foreground change accompanies this launch or close.
-        const auto foreground=GetForegroundWindow();
+        // The game never asks for focus, even if the user switches ordinary apps.
         QVERIFY(SetWindowPos(game,HWND_TOPMOST,0,0,0,0,SWP_SHOWWINDOW|SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE));
+        POINT sample{24,24};QVERIFY(ClientToScreen(game,&sample));
+        QTRY_COMPARE(GetAncestor(WindowFromPoint(sample),GA_ROOT),game);
         const auto id=reinterpret_cast<WId>(game);
         QTRY_COMPARE_WITH_TIMEOUT(win.overlayForeground->gameWindow,id,4500);
         QVERIFY(win.gameOverlay && win.gameOverlay->isVisible());
-        QCOMPARE(GetForegroundWindow(),foreground);
+        QVERIFY(GetForegroundWindow()!=game);
+        QVERIFY(GetForegroundWindow()!=reinterpret_cast<HWND>(win.gameOverlay->winId()));
         QVERIFY(DestroyWindow(game));game=nullptr;
         QTRY_VERIFY_WITH_TIMEOUT(win.overlayForeground->gameWindow!=id,4500);
         QVERIFY(!win.gameOverlay);

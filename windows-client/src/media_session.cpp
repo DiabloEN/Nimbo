@@ -555,7 +555,8 @@ private:
         livekit::TrackPublishOptions publish;
         publish.source=share?livekit::TrackSource::SOURCE_SCREENSHARE:livekit::TrackSource::SOURCE_CAMERA;
         publish.video_encoder=options_.hardwareVideo?livekit::VideoEncoderBackend::Hardware:livekit::VideoEncoderBackend::PreEncoded;
-        publish.video_codec=livekit::VideoCodec::H264;publish.simulcast=false;publish.video_encoding=livekit::VideoEncodingOptions{3000000,30};
+        publish.video_codec=livekit::VideoCodec::H264;publish.simulcast=false;
+        publish.video_encoding=livekit::VideoEncodingOptions{static_cast<std::uint64_t>(CaptureEncoder::bitrateLimit(share)),30};
         auto participant=room_->localParticipant().lock();if(!participant)throw std::runtime_error("No local participant");
         participant->publishTrack(stream.track,publish);
     }
@@ -570,7 +571,7 @@ private:
             stream.track->unmute();
         }
         if (!options_.hardwareVideo) stream.encoder = std::make_unique<CaptureEncoder>(
-            std::static_pointer_cast<livekit::EncodedVideoSource>(stream.source));
+            std::static_pointer_cast<livekit::EncodedVideoSource>(stream.source),share);
         if(share){
             board_.session=QUuid::createUuid().toString(QUuid::WithoutBraces);
             emit owner_->inkSession({},board_.session,true);
@@ -680,7 +681,8 @@ private:
         try{
             QSize size=raw.size();if(size.height()>height_||size.width()>height_*16/9)size.scale(height_*16/9,height_,Qt::KeepAspectRatio);
             size.setWidth(qMax(2,size.width()&~1));size.setHeight(qMax(2,size.height()&~1));
-            auto image=(size==raw.size()?raw:raw.scaled(size,Qt::IgnoreAspectRatio,Qt::FastTransformation)).convertToFormat(QImage::Format_RGBA8888);
+            const auto scaling = share ? Qt::SmoothTransformation : Qt::FastTransformation;
+            auto image=(size==raw.size()?raw:raw.scaled(size,Qt::IgnoreAspectRatio,scaling)).convertToFormat(QImage::Format_RGBA8888);
             if(share && stream.mode!=3){
                 if(stream.mode==1)cleanScreen_=image;
                 if(!board_.strokes.isEmpty()){

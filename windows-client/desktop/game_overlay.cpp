@@ -9,13 +9,39 @@
 
 namespace {
 // Out-of-context foreground notifications run on the registering GUI thread.
-QHash<HWINEVENTHOOK,GameOverlay*> foregroundOverlays;
+QHash<HWINEVENTHOOK,OverlayForeground*> foregroundOverlays;
 void CALLBACK foregroundChanged(HWINEVENTHOOK hook,DWORD,HWND, LONG,LONG,DWORD,DWORD) {
-    auto* overlay=foregroundOverlays.value(hook);
-    if(overlay && overlay->isVisible()){
-        SetWindowPos(reinterpret_cast<HWND>(overlay->winId()),HWND_TOPMOST,0,0,0,0,
-                     SWP_NOACTIVATE|SWP_NOMOVE|SWP_NOSIZE|SWP_NOOWNERZORDER);
-    }
+    if(auto* observer=foregroundOverlays.value(hook))observer->refresh();
+}
+
+bool isGameWindow(HWND window) {
+    if(!window || !IsWindowVisible(window) || IsIconic(window))return false;
+    wchar_t buffer[256]{};
+    GetClassNameW(window,buffer,256);
+    const QString type=QString::fromWCharArray(buffer);
+    if(type==u"GxWindowClass" || type==u"GxWindowClassD3d" || type==u"UnityWndClass" ||
+       type==u"Valve001" || type==u"Godot")return true;
+    if(type==u"Progman" || type==u"WorkerW" || type==u"Shell_TrayWnd" || type==u"CabinetWClass" ||
+       type.startsWith(u"Chrome_WidgetWin") || type.startsWith(u"MozillaWindow") ||
+       type.startsWith(u"Qt") || type==u"GHOST_WindowClass" || type==u"#32770")return false;
+    DWORD pid=0;
+    GetWindowThreadProcessId(window,&pid);
+    if(!pid)return false;
+    HANDLE process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid);
+    if(!process)return type==u"UnrealWindow";
+    wchar_t path[MAX_PATH*4];
+    DWORD length=DWORD(std::size(path));
+    const bool found=QueryFullProcessImageNameW(process,0,path,&length);
+    CloseHandle(process);
+    if(!found)return type==u"UnrealWindow";
+    const QString image=QDir::fromNativeSeparators(QString::fromWCharArray(path,int(length))).toLower();
+    const QString exe=image.section('/',-1);
+    if(exe.contains(u"launcher") || exe.contains(u"editor") || exe.contains(u"crashreport"))return false;
+    return type==u"UnrealWindow" || exe==u"wow.exe" || exe==u"wowclassic.exe" ||
+           exe==u"wowclassict.exe" || exe==u"wowt.exe" || exe==u"atomicheart.exe" ||
+           exe.endsWith(u"-win64-shipping.exe") || image.contains(u"/steamapps/common/") ||
+           image.contains(u"/gog galaxy/games/") || image.contains(u"/gog games/") ||
+           image.contains(u"/xboxgames/");
 }
 constexpr int margin = 8, rowHeight = 36, avatarSize = 28, contentInset = 8;
 constexpr int rowInset = contentInset - (rowHeight - avatarSize) / 2;
@@ -95,6 +121,42 @@ private:
 };
 }
 
+OverlayForeground::OverlayForeground(std::function<void()> notify) : changed(std::move(notify)) {
+    auto handle=SetWinEventHook(EVENT_SYSTEM_FOREGROUND,EVENT_SYSTEM_FOREGROUND,nullptr,
+                                foregroundChanged,0,0,WINEVENT_OUTOFCONTEXT);
+    if(handle){
+        hook=handle;
+        foregroundOverlays.insert(handle,this);
+    }else{
+        qWarning("OVERLAY_FOREGROUND_HOOK: focus notifications unavailable (%lu); checking every second",GetLastError());
+        auto* retry=new QTimer(this);
+        connect(retry,&QTimer::timeout,this,&OverlayForeground::refresh);
+        retry->start(1000);
+    }
+    const auto current=GetForegroundWindow();
+    window=reinterpret_cast<WId>(current);
+    game=isGameWindow(current);
+}
+
+OverlayForeground::~OverlayForeground(){
+    if(auto handle=static_cast<HWINEVENTHOOK>(hook)){
+        foregroundOverlays.remove(handle);
+        UnhookWinEvent(handle);
+    }
+}
+
+void OverlayForeground::refresh(){
+    observe(reinterpret_cast<WId>(GetForegroundWindow()));
+}
+
+void OverlayForeground::observe(WId id){
+    if(window==id)return;
+    window=id;
+    game=isGameWindow(reinterpret_cast<HWND>(id));
+    const auto notify=changed; // Shutting down the call can release this observer.
+    notify();
+}
+
 GameOverlay::GameOverlay(QWidget& mainWindow) : QWidget(nullptr, Qt::Tool | Qt::FramelessWindowHint |
         Qt::WindowStaysOnTopHint | Qt::WindowTransparentForInput | Qt::WindowDoesNotAcceptFocus), mainWindow(mainWindow) {
     setObjectName("gameOverlay");
@@ -105,18 +167,9 @@ GameOverlay::GameOverlay(QWidget& mainWindow) : QWidget(nullptr, Qt::Tool | Qt::
     setFocusPolicy(Qt::NoFocus);
     QFont labelFont=font(); labelFont.setPixelSize(14); labelFont.setWeight(QFont::Medium);
     setFont(labelFont);
-    auto hook=SetWinEventHook(EVENT_SYSTEM_FOREGROUND,EVENT_SYSTEM_FOREGROUND,nullptr,
-                              foregroundChanged,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
-    if(hook){foregroundHook=hook;foregroundOverlays.insert(hook,this);}
     for (auto signal : {&QGuiApplication::screenAdded, &QGuiApplication::screenRemoved, &QGuiApplication::primaryScreenChanged})
         connect(qApp,signal,this,[this]{ place(); });
     languageChanged();
-}
-
-GameOverlay::~GameOverlay(){
-    if(auto hook=static_cast<HWINEVENTHOOK>(foregroundHook)){
-        foregroundOverlays.remove(hook);UnhookWinEvent(hook);
-    }
 }
 
 void GameOverlay::languageChanged() { setWindowTitle(UiText::GameOverlay()); update(); }
@@ -185,8 +238,9 @@ void GameOverlay::setPeople(const QJsonObject& local,const QJsonArray& peers) {
         const auto id=person["identity"].toString();
         if (id.isEmpty() || seen.contains(id)) return;
         seen.insert(id);
-        const bool muted=person["micKnown"].toBool() && !person["mic"].toBool();
-        next.append({id,overlayNickname(person["name"].toString(UiText::Member2())),person["speaking"].toBool() && !muted});
+        const auto mic=!person["micKnown"].toBool() ? Person::Unknown :
+                       person["mic"].toBool() ? Person::On : Person::Off;
+        next.append({id,overlayNickname(person["name"].toString(UiText::Member2())),person["speaking"].toBool() && mic!=Person::Off,mic});
     };
     append(local);
     for (auto peer : peers) append(peer.toObject());
@@ -251,6 +305,11 @@ void GameOverlay::paintEvent(QPaintEvent*) {
                 p.setPen(Qt::NoPen);p.setBrush(QColor(0,0,0,76));p.drawEllipse(box);p.restore();
             }
         }
+        if(person.mic!=Person::Unknown){
+            const QRect badge(contentInset+avatarSize-13,mid+avatarSize/2-13,15,15);
+            p.setPen(Qt::NoPen);p.setBrush(QColor("#202020"));p.drawEllipse(badge);
+            Ui::icon(person.mic==Person::On?"mic":"mic-off").paint(&p,badge.adjusted(2,2,-2,-2));
+        }
         const QRect line(textLeft,y,width()-textLeft-contentInset,rowHeight);
         p.setPen(person.speaking?Qt::white:QColor("#b3b3b3"));
         p.drawText(line,Qt::AlignLeft|Qt::AlignVCenter,metrics.elidedText(person.name,Qt::ElideRight,line.width()));
@@ -273,6 +332,18 @@ void DesktopWindow::syncGameOverlay() {
     }
     if (!overlayPrefs.enabled || (!inCall && !previewingOverlay) || leavingVoice || closingWindow) {
         previewingOverlay=false;
+        overlayForeground.reset();
+        gameOverlay.reset();
+        return;
+    }
+    if(!overlayForeground){
+        overlayForeground=std::make_unique<OverlayForeground>([this]{
+            syncGameOverlay();
+            if(gameOverlay)SetWindowPos(reinterpret_cast<HWND>(gameOverlay->winId()),HWND_TOPMOST,0,0,0,0,
+                                        SWP_NOACTIVATE|SWP_NOMOVE|SWP_NOSIZE|SWP_NOOWNERZORDER);
+        });
+    }
+    if(!overlayForeground->game && !(previewingOverlay && overlayForeground->window && overlayForeground->window==internalWinId())){
         gameOverlay.reset();
         return;
     }
@@ -283,7 +354,7 @@ void DesktopWindow::syncGameOverlay() {
     if(previewingOverlay && !inCall){
         const auto name=self["name"].toString(profile["name"].toString("Nimbo"));
         const auto id=selfId.isEmpty()?QStringLiteral("preview"):selfId;
-        gameOverlay->setPeople({{"identity",id},{"name",name},{"speaking",true}},{});
+        gameOverlay->setPeople({{"identity",id},{"name",name},{"speaking",true},{"micKnown",true},{"mic",true}},{});
         gameOverlay->syncPortraits(&avatars,callStateApi);
         gameOverlay->show();
         return;

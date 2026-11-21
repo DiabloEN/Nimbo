@@ -1,6 +1,6 @@
 # nimbo.
 
-[![Скачать Nimbo для Windows x64 · 0.3.54](windows-client/updates/download-windows.svg)](https://github.com/DiabloEN/Nimbo/releases/download/desktop-v0.3.54/Nimbo-0.3.54-Setup.exe)
+[![Скачать Nimbo для Windows x64 · 0.3.56](windows-client/updates/download-windows.svg)](https://github.com/DiabloEN/Nimbo/releases/download/desktop-v0.3.56/Nimbo-0.3.56-Setup.exe)
 
 [Релизы и история изменений](CHANGELOG.md)
 

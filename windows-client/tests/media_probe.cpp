@@ -1,4 +1,5 @@
 #include "media_session.h"
+#include "quality_window.h"
 #include <QGuiApplication>
 #include <QCommandLineParser>
 #include <QFile>
@@ -7,6 +8,7 @@
 #include <QDateTime>
 #include <QJsonObject>
 #include <QTimer>
+#include <QWindowCapture>
 #include <algorithm>
 
 // Audio is synthetic. Physical video capture is opt-in for the loopback cycle test.
@@ -16,9 +18,17 @@ int main(int argc, char** argv) {
     parser.addOptions({{"invite", "Connection file", "path"}, {"report", "Result JSON", "path"},
         {"seconds", "Duration", "seconds", "15"}, {"video", "Generated video"}, {"hardware", "Hardware encoder request"},
         {"ink-role","Exercise screen drawing in a local call","host|viewer"},
+        {"quality-window","Share the named synthetic QA window on loopback","title"},
+        {"quality-scene","Display a generated texture and HUD from a test directory","directory"},
+        {"raw-preview","Save the first synthetic QA frame submitted to the encoder","path"},
         {"capture-cycles-at", "Switch the camera and primary screen twice starting at this UTC epoch in ms", "epoch"},
         {"observe-cycles-at", "Check received camera, screen and audio during the same capture windows", "epoch"}});
     parser.process(app);
+    if(parser.isSet("quality-scene")){
+        QualityWindow scene(QDir(parser.value("quality-scene")));
+        if(!scene.valid())return 2;
+        scene.show();return app.exec();
+    }
     QFile file(parser.value("invite"));
     if (!file.open(QIODevice::ReadOnly) || file.size() > 65536) return 2;
     auto invite = QJsonDocument::fromJson(file.readAll()).object();
@@ -27,6 +37,22 @@ int main(int argc, char** argv) {
     quint64 tx = 0, rx = 0, video = 0; double peakRms = 0; bool connected = false, failed = false;
     QString encoder; bool powerEfficient = false;
     MediaSession session;
+    const auto qualityWindow=parser.value("quality-window");
+    bool hasPreview=false;
+    if(!qualityWindow.isEmpty()){
+        if(QUrl(options.url).host()!="127.0.0.1" || !qualityWindow.startsWith("Nimbo QA "))return 2;
+        QObject::connect(&session,&VoiceEvents::connectedChanged,&app,[&](bool online){
+            if(!online)return;
+            for(const auto& window:QWindowCapture::capturableWindows())if(window.description()==qualityWindow){
+                session.changeVideo(true,4,{},{},window);return;
+            }
+            failed=true;app.quit();
+        });
+        QObject::connect(&session,&VoiceEvents::participantFrame,&app,[&](QString peer,bool share,const QImage& frame){
+            if(!hasPreview && peer.isEmpty() && share && !frame.isNull())
+                hasPreview=frame.save(parser.value("raw-preview"));
+        });
+    }
     const auto inkRole=parser.value("ink-role");
     options.annotationData=!inkRole.isEmpty();
     const auto claims=QJsonDocument::fromJson(QByteArray::fromBase64(options.token.section('.',1,1).toLatin1(),QByteArray::Base64UrlEncoding)).object();
@@ -134,7 +160,7 @@ int main(int argc, char** argv) {
     });
     QTimer::singleShot(std::clamp(parser.value("seconds").toInt(), 3, 120) * 1000, &app, &QCoreApplication::quit);
     session.start(options); app.exec();
-    const bool passed = connected && !failed && tx > 100 && rx > 100 && peakRms > .005 && (!options.videoMode || video > 10)
+    const bool passed = connected && !failed && tx > 100 && (qualityWindow.isEmpty()?(rx > 100 && peakRms > .005):hasPreview) && (!options.videoMode || video > 10)
         && (!observe || (cycles.size() == 2 && cycleCheck)) && (inkRole.isEmpty() || (inkPhase==4 && inkRounds==5));
     QJsonObject result{{"passed", passed}, {"connected", connected}, {"failed", failed}, {"sentAudio", qint64(tx)},
         {"receivedAudio", qint64(rx)}, {"receivedVideo", qint64(video)}, {"peakReceivedRms", peakRms},

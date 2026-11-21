@@ -9,7 +9,6 @@
 #include <stdexcept>
 
 namespace {
-constexpr int maxBitrate = 3000000;
 struct EncoderDeleter {
     void operator()(ISVCEncoder* encoder) const {
         encoder->Uninitialize();
@@ -35,7 +34,8 @@ Encoder openEncoder(QSize size, int bitrate) {
     return encoder;
 }
 
-bool encode(ISVCEncoder& encoder, const QImage& image, livekit::EncodedVideoSource& destination) {
+bool encode(ISVCEncoder& encoder, const QImage& image, livekit::EncodedVideoSource& destination,
+            std::chrono::steady_clock::time_point started) {
     const int w = image.width(), h = image.height();
     auto rgba = livekit::VideoFrame::create(w, h, livekit::VideoBufferType::RGBA);
     for (int y = 0; y < h; ++y) std::memcpy(rgba.data() + y*w*4, image.constScanLine(y), w*4);
@@ -51,7 +51,7 @@ bool encode(ISVCEncoder& encoder, const QImage& image, livekit::EncodedVideoSour
         picture.iStride[i] = int(planes[i].stride);
     }
     picture.uiTimeStamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
+        std::chrono::steady_clock::now() - started).count();
     SFrameBSInfo info{};
     if (encoder.EncodeFrame(&picture, &info) != 0) throw std::runtime_error("H.264 frame encoding failed");
     if (!info.iFrameSizeInBytes) return false;
@@ -69,8 +69,8 @@ bool encode(ISVCEncoder& encoder, const QImage& image, livekit::EncodedVideoSour
 }
 }
 
-CaptureEncoder::CaptureEncoder(std::shared_ptr<livekit::EncodedVideoSource> source)
-    : source_(std::move(source)), worker_(&CaptureEncoder::run, this) {}
+CaptureEncoder::CaptureEncoder(std::shared_ptr<livekit::EncodedVideoSource> source, bool screenShare)
+    : source_(std::move(source)), bitrateLimit_(bitrateLimit(screenShare)), worker_(&CaptureEncoder::run, this) {}
 
 CaptureEncoder::~CaptureEncoder() {
     {
@@ -94,8 +94,9 @@ void CaptureEncoder::submit(const QImage& rgba) {
 void CaptureEncoder::run() {
     try {
         Encoder encoder;
+        std::chrono::steady_clock::time_point started;
         QSize size;
-        int bitrate = maxBitrate;
+        int bitrate = bitrateLimit_;
         bool needKeyframe = true;
         for (;;) {
             QImage image;
@@ -107,7 +108,7 @@ void CaptureEncoder::run() {
             }
             const auto feedback = source_->takeFeedback();
             if (feedback.rate_control && feedback.rate_control->target_bitrate_bps) {
-                const int target = int(std::clamp<std::uint64_t>(feedback.rate_control->target_bitrate_bps, 16000, maxBitrate));
+                const int target = int(std::clamp<std::uint64_t>(feedback.rate_control->target_bitrate_bps, 16000, bitrateLimit_));
                 if (target != bitrate && encoder) {
                     SBitrateInfo rate{SPATIAL_LAYER_ALL, target};
                     encoder->SetOption(ENCODER_OPTION_BITRATE, &rate);
@@ -118,11 +119,12 @@ void CaptureEncoder::run() {
                 encoder.reset();
                 size = image.size();
                 encoder = openEncoder(size, bitrate);
+                started = std::chrono::steady_clock::now();
                 needKeyframe = true;
             }
             needKeyframe |= feedback.keyframe_requested;
             if (needKeyframe) encoder->ForceIntraFrame(true);
-            if (encode(*encoder, image, *source_)) needKeyframe = false;
+            if (encode(*encoder, image, *source_, started)) needKeyframe = false;
         }
     } catch (...) {
         std::lock_guard lock(mutex_);

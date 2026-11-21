@@ -1,12 +1,29 @@
 #pragma once
 #include "api.h"
 #include <memory>
+#include <functional>
 
 #include <QJsonArray>
 #include <QPainter>
 #include <QPointer>
 #include <QScreen>
 #include <QWidget>
+#include <QTimer>
+
+class OverlayForeground final : public QObject {
+public:
+    explicit OverlayForeground(std::function<void()> changed);
+    ~OverlayForeground() override;
+    void refresh();
+private:
+    friend class DesktopWindow;
+    friend class NativeDesktopTests;
+    void observe(WId foreground);
+    bool game = false;
+    WId window = 0;
+    std::function<void()> changed;
+    void* hook = nullptr;
+};
 
 struct OverlayPreferences {
     bool enabled = false;
@@ -19,7 +36,6 @@ struct OverlayPreferences {
 class GameOverlay final : public QWidget {
 public:
     explicit GameOverlay(QWidget& mainWindow);
-    ~GameOverlay() override;
     void configure(const OverlayPreferences& preferences);
     void setPeople(const QJsonObject& local, const QJsonArray& peers);
     void syncPortraits(const QHash<QString,QPixmap>* roomAvatars, const ServerApi& call);
@@ -29,6 +45,7 @@ private:
     struct Person {
         QString id, name;
         bool speaking;
+        enum Microphone { Unknown, On, Off } mic;
         bool operator==(const Person&) const = default;
     };
     void paintEvent(QPaintEvent*) override;
@@ -39,7 +56,6 @@ private:
     QList<Person> visiblePeople() const;
     OverlayPreferences preferences;
     QWidget& mainWindow;
-    void* foregroundHook=nullptr;
     QList<Person> people;
     QPointer<QScreen> target;
     QMetaObject::Connection geometryChanged;

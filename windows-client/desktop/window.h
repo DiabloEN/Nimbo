@@ -95,6 +95,7 @@ private:
     bool previewingOverlay=false;
     QPointer<QPushButton> overlayPreviewButton;
     QString overlayLocalName;
+    std::unique_ptr<OverlayForeground> overlayForeground;
     std::unique_ptr<GameOverlay> gameOverlay;
     void syncGameOverlay();
     void renderOverlaySettings(QVBoxLayout* body);

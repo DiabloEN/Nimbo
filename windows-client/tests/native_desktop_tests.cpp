@@ -731,12 +731,27 @@ private slots:
             QVERIFY(GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory),sizeof(memory)));
             qInfo()<<mode<<cycle<<stage<<"privateWS"<<qulonglong(memory.PrivateWorkingSetSize)<<"queues"<<w.media->activeEncoderQueues();
         };
+        const bool physical=qEnvironmentVariableIsSet("NIMBO_QA_PHYSICAL_VIDEO_CYCLES");
+        const int cameraOn=physical ? 2 : 1;
+        const int screenOn=physical ? 3 : 1;
+        int cameraFrames=0,screenFrames=0;
+        QObject frameObserver;
+        connect(w.media.get(),&VoiceEvents::participantFrame,&frameObserver,[&](const QString& member,bool screen,const QImage& frame){
+            if(member.isEmpty() && !frame.isNull()){
+                if(screen)++screenFrames;else ++cameraFrames;
+            }
+        });
         for(QString mode:{"control","camera","screen","both"}){
             bool camera=mode=="camera" || mode=="both",screen=mode=="screen" || mode=="both";
             for(int i=1;i<=5;++i){
-                if(camera)w.media->changeVideo(false,1,{}, {},{});
-                if(screen)w.media->changeVideo(true,1,{}, {},{});
-                QTRY_VERIFY(w.cameraMode==int(camera) && w.screenMode==int(screen));
+                const int priorCamera=cameraFrames,priorScreen=screenFrames;
+                if(camera)w.media->changeVideo(false,cameraOn,{}, {},{});
+                if(screen)w.media->changeVideo(true,screenOn,{}, {},{});
+                QTRY_VERIFY(w.cameraMode==(camera?cameraOn:0) && w.screenMode==(screen?screenOn:0));
+                if(physical){
+                    QTRY_VERIFY_WITH_TIMEOUT(!camera || cameraFrames>priorCamera,12000);
+                    QTRY_VERIFY_WITH_TIMEOUT(!screen || screenFrames>priorScreen,12000);
+                }
                 QTest::qWait(600);QCOMPARE(w.media->activeEncoderQueues(),int(camera)+int(screen));sample(mode,i,"on");
                 if(camera)w.media->changeVideo(false,0,{}, {},{});
                 if(screen)w.media->changeVideo(true,0,{}, {},{});
@@ -744,7 +759,17 @@ private slots:
                 QTest::qWait(600);QCOMPARE(w.media->activeEncoderQueues(),0);sample(mode,i,"off");
             }
         }
+        if(physical){
+            QTest::qWait(30000);
+            sample("voice",0,"rest");
+        }
         w.leaveCall();QTRY_VERIFY(!w.inCall);
+        if(physical){
+            QTest::qWait(1000);
+            PROCESS_MEMORY_COUNTERS_EX2 memory{};memory.cb=sizeof(memory);
+            QVERIFY(GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory),sizeof(memory)));
+            qInfo()<<"left privateWS"<<qulonglong(memory.PrivateWorkingSetSize);
+        }
     }
     void recoverStalledVoiceOutput(){
         const auto url=qEnvironmentVariable("NIMBO_NATIVE_TEST_URL");
@@ -1475,14 +1500,18 @@ private slots:
         win.openView("overlay");
         auto* toggle=win.detailPage->findChild<QCheckBox*>();QVERIFY(toggle);
         QTest::mouseClick(toggle,Qt::LeftButton);
-        QVERIFY(win.gameOverlay && win.previewingOverlay);
-        auto& hud=*win.gameOverlay;QVERIFY(QTest::qWaitForWindowExposed(&hud));
+        QVERIFY(win.previewingOverlay);
+        win.inCall=true;win.callIdentity="qa";win.overlayLocalName="Nimbo";win.localSpeaking=true;
+        win.callOrigin=win.api.server.toString();
+        win.syncGameOverlay();
         if(GetForegroundWindow()!=game)switched=SetForegroundWindow(game);
         QElapsedTimer foregroundWait;foregroundWait.start();
         while(GetForegroundWindow()!=game && foregroundWait.elapsed()<60000)QTest::qWait(100);
         if(GetForegroundWindow()!=game)QSKIP("WoW did not receive foreground");
+        QTRY_VERIFY(win.gameOverlay && win.gameOverlay->isVisible());
         auto visible=[&]{
-            const auto handle=reinterpret_cast<HWND>(hud.winId());
+            if(!win.gameOverlay)return false;
+            const auto handle=reinterpret_cast<HWND>(win.gameOverlay->winId());
             const auto scale=GetDpiForWindow(handle)/96.;
             POINT p{qRound(18*scale),qRound(22*scale)};ClientToScreen(handle,&p);
             if(GetAncestor(WindowFromPoint(p),GA_ROOT)!=game)return false;
@@ -1491,6 +1520,80 @@ private slots:
         };
         QTRY_VERIFY_WITH_TIMEOUT(visible(),4000);
         for(int i=0;i<15;++i){QTest::qWait(1000);QVERIFY(GetForegroundWindow()==game);QVERIFY(visible());}
+    }
+    void gameOverlayForegroundSwitch(){
+        if(QGuiApplication::platformName()!="windows")QSKIP("Native Windows foreground events");
+        const HWND previous=GetForegroundWindow();
+        POINT originalCursor{};GetCursorPos(&originalCursor);
+        const bool interactive=qEnvironmentVariableIsSet("NIMBO_QA_OVERLAY_FOCUS");
+        QTemporaryDir dir;
+        DesktopWindow win(dir.path(),true);
+        win.show();
+        win.inCall=true;win.callIdentity="solo";win.overlayLocalName="Player";
+        win.overlayPrefs.enabled=true;
+        win.syncGameOverlay();
+        QVERIFY(win.overlayForeground);
+        const auto instance=GetModuleHandleW(nullptr);
+        WNDCLASSW wc{};wc.lpfnWndProc=DefWindowProcW;wc.hInstance=instance;
+        wc.lpszClassName=L"GxWindowClass";
+        QVERIFY(RegisterClassW(&wc));
+        wc.lpszClassName=L"UnrealWindow";
+        QVERIFY(RegisterClassW(&wc));
+        const HWND wow=CreateWindowW(L"GxWindowClass",L"Nimbo QA",WS_OVERLAPPEDWINDOW,60,60,240,140,nullptr,nullptr,instance,nullptr);
+        const HWND unreal=CreateWindowW(L"UnrealWindow",L"Nimbo QA",WS_OVERLAPPEDWINDOW,60,60,240,140,nullptr,nullptr,instance,nullptr);
+        const auto cleanup=qScopeGuard([&]{
+            DestroyWindow(wow);DestroyWindow(unreal);
+            UnregisterClassW(L"GxWindowClass",instance);UnregisterClassW(L"UnrealWindow",instance);
+            if(interactive){
+                SetCursorPos(originalCursor.x,originalCursor.y);
+                if(previous)SetForegroundWindow(previous);
+            }
+        });
+        QVERIFY(wow && unreal);
+        auto foreground=[&](HWND target){
+            ShowWindow(target,SW_SHOWNOACTIVATE);
+            if(!interactive){
+                win.overlayForeground->observe(reinterpret_cast<WId>(target));
+                return;
+            }
+            // Windows may decline programmatic activation by a background test runner.
+            // Click only the verified title bar of the test's own window.
+            if(!SetForegroundWindow(target)){
+                SetWindowPos(target,HWND_TOPMOST,0,0,0,0,SWP_NOACTIVATE|SWP_NOMOVE|SWP_NOSIZE);
+                RECT rect{};QVERIFY(GetWindowRect(target,&rect));
+                const POINT point{rect.left+65,rect.top+12};
+                QCOMPARE(GetAncestor(WindowFromPoint(point),GA_ROOT),target);
+                QVERIFY(SetCursorPos(point.x,point.y));
+                INPUT click[2]{};click[0].type=click[1].type=INPUT_MOUSE;
+                click[0].mi.dwFlags=MOUSEEVENTF_LEFTDOWN;click[1].mi.dwFlags=MOUSEEVENTF_LEFTUP;
+                QCOMPARE(SendInput(2,click,sizeof(INPUT)),2u);
+                QTRY_VERIFY(GetForegroundWindow()==target);
+                SetWindowPos(target,HWND_NOTOPMOST,0,0,0,0,SWP_NOACTIVATE|SWP_NOMOVE|SWP_NOSIZE);
+            }
+            QTRY_VERIFY(GetForegroundWindow()==target);
+        };
+        auto memorySample=[](const char* phase){
+            PROCESS_MEMORY_COUNTERS_EX2 memory{};memory.cb=sizeof(memory);
+            QVERIFY(GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory),sizeof(memory)));
+            qInfo()<<phase<<"privateWS"<<qulonglong(memory.PrivateWorkingSetSize);
+        };
+        memorySample("before");
+        for(auto game:{wow,unreal,wow,unreal,wow}){
+            foreground(game);
+            QTRY_VERIFY(win.gameOverlay && win.gameOverlay->isVisible());
+            memorySample("shown");
+            QPointer<GameOverlay> old(win.gameOverlay.get());
+            foreground(reinterpret_cast<HWND>(win.winId()));
+            QTRY_VERIFY(old.isNull() && !win.gameOverlay);
+            win.updateLocalPerson();
+            QVERIFY(!win.gameOverlay);
+            memorySample("hidden");
+        }
+        win.overlayForeground->observe(reinterpret_cast<WId>(GetShellWindow()));
+        QVERIFY(!win.gameOverlay);
+        win.setCall(false);
+        QVERIFY(!win.overlayForeground && !win.gameOverlay);
+        memorySample("left");
     }
     void gameOverlayNicknameWidth(){
         QWidget parent;
@@ -1520,6 +1623,20 @@ private slots:
         QCOMPARE(hud.width(),nameWidth(graphemes+QChar(0x2026)));
         const QString shortName=QString::fromUtf8("Десигнер");
         showPeer(shortName);QCOMPARE(hud.width(),nameWidth(shortName));
+        auto microphone=[&](){
+            const auto image=hud.grab().toImage();
+            const qreal dpr=image.devicePixelRatio();
+            return image.copy(qRound(23*dpr),qRound(59*dpr),qRound(15*dpr),qRound(15*dpr));
+        };
+        const auto openMic=microphone();
+        peer["mic"]=false;hud.setPeople(local,{peer});
+        const auto mutedMic=microphone();
+        QVERIFY(mutedMic!=openMic);
+        peer["micKnown"]=false;hud.setPeople(local,{peer});
+        const auto unknownMic=microphone();
+        QVERIFY(unknownMic!=mutedMic && unknownMic!=openMic);
+        peer["micKnown"]=true;hud.setPeople(local,{peer});QCOMPARE(microphone(),mutedMic);
+        local["micKnown"]=true;local["mic"]=true;hud.setPeople(local,{peer});
         if(const auto shot=qEnvironmentVariable("NIMBO_QA_OVERLAY_NAMES");!shot.isEmpty()){
             ServerApi api;QHash<QString,QPixmap> portraits;
             hud.syncPortraits(&portraits,api);
@@ -1550,8 +1667,17 @@ private slots:
         auto* enabled=settings.findChild<QCheckBox*>();
         QVERIFY(enabled && !enabled->isChecked());
         auto hasTitle=[&](QString title){for(auto* l:settings.findChildren<QLabel*>())if(l->text()==title)return true;return false;};
+        // Exercise widget layout even on offscreen CI. The native focus transition
+        // is exercised independently by gameOverlayForegroundSwitch.
+        auto selectSurface=[&](bool game){
+            QVERIFY(win.overlayForeground);
+            win.overlayForeground->window=win.winId();
+            win.overlayForeground->game=game;
+            win.syncGameOverlay();
+        };
         QVERIFY(hasTitle(UiText::EnableGameOverlay()));
         enabled->setChecked(true);
+        selectSurface(false);
         QVERIFY(hasTitle(UiText::DisableGameOverlay()));
         QVERIFY(win.gameOverlay && win.previewingOverlay);
         auto* slider=settings.findChild<QSlider*>("opacity");
@@ -1588,7 +1714,7 @@ private slots:
         QCOMPARE(samplePixel(0,0).alpha(),0);
         background->setValue(0);
         preview->click();QVERIFY(!win.gameOverlay);QCOMPARE(preview->text(),UiText::TestGameOverlay());
-        preview->click();QVERIFY(win.gameOverlay);win.openView("general");QVERIFY(!win.gameOverlay);
+        preview->click();selectSurface(false);QVERIFY(win.gameOverlay);win.openView("general");QVERIFY(!win.gameOverlay);
         slider->setValue(100);
         win.overlayLocalName="Local";
         win.api.server=QUrl("http://origin");
@@ -1604,6 +1730,7 @@ private slots:
         QVERIFY(QTest::qWaitForWindowExposed(&game));
         const auto foreground=GetForegroundWindow();
         win.syncGameOverlay();
+        selectSurface(true);
         QVERIFY(win.gameOverlay);
         auto* hud=win.gameOverlay.get();
         QVERIFY(QTest::qWaitForWindowExposed(hud));
@@ -1672,7 +1799,7 @@ private slots:
         QCOMPARE(win.overlayPrefs.position,QPoint(95,100));
         QPointer<QWidget> old=hud;
         enabled->setChecked(false); QVERIFY(old.isNull());
-        enabled->setChecked(true); QVERIFY(win.gameOverlay);
+        enabled->setChecked(true);selectSurface(true);QVERIFY(win.gameOverlay);
         win.setCall(false); QVERIFY(!win.gameOverlay);
         DesktopWindow reopened(dir.path(),true);
         QCOMPARE(reopened.overlayPrefs.position,QPoint(95,100));

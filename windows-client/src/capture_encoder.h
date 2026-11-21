@@ -11,12 +11,14 @@ namespace livekit { class EncodedVideoSource; }
 // One worker per active capture. A slow encode replaces the pending frame.
 class CaptureEncoder final {
 public:
-    explicit CaptureEncoder(std::shared_ptr<livekit::EncodedVideoSource> source);
+    static constexpr int bitrateLimit(bool screenShare) { return screenShare ? 8000000 : 3000000; }
+    CaptureEncoder(std::shared_ptr<livekit::EncodedVideoSource> source, bool screenShare);
     ~CaptureEncoder();
     void submit(const QImage& rgba);
 private:
     void run();
     std::shared_ptr<livekit::EncodedVideoSource> source_;
+    const int bitrateLimit_;
     std::mutex mutex_;
     std::condition_variable wake_;
     QImage next_;

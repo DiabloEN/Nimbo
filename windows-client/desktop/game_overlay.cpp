@@ -4,8 +4,10 @@
 #include "ui.h"
 #include <QtWidgets>
 #include <QTextBoundaryFinder>
+#include <QtGui/qscreen_platform.h>
 #include <algorithm>
 #include <windows.h>
+#include <dwmapi.h>
 
 namespace {
 // Out-of-context foreground notifications run on the registering GUI thread.
@@ -19,7 +21,7 @@ bool isGameWindow(HWND window) {
     wchar_t buffer[256]{};
     GetClassNameW(window,buffer,256);
     const QString type=QString::fromWCharArray(buffer);
-    if(type==u"GxWindowClass" || type==u"GxWindowClassD3d" || type==u"UnityWndClass" ||
+    if(type==u"GxWindowClass" || type==u"GxWindowClassD3d" || type==u"waApplication Window" || type==u"UnityWndClass" ||
        type==u"Valve001" || type==u"Godot")return true;
     if(type==u"Progman" || type==u"WorkerW" || type==u"Shell_TrayWnd" || type==u"CabinetWClass" ||
        type.startsWith(u"Chrome_WidgetWin") || type.startsWith(u"MozillaWindow") ||
@@ -64,6 +66,65 @@ QPoint boundedPosition(QPoint p) {
 
 QPoint offset(const QSize& travel, QPoint percent) {
     return {qRound(travel.width() * percent.x() / 100.), qRound(travel.height() * percent.y() / 100.)};
+}
+
+// Win32 reports physical pixels. Qt uses logical offsets from each screen's origin.
+QRect gameClientBounds(HWND window) {
+    RECT client{};
+    if(!window || !GetClientRect(window,&client) || IsRectEmpty(&client))return {};
+    POINT origin{};
+    if(!ClientToScreen(window,&origin))return {};
+    OffsetRect(&client,origin.x,origin.y);
+    MONITORINFOEXW monitor{};monitor.cbSize=sizeof(monitor);
+    const auto handle=MonitorFromWindow(window,MONITOR_DEFAULTTONEAREST);
+    if(!GetMonitorInfoW(handle,&monitor))return {};
+    RECT visible{};
+    if(!IntersectRect(&visible,&client,&monitor.rcWork))return {};
+    for(auto* screen:QGuiApplication::screens()){
+        const auto native=screen->nativeInterface<QNativeInterface::QWindowsScreen>();
+        if(!native || native->handle()!=handle)continue;
+        const auto scale=screen->devicePixelRatio();
+        const auto topLeft=screen->geometry().topLeft()+QPoint(qRound((visible.left-monitor.rcMonitor.left)/scale),
+                                                               qRound((visible.top-monitor.rcMonitor.top)/scale));
+        return {topLeft,QSize(qRound((visible.right-visible.left)/scale),qRound((visible.bottom-visible.top)/scale))};
+    }
+    return {};
+}
+
+struct GameSearch {
+    const OverlayPreferences& prefs;
+    HMONITOR preferred;
+    HWND found=nullptr;
+    HWND alternate=nullptr;
+};
+
+BOOL CALLBACK findVisibleGame(HWND window,LPARAM context) {
+    auto& search=*reinterpret_cast<GameSearch*>(context);
+    if(!IsWindowVisible(window) || IsIconic(window) || (GetWindowLongPtrW(window,GWL_EXSTYLE)&WS_EX_TOOLWINDOW))return TRUE;
+    RECT client{};
+    if(!GetClientRect(window,&client) || IsRectEmpty(&client))return TRUE;
+    MONITORINFOEXW monitor{};monitor.cbSize=sizeof(monitor);
+    const auto handle=MonitorFromWindow(window,MONITOR_DEFAULTTONEAREST);
+    if(!GetMonitorInfoW(handle,&monitor))return TRUE;
+    POINT origin{};
+    if(!ClientToScreen(window,&origin))return TRUE;
+    OffsetRect(&client,origin.x,origin.y);
+    RECT area{};
+    if(!IntersectRect(&area,&client,&monitor.rcWork))return TRUE;
+    const auto insetX=qMin<LONG>(24,(area.right-area.left-1)/2);
+    const auto insetY=qMin<LONG>(24,(area.bottom-area.top-1)/2);
+    const auto pos=search.prefs.position;
+    POINT point{area.left+insetX+MulDiv(area.right-area.left-1-2*insetX,pos.x(),100),
+                area.top+insetY+MulDiv(area.bottom-area.top-1-2*insetY,pos.y(),100)};
+    if(GetAncestor(WindowFromPoint(point),GA_ROOT)!=window || !isGameWindow(window))return TRUE;
+    DWORD cloaked=0;
+    if(SUCCEEDED(DwmGetWindowAttribute(window,DWMWA_CLOAKED,&cloaked,sizeof(cloaked))) && cloaked)return TRUE;
+    if(handle!=search.preferred){
+        if(!search.alternate)search.alternate=window;
+        return TRUE;
+    }
+    search.found=window;
+    return FALSE;
 }
 
 class OverlayPlacement final : public QWidget {
@@ -121,7 +182,8 @@ private:
 };
 }
 
-OverlayForeground::OverlayForeground(std::function<void()> notify) : changed(std::move(notify)) {
+OverlayForeground::OverlayForeground(const OverlayPreferences& prefs,std::function<void()> notify)
+    : preferences(prefs) {
     auto handle=SetWinEventHook(EVENT_SYSTEM_FOREGROUND,EVENT_SYSTEM_FOREGROUND,nullptr,
                                 foregroundChanged,0,0,WINEVENT_OUTOFCONTEXT);
     if(handle){
@@ -133,9 +195,8 @@ OverlayForeground::OverlayForeground(std::function<void()> notify) : changed(std
         connect(retry,&QTimer::timeout,this,&OverlayForeground::refresh);
         retry->start(1000);
     }
-    const auto current=GetForegroundWindow();
-    window=reinterpret_cast<WId>(current);
-    game=isGameWindow(current);
+    refresh();
+    changed=std::move(notify);
 }
 
 OverlayForeground::~OverlayForeground(){
@@ -146,13 +207,29 @@ OverlayForeground::~OverlayForeground(){
 }
 
 void OverlayForeground::refresh(){
-    observe(reinterpret_cast<WId>(GetForegroundWindow()));
+    const auto foreground=GetForegroundWindow();
+    auto candidate=foreground;
+    if(!isGameWindow(candidate)){
+        auto* screen=QGuiApplication::primaryScreen();
+        for(auto* item:QGuiApplication::screens())
+            if(item->name()==preferences.screen){screen=item;break;}
+        auto native=screen?screen->nativeInterface<QNativeInterface::QWindowsScreen>():nullptr;
+        GameSearch search{preferences,native?native->handle():nullptr};
+        if(gameWindow)findVisibleGame(reinterpret_cast<HWND>(gameWindow),reinterpret_cast<LPARAM>(&search));
+        if(!search.found)EnumWindows(findVisibleGame,reinterpret_cast<LPARAM>(&search));
+        candidate=search.found?search.found:search.alternate;
+    }
+    observe(reinterpret_cast<WId>(foreground),reinterpret_cast<WId>(candidate));
 }
 
-void OverlayForeground::observe(WId id){
-    if(window==id)return;
+void OverlayForeground::observe(WId id,WId candidate){
+    const auto bounds=gameClientBounds(reinterpret_cast<HWND>(candidate));
+    if(window==id && gameWindow==candidate && gameBounds==bounds)return;
     window=id;
-    game=isGameWindow(reinterpret_cast<HWND>(id));
+    gameWindow=candidate;
+    gameBounds=bounds;
+    game=candidate!=0;
+    if(!changed)return;
     const auto notify=changed; // Shutting down the call can release this observer.
     notify();
 }
@@ -192,6 +269,12 @@ void GameOverlay::configure(const OverlayPreferences& prefs) {
     update();
 }
 
+void GameOverlay::setGameBounds(QRect bounds) {
+    if(gameBounds==bounds)return;
+    gameBounds=bounds;
+    place();
+}
+
 int GameOverlay::visibleRows() const {
     return target ? qBound(1,(target->availableGeometry().height()-2*margin-2*rowInset)/rowHeight,10) : 10;
 }
@@ -214,6 +297,7 @@ void GameOverlay::place() {
     auto* screen=QGuiApplication::primaryScreen();
     for (auto* candidate : QGuiApplication::screens())
         if (candidate->name()==preferences.screen) { screen=candidate; break; }
+    if (!gameBounds.isEmpty())screen=QGuiApplication::screenAt(gameBounds.center());
     if (!screen) return;
     if (target!=screen) {
         disconnect(geometryChanged);
@@ -221,7 +305,8 @@ void GameOverlay::place() {
         geometryChanged=connect(screen,&QScreen::availableGeometryChanged,this,[this]{ place(); });
         setScreen(screen);
     }
-    const auto area=screen->availableGeometry().adjusted(margin,margin,-margin,-margin);
+    const auto area=(gameBounds.isEmpty()?screen->availableGeometry():gameBounds).adjusted(margin,margin,-margin,-margin);
+    if(area.isEmpty())return;
     const auto rows=visiblePeople();
     const QFontMetricsF metrics(font(),this);
     qreal nameWidth=0;
@@ -305,10 +390,10 @@ void GameOverlay::paintEvent(QPaintEvent*) {
                 p.setPen(Qt::NoPen);p.setBrush(QColor(0,0,0,76));p.drawEllipse(box);p.restore();
             }
         }
-        if(person.mic!=Person::Unknown){
+        if(person.mic==Person::Off){
             const QRect badge(contentInset+avatarSize-13,mid+avatarSize/2-13,15,15);
             p.setPen(Qt::NoPen);p.setBrush(QColor("#202020"));p.drawEllipse(badge);
-            Ui::icon(person.mic==Person::On?"mic":"mic-off").paint(&p,badge.adjusted(2,2,-2,-2));
+            Ui::icon("mic-off").paint(&p,badge.adjusted(2,2,-2,-2));
         }
         const QRect line(textLeft,y,width()-textLeft-contentInset,rowHeight);
         p.setPen(person.speaking?Qt::white:QColor("#b3b3b3"));
@@ -337,11 +422,12 @@ void DesktopWindow::syncGameOverlay() {
         return;
     }
     if(!overlayForeground){
-        overlayForeground=std::make_unique<OverlayForeground>([this]{
+        overlayForeground=std::make_unique<OverlayForeground>(overlayPrefs,[this]{
             syncGameOverlay();
             if(gameOverlay)SetWindowPos(reinterpret_cast<HWND>(gameOverlay->winId()),HWND_TOPMOST,0,0,0,0,
                                         SWP_NOACTIVATE|SWP_NOMOVE|SWP_NOSIZE|SWP_NOOWNERZORDER);
         });
+        connect(&voiceControlTimer,&QTimer::timeout,overlayForeground.get(),&OverlayForeground::refresh);
     }
     if(!overlayForeground->game && !(previewingOverlay && overlayForeground->window && overlayForeground->window==internalWinId())){
         gameOverlay.reset();
@@ -351,6 +437,7 @@ void DesktopWindow::syncGameOverlay() {
         gameOverlay=std::make_unique<GameOverlay>(*this);
         gameOverlay->configure(overlayPrefs);
     }
+    gameOverlay->setGameBounds(overlayForeground->gameBounds);
     if(previewingOverlay && !inCall){
         const auto name=self["name"].toString(profile["name"].toString("Nimbo"));
         const auto id=selfId.isEmpty()?QStringLiteral("preview"):selfId;

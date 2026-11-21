@@ -11,6 +11,7 @@
 #include "server_updates_panel.h"
 #include "link_card.h"
 #include <QTcpServer>
+#include <QtGui/qscreen_platform.h>
 #include <QTcpSocket>
 #include "invitation_settings.h"
 #include "background.h"
@@ -1519,7 +1520,39 @@ private slots:
             return color!=CLR_INVALID && abs(GetRValue(color)-247)<8 && abs(GetGValue(color)-33)<8 && abs(GetBValue(color)-181)<8;
         };
         QTRY_VERIFY_WITH_TIMEOUT(visible(),4000);
-        for(int i=0;i<15;++i){QTest::qWait(1000);QVERIFY(GetForegroundWindow()==game);QVERIFY(visible());}
+        if(qEnvironmentVariableIsSet("NIMBO_QA_WOW_SECOND_SCREEN")){
+            HMONITOR second=nullptr;
+            for(auto* screen:QGuiApplication::screens()){
+                auto* native=screen->nativeInterface<QNativeInterface::QWindowsScreen>();
+                if(native && native->handle()!=MonitorFromWindow(game,MONITOR_DEFAULTTONEAREST)){
+                    second=native->handle();break;
+                }
+            }
+            QVERIFY2(second,"Requires a second monitor");
+            const auto settings=reinterpret_cast<HWND>(win.winId());
+            MONITORINFO info{sizeof(info)};
+            QVERIFY(GetMonitorInfoW(second,&info));
+            QVERIFY(SetWindowPos(settings,HWND_TOPMOST,info.rcWork.left+30,info.rcWork.top+30,0,0,
+                                 SWP_NOSIZE|SWP_SHOWWINDOW|SWP_NOACTIVATE));
+            QTRY_COMPARE(MonitorFromWindow(settings,MONITOR_DEFAULTTONEAREST),second);
+            if(!SetForegroundWindow(settings)){
+                // Activate only our own QA window, on the other monitor.
+                RECT frame{};QVERIFY(GetWindowRect(settings,&frame));
+                POINT point{frame.left+90,frame.top+16};
+                QCOMPARE(GetAncestor(WindowFromPoint(point),GA_ROOT),settings);
+                POINT previousCursor{};QVERIFY(GetCursorPos(&previousCursor));
+                QVERIFY(SetCursorPos(point.x,point.y));
+                auto restoreCursor=qScopeGuard([&]{SetCursorPos(previousCursor.x,previousCursor.y);});
+                INPUT click[2]{};click[0].type=click[1].type=INPUT_MOUSE;
+                click[0].mi.dwFlags=MOUSEEVENTF_LEFTDOWN;click[1].mi.dwFlags=MOUSEEVENTF_LEFTUP;
+                QCOMPARE(SendInput(2,click,sizeof(INPUT)),2u);
+                QTRY_COMPARE_WITH_TIMEOUT(GetForegroundWindow(),settings,1500);
+            }
+            QTRY_COMPARE_WITH_TIMEOUT(GetForegroundWindow(),settings,10000);
+            for(int i=0;i<5;++i){QTest::qWait(1000);QVERIFY(GetForegroundWindow()==settings);QVERIFY(visible());}
+        }else{
+            for(int i=0;i<15;++i){QTest::qWait(1000);QVERIFY(GetForegroundWindow()==game);QVERIFY(visible());}
+        }
     }
     void gameOverlayForegroundSwitch(){
         if(QGuiApplication::platformName()!="windows")QSKIP("Native Windows foreground events");
@@ -1553,7 +1586,8 @@ private slots:
         auto foreground=[&](HWND target){
             ShowWindow(target,SW_SHOWNOACTIVATE);
             if(!interactive){
-                win.overlayForeground->observe(reinterpret_cast<WId>(target));
+                win.overlayForeground->observe(reinterpret_cast<WId>(target),
+                    (target==wow || target==unreal)?reinterpret_cast<WId>(target):0);
                 return;
             }
             // Windows may decline programmatic activation by a background test runner.
@@ -1583,17 +1617,67 @@ private slots:
             QTRY_VERIFY(win.gameOverlay && win.gameOverlay->isVisible());
             memorySample("shown");
             QPointer<GameOverlay> old(win.gameOverlay.get());
+            ShowWindow(game,SW_HIDE);
             foreground(reinterpret_cast<HWND>(win.winId()));
             QTRY_VERIFY(old.isNull() && !win.gameOverlay);
             win.updateLocalPerson();
             QVERIFY(!win.gameOverlay);
             memorySample("hidden");
         }
-        win.overlayForeground->observe(reinterpret_cast<WId>(GetShellWindow()));
+        win.overlayForeground->observe(reinterpret_cast<WId>(GetShellWindow()),0);
         QVERIFY(!win.gameOverlay);
         win.setCall(false);
         QVERIFY(!win.overlayForeground && !win.gameOverlay);
         memorySample("left");
+    }
+    void gameOverlayGameStartsDuringCall(){
+        if(QGuiApplication::platformName()!="windows")QSKIP("Requires Windows");
+        QTemporaryDir dir;
+        DesktopWindow win(dir.path(),true);
+        // Cover any real game already running on the test monitor. The fixture
+        // then starts the first visible game while this ordinary window keeps focus.
+        win.show();
+        const HWND ordinary=reinterpret_cast<HWND>(win.winId());
+        MONITORINFO monitor{sizeof(monitor)};
+        QVERIFY(GetMonitorInfoW(MonitorFromPoint({0,0},MONITOR_DEFAULTTOPRIMARY),&monitor));
+        const auto area=monitor.rcWork;
+        QVERIFY(SetWindowPos(ordinary,HWND_TOPMOST,area.left,area.top,area.right-area.left,area.bottom-area.top,SWP_SHOWWINDOW));
+        if(!SetForegroundWindow(ordinary) && GetForegroundWindow()!=ordinary){
+            POINT point{area.left+120,area.top+18},previous{};
+            QTRY_COMPARE(GetAncestor(WindowFromPoint(point),GA_ROOT),ordinary);
+            QVERIFY(GetCursorPos(&previous));QVERIFY(SetCursorPos(point.x,point.y));
+            auto restoreCursor=qScopeGuard([&]{SetCursorPos(previous.x,previous.y);});
+            INPUT click[2]{};click[0].type=click[1].type=INPUT_MOUSE;
+            click[0].mi.dwFlags=MOUSEEVENTF_LEFTDOWN;click[1].mi.dwFlags=MOUSEEVENTF_LEFTUP;
+            QCOMPARE(SendInput(2,click,sizeof(INPUT)),2u);
+        }
+        QTRY_COMPARE(GetForegroundWindow(),ordinary);
+        win.inCall=true;win.callIdentity="solo";win.overlayLocalName="Player";
+        win.overlayPrefs.enabled=true;
+        win.syncGameOverlay();
+        win.voiceControlTimer.start();
+        const auto instance=GetModuleHandleW(nullptr);
+        WNDCLASSW wc{};wc.lpfnWndProc=DefWindowProcW;wc.hInstance=instance;
+        wc.lpszClassName=L"waApplication Window";
+        QVERIFY(RegisterClassW(&wc));
+        HWND game=CreateWindowW(wc.lpszClassName,L"Nimbo QA game",WS_POPUP,90,90,420,240,
+                                nullptr,nullptr,instance,nullptr);
+        auto cleanup=qScopeGuard([&]{
+            if(game)DestroyWindow(game);
+            UnregisterClassW(wc.lpszClassName,instance);
+        });
+        QVERIFY(game);
+        // No foreground change accompanies this launch or close.
+        const auto foreground=GetForegroundWindow();
+        QVERIFY(SetWindowPos(game,HWND_TOPMOST,0,0,0,0,SWP_SHOWWINDOW|SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE));
+        const auto id=reinterpret_cast<WId>(game);
+        QTRY_COMPARE_WITH_TIMEOUT(win.overlayForeground->gameWindow,id,4500);
+        QVERIFY(win.gameOverlay && win.gameOverlay->isVisible());
+        QCOMPARE(GetForegroundWindow(),foreground);
+        QVERIFY(DestroyWindow(game));game=nullptr;
+        QTRY_VERIFY_WITH_TIMEOUT(win.overlayForeground->gameWindow!=id,4500);
+        QVERIFY(!win.gameOverlay);
+        win.setCall(false);QVERIFY(!win.overlayForeground && !win.gameOverlay);
     }
     void gameOverlayNicknameWidth(){
         QWidget parent;
@@ -1634,7 +1718,7 @@ private slots:
         QVERIFY(mutedMic!=openMic);
         peer["micKnown"]=false;hud.setPeople(local,{peer});
         const auto unknownMic=microphone();
-        QVERIFY(unknownMic!=mutedMic && unknownMic!=openMic);
+        QCOMPARE(unknownMic,openMic);
         peer["micKnown"]=true;hud.setPeople(local,{peer});QCOMPARE(microphone(),mutedMic);
         local["micKnown"]=true;local["mic"]=true;hud.setPeople(local,{peer});
         if(const auto shot=qEnvironmentVariable("NIMBO_QA_OVERLAY_NAMES");!shot.isEmpty()){

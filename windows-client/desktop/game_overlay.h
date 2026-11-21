@@ -12,13 +12,16 @@
 
 class OverlayForeground final : public QObject {
 public:
-    explicit OverlayForeground(std::function<void()> changed);
+    OverlayForeground(const struct OverlayPreferences& preferences, std::function<void()> changed);
     ~OverlayForeground() override;
     void refresh();
 private:
     friend class DesktopWindow;
     friend class NativeDesktopTests;
-    void observe(WId foreground);
+    void observe(WId foreground, WId gameWindow);
+    const OverlayPreferences& preferences;
+    QRect gameBounds;
+    WId gameWindow = 0;
     bool game = false;
     WId window = 0;
     std::function<void()> changed;
@@ -37,6 +40,7 @@ class GameOverlay final : public QWidget {
 public:
     explicit GameOverlay(QWidget& mainWindow);
     void configure(const OverlayPreferences& preferences);
+    void setGameBounds(QRect bounds);
     void setPeople(const QJsonObject& local, const QJsonArray& peers);
     void syncPortraits(const QHash<QString,QPixmap>* roomAvatars, const ServerApi& call);
     void languageChanged();
@@ -55,6 +59,7 @@ private:
     int visibleRows() const;
     QList<Person> visiblePeople() const;
     OverlayPreferences preferences;
+    QRect gameBounds;
     QWidget& mainWindow;
     QList<Person> people;
     QPointer<QScreen> target;

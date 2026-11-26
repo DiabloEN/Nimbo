@@ -86,6 +86,7 @@ type workspaceData struct {
 // One API process owns this store. A committed write replaces the complete file;
 // failed writes leave both the previous file and the in-memory state intact.
 type workspaceStore struct {
+	webTabs       webPresence
 	downloads     map[string]*fileDownloadGrant
 	mediaRevision string
 	mediaChanged  chan struct{}
@@ -407,7 +408,16 @@ func (s *workspaceStore) register(mux *http.ServeMux, c config, presence *presen
 		})
 	}
 	handle("GET /api/workspace", func(w http.ResponseWriter, r *http.Request, id string) {
+		// The first roster and the tab opening it describe the same instant.
+		// Allow the usual renewal interval to bridge this request to the long poll.
+		if r.URL.Query().Get("webTab") == "open" {
+			session := signedSessionKey(c, r)
+			if s.openWebTab(session) {
+				defer func() { s.closeWebTab(session, r.Context().Err() == nil) }()
+			}
+		}
 		s.mu.Lock()
+		online := s.onlineMembersLocked(time.Now())
 		channels := []channel{}
 		members := []member{}
 		ownerExists := false
@@ -456,12 +466,16 @@ func (s *workspaceStore) register(mux *http.ServeMux, c config, presence *presen
 			"avatar":            avatar,
 			"channels":          channels,
 			"members":           members,
+			"onlineMembers":     online,
 			"selfId":            id,
 			"ownerExists":       ownerExists,
 			"presence":          live,
 			"presenceAvailable": fresh,
 			"serverTime":        time.Now().UnixMilli(),
 		})
+	})
+	handle("GET /api/web-presence", func(w http.ResponseWriter, r *http.Request, id string) {
+		s.watchWebTab(w, r, signedSessionKey(c, r))
 	})
 	s.registerSections(handle)
 	s.registerStorage(handle)

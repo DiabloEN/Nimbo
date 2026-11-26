@@ -32,6 +32,7 @@ it('prepares a target with only its key, no cookies or redirects; leaves the cur
     expect(init.headers['X-Nimbo-Client']).toBe('1');
   }
   expect(fetch.mock.calls[1]![1].headers.Authorization).toBe('Bearer target-token');
+  expect(fetch.mock.calls[1]![0]).toBe(target.url + '/api/workspace?webTab=open');
 });
 it('does not change current context when the destination rejects access', async () => {
   vi.stubGlobal(

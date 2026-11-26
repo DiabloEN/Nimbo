@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue';
+import { readServerLink } from '../composables/serverLinks';
 const props = defineProps<{
   href: string;
   source: string;
@@ -51,6 +52,15 @@ watch(
     card.value = {};
     playing.value = false;
     if (!visible.value) return;
+    const link = readServerLink(props.href);
+    if (link) {
+      card.value = {
+        title: link.code ? 'Приглашение в Nimbo.' : 'Сервер Nimbo.',
+        image: '/favicon.svg',
+      };
+      return;
+    }
+    if (/^#\/(?:connect|enroll|invite|i)\//.test(url.value.hash)) return;
     const q = new URLSearchParams({
       url: props.source,
       channel: props.channel,

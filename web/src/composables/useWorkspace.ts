@@ -1,4 +1,10 @@
-import { activeServer, apiURL, remoteServer, serverFetch } from './serverConnection';
+import {
+  activeServer,
+  apiURL,
+  openingWebWorkspace,
+  remoteServer,
+  serverFetch,
+} from './serverConnection';
 import { computed, ref } from 'vue';
 import { uploadForm, TRANSFER_TIMEOUT_MS } from './uploadForm';
 import { canWriteChannel } from './channelPosting';
@@ -98,6 +104,7 @@ export function useWorkspace(session: { value: string }, renewSession?: () => Pr
     members = ref<Member[]>([]),
     selfId = ref('');
   const ownerExists = ref(false),
+    onlineMembers = ref(new Set<string>()),
     presence = ref<Record<string, VoicePresence>>({}),
     presenceAvailable = ref(false);
   const error = ref(''),
@@ -124,6 +131,30 @@ export function useWorkspace(session: { value: string }, renewSession?: () => Pr
     clock: ReturnType<typeof setInterval> | undefined;
   let refreshSequence = 0,
     messageSequence = 0;
+  let watchingWebTabs: AbortController | undefined;
+
+  async function watchWebTabs(abort: AbortController) {
+    if (watchingWebTabs === abort) return;
+    watchingWebTabs = abort;
+    const origin = activeServer.value;
+    try {
+      while (!abort.signal.aborted && origin === activeServer.value && session.value) {
+        const response = await serverFetch(origin, '/api/web-presence', {
+          headers: { Authorization: 'Bearer ' + session.value },
+          cache: 'no-store',
+          signal: AbortSignal.any([abort.signal, AbortSignal.timeout(20000)]),
+        });
+        if (response.status !== 204) {
+          await response.body?.cancel();
+          break;
+        }
+      }
+    } catch {
+      // A successful workspace poll resumes the watch after a network interruption.
+    } finally {
+      if (watchingWebTabs === abort) watchingWebTabs = undefined;
+    }
+  }
   let offset = 0,
     draftAttempt:
       | {
@@ -205,7 +236,13 @@ export function useWorkspace(session: { value: string }, renewSession?: () => Pr
     const started = performance.now();
     let data;
     try {
-      data = await request('/api/workspace', 'GET', undefined, controller?.signal);
+      const opening = controller && watchingWebTabs !== controller;
+      data = await request(
+        opening ? openingWebWorkspace : '/api/workspace',
+        'GET',
+        undefined,
+        controller?.signal,
+      );
     } catch (e) {
       if (current !== generation) return;
       throw e;
@@ -232,6 +269,8 @@ export function useWorkspace(session: { value: string }, renewSession?: () => Pr
     }
     name.value = data.name;
     members.value = data.members;
+    onlineMembers.value = new Set<string>(data.onlineMembers || []);
+    if (controller && Array.isArray(data.onlineMembers)) void watchWebTabs(controller);
     selfId.value = data.selfId;
     ownerExists.value = data.ownerExists;
     presence.value = data.presence;
@@ -294,6 +333,7 @@ export function useWorkspace(session: { value: string }, renewSession?: () => Pr
     } catch (e) {
       if (current === generation) {
         networkError.value = true;
+        onlineMembers.value.clear();
         error.value = (e as Error).message;
         presenceAvailable.value = false;
       }
@@ -308,15 +348,16 @@ export function useWorkspace(session: { value: string }, renewSession?: () => Pr
   }
   function start(snapshot?: unknown) {
     stop();
+    controller = new AbortController();
     if (snapshot) applySnapshot(snapshot);
     expired.value = false;
-    controller = new AbortController();
     clock = setInterval(() => (now.value = Date.now() + offset), 1000);
     void tick(generation);
   }
   function stop() {
     ++generation;
     controller?.abort();
+    controller = undefined;
     clearTimeout(timer);
     clearInterval(clock);
     ready.value = false;
@@ -330,6 +371,7 @@ export function useWorkspace(session: { value: string }, renewSession?: () => Pr
     notifications.value = [];
     messages.value = [];
     members.value = [];
+    onlineMembers.value.clear();
     presence.value = {};
     textChannel.value = '';
     presenceAvailable.value = false;
@@ -780,6 +822,7 @@ export function useWorkspace(session: { value: string }, renewSession?: () => Pr
     name,
     channels,
     members,
+    onlineMembers,
     selfId,
     self,
     ownerExists,

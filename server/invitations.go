@@ -2,6 +2,8 @@ package main
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
+	"encoding/base64"
 	"net/http"
 	"slices"
 	"strings"
@@ -15,6 +17,14 @@ type invitation struct {
 	CreatedAt int64  `json:"createdAt"`
 	ExpiresAt int64  `json:"expiresAt,omitempty"`
 	SingleUse bool   `json:"singleUse"`
+}
+
+func newInvitationCode() string {
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		panic(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(token[:])
 }
 
 func invitationForCode(d *workspaceData, code string) int {
@@ -95,7 +105,7 @@ func (s *workspaceStore) registerInvitations(handle func(string, func(http.Respo
 			if len(d.Invitations) >= 100 {
 				return fail(409, "Можно создать не больше 100 активных приглашений")
 			}
-			item = invitation{ID: randomKey(), Code: randomKey(), Label: label, SingleUse: req.SingleUse, CreatedAt: time.Now().UnixMilli()}
+			item = invitation{ID: randomKey(), Code: newInvitationCode(), Label: label, SingleUse: req.SingleUse, CreatedAt: time.Now().UnixMilli()}
 			if req.Seconds > 0 {
 				item.ExpiresAt = time.Now().Add(time.Duration(req.Seconds) * time.Second).UnixMilli()
 			}

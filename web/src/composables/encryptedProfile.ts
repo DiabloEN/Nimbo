@@ -1,4 +1,4 @@
-import { parseProfile, type ProfileFile } from './profileFile';
+import { parseProfile, profileDownloadName, type ProfileFile } from './profileFile';
 
 // Portable files only. Passwords never leave the browser or enter localStorage.
 const iterations = 600000;
@@ -108,7 +108,7 @@ export async function downloadEncryptedProfile(profile: ProfileFile, password: s
     url = URL.createObjectURL(new Blob([text], { type: 'application/octet-stream' }));
   const link = document.createElement('a');
   link.href = url;
-  link.download = 'profile.nimbo';
+  link.download = profileDownloadName(profile.name);
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

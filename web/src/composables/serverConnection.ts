@@ -3,6 +3,7 @@ import { serverAddress, type SavedServer } from './profileFile';
 
 export const clientOrigin = typeof location === 'undefined' ? '' : location.origin;
 export const activeServer = ref(clientOrigin);
+export const openingWebWorkspace = '/api/workspace?webTab=open';
 export const remoteServer = () => activeServer.value !== clientOrigin;
 export function apiURL(path: string, origin = activeServer.value) {
   if (!path.startsWith('/api/') || path.includes('\\') || path.startsWith('//'))
@@ -54,7 +55,7 @@ export async function prepareServer(server: SavedServer, signal: AbortSignal) {
     typeof access.member?.name !== 'string'
   )
     throw new Error('Некорректный ответ сервера.');
-  const state = await serverFetch(origin, '/api/workspace', {
+  const state = await serverFetch(origin, openingWebWorkspace, {
     headers: { Authorization: 'Bearer ' + access.session },
     signal,
   });

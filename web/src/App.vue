@@ -21,6 +21,8 @@ import {
   restoreServerOrigin,
 } from './composables/serverConnection';
 import EnrollmentPage from './components/EnrollmentPage.vue';
+import MemberServerLink from './components/MemberServerLink.vue';
+import { readServerLink } from './composables/serverLinks';
 import ServerSwitcher from './components/ServerSwitcher.vue';
 import AntivirusSettings from './components/AntivirusSettings.vue';
 import ServerUpdates from './components/ServerUpdates.vue';
@@ -157,7 +159,8 @@ const localProfileOpen = ref(false);
 const personal = ref(profileLibrary.current() || readProfile()),
   importPreview = ref<ProfileFile>(),
   transferNote = ref('');
-if (!location.hash.startsWith('#/connect/')) restoreServerOrigin(personal.value.servers);
+const initialServerLink = readServerLink(location.href);
+if (!location.hash.startsWith('#/connect/') && !initialServerLink) restoreServerOrigin(personal.value.servers);
 const initialEntry = personal.value.servers.find((s) => s.url === activeServer.value);
 if (initialEntry) profileKey.value = initialEntry.profileKey;
 const switchingServer = ref(''),
@@ -258,6 +261,19 @@ const cameraOptions = computed(() =>
   cameras.value.map((d) => ({ value: d.deviceId, label: d.label })),
 );
 const form = reactive({ name: '', password: '', withMic: true });
+const signInTarget = ref('');
+const returnWithProfile = computed(() => !!signInTarget.value && !form.password && personal.value.servers.some(s => s.url === signInTarget.value));
+const requestedServer = ref<ReturnType<typeof readServerLink>>();
+function useLoginLink(raw: string) {
+  const link = readServerLink(raw);
+  if (!link) return false;
+  signInTarget.value = link.origin;
+  form.password = link.code;
+  return true;
+}
+function pasteLoginLink(event: ClipboardEvent) {
+  if (useLoginLink(event.clipboardData?.getData('text') || '')) event.preventDefault();
+}
 const firstChannel = computed(() =>
   firstSidebarChannel(rooms.value, workspace.sectionOrder.value, workspace.sections.value),
 );
@@ -415,7 +431,7 @@ function openHome() {
 }
 const enrollmentPage = location.hash.startsWith('#/enroll/');
 let connectingProfile = false;
-function readPath() {
+function readPath(change?: HashChangeEvent) {
   const path = window.location.hash.slice(1) || '/room';
   if (path.startsWith('/connect/')) {
     selectServerOrigin(clientOrigin);
@@ -428,22 +444,30 @@ function readPath() {
     }
     return;
   }
-  if (path.startsWith('/invite/')) {
-    let code = '';
-    try {
-      code = decodeURIComponent(path.slice(8));
-    } catch {}
-    if (code.length >= 16 && code.length <= 256 && !/[\x00-\x1f]/.test(code)) {
-      form.password = code;
-      localProfileOpen.value = false;
-      history.replaceState(
-        null,
-        '',
-        window.location.pathname + window.location.search + '#/profile',
-      );
-      currentPath.value = '/profile';
+  const link = readServerLink(window.location.href);
+  if (link) {
+    history.replaceState(null, '', window.location.pathname + window.location.search + '#/room');
+    currentPath.value = '/room';
+    const entry = personal.value.servers.find((s) => s.url === link.origin);
+    if (authenticated.value) {
+      if (link.origin === activeServer.value) openHome();
+      else if (entry) void switchServer(entry);
+      else {
+        requestedServer.value = link;
+        navigate('/profile');
+      }
       return;
     }
+    selectServerOrigin(link.origin);
+    signInTarget.value = link.origin;
+    form.password = link.code;
+    localProfileOpen.value = false;
+    if (change) {
+      access.reset();
+      profileKey.value = entry?.profileKey || '';
+      void restoreSignIn();
+    }
+    return;
   }
   currentPath.value = path;
 }
@@ -610,10 +634,16 @@ async function connectSavedServer(key: string) {
   }
 }
 async function signIn() {
-  if (!(await access.signIn(form.name, form.password))) return;
+  useLoginLink(form.password);
+  if (signInTarget.value) {
+    selectServerOrigin(signInTarget.value);
+    profileKey.value = personal.value.servers.find((s) => s.url === signInTarget.value)?.profileKey || '';
+  }
+  if (!(await access.signIn(form.name, form.password, returnWithProfile.value))) return;
   finishSignIn(true);
 }
 function finishSignIn(addServer = false) {
+  signInTarget.value = '';
   selectedId.value = '';
   localProfileOpen.value = false;
   transferNote.value = '';
@@ -854,11 +884,13 @@ async function acceptImport() {
   try {
     const id = profileLibrary.add(imported);
     profileLibrary.select(id);
+    if (signInTarget.value) selectServerOrigin(signInTarget.value);
     applyPersonal(profileLibrary.current()!);
     importPreview.value = undefined;
     if (profileKey.value && (await access.signIn(form.name, '', true))) {
+      const openedServerLink = signInTarget.value === activeServer.value;
       finishSignIn(true);
-      navigate('/profile');
+      navigate(openedServerLink ? '/room' : '/profile');
     } else {
       const reason = access.error.value;
       access.error.value = '';
@@ -1437,7 +1469,11 @@ let restoreTimer: ReturnType<typeof setTimeout> | undefined,
 async function restoreSignIn() {
   clearTimeout(restoreTimer);
   if (restoring.value || authenticated.value) return;
-  const ok = await access.restore();
+  const linked = signInTarget.value === activeServer.value;
+  const ownEntry = linked && personal.value.servers.find((s) => s.url === activeServer.value);
+  const ok = ownEntry
+    ? await access.signIn('', '', true)
+    : !(linked && personal.value.name) && await access.restore();
   if (ok) {
     restoreAttempts = 0;
     finishSignIn();
@@ -1446,7 +1482,7 @@ async function restoreSignIn() {
       () => void restoreSignIn(),
       Math.min(15000, 3000 * ++restoreAttempts),
     );
-  } else if (personal.value.name && !form.password) {
+  } else if (!linked && personal.value.name && !form.password) {
     localProfileOpen.value = true;
   }
 }
@@ -1625,16 +1661,19 @@ onBeforeUnmount(() => {
             placeholder="Как к вам обращаться?"
         /></label>
         <label
-          >Код доступа<input
+          >Код или ссылка приглашения<input
             v-model="form.password"
+            @paste="pasteLoginLink"
+            @input="useLoginLink(($event.target as HTMLInputElement).value)"
             :disabled="authenticating"
             type="password"
-            required
+            :required="!returnWithProfile"
             minlength="16"
-            maxlength="256"
+            maxlength="2048"
             autocomplete="current-password"
             placeholder="Код от организатора"
         /></label>
+        <p v-if="signInTarget" class="field-help">Сервер: {{ signInTarget }}</p>
         <button type="submit" class="primary wide" :disabled="authenticating">
           {{ authenticating ? 'Проверяем код…' : 'Войти в Nimbo'
           }}<AppIcon name="arrow" :size="18" />
@@ -2226,6 +2265,8 @@ onBeforeUnmount(() => {
         <div class="profile-content">
           <ProfilePanel
             @open-server="switchServer"
+            :requested-server="requestedServer"
+            @received-server="requestedServer = undefined"
             :name="form.name"
             :avatar="profileAvatar"
             :servers="personal.servers"
@@ -2391,12 +2432,20 @@ onBeforeUnmount(() => {
               @contextmenu.prevent="openVolume({ identity: person.id, name: person.name }, $event)"
               @keydown.shift.f10.prevent="openVolume({ identity: person.id, name: person.name })"
             >
-              <span class="avatar small"
+              <span class="member-presence-avatar">
+                <span class="avatar small"
                 ><img v-if="avatars[person.id]" :src="avatars[person.id]" alt="" /><template
                   v-else
                   >{{ initials(person.name) }}</template
-                ></span
-              >
+                ></span>
+                <span
+                  v-if="workspace.onlineMembers.value.has(person.id)"
+                  class="member-online-dot"
+                  role="img"
+                  aria-label="В сети"
+                  title="В сети"
+                ></span>
+              </span>
               <div>
                 <strong>{{ person.name }}{{ person.id === self?.id ? ' · вы' : '' }}</strong
                 ><span>{{
@@ -2406,6 +2455,7 @@ onBeforeUnmount(() => {
             </li>
           </ul>
         </div>
+        <MemberServerLink v-if="membersExpanded" :key="activeServer" :origin="activeServer" />
       </div>
     </aside>
   </div>

@@ -10,6 +10,7 @@ const props = defineProps<{
   nameLabel?: string;
   avatar: string;
   servers: ProfileFile['servers'];
+  requestedServer?: { origin: string; code: string };
   currentRole?: 'owner' | 'admin' | 'member';
   saveServers: (servers: ProfileFile['servers']) => void;
   leaveServer: (url: string) => Promise<void>;
@@ -21,7 +22,7 @@ const props = defineProps<{
   save: (name: string, avatar: string) => Promise<void>;
   exportFile: (password: string) => Promise<void>;
 }>();
-const emit = defineEmits<{ logout: []; openServer: [server: SavedServer] }>();
+const emit = defineEmits<{ logout: []; openServer: [server: SavedServer]; receivedServer: [] }>();
 const draftName = ref(props.name),
   draftAvatar = ref(props.avatar),
   busy = ref(false),
@@ -51,6 +52,8 @@ async function save() {
   <section class="profile-layout">
     <ProfileServers
       @open="emit('openServer', $event)"
+      :requested-server="requestedServer"
+      @received-server="emit('receivedServer')"
       :servers="servers"
       :name="name"
       :current-role="currentRole"

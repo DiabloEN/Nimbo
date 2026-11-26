@@ -19,6 +19,38 @@ const state = (name: string) => ({
   presenceAvailable: true,
   serverTime: Date.now(),
 });
+
+it('holds a single web presence watch, separates it from voice and releases it on exit', async () => {
+  vi.stubGlobal('document', { hidden: false });
+  let snapshots = 0;
+  const watches: AbortSignal[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+    if (url.includes('/api/workspace')) {
+      snapshots++;
+      expect(url).toBe(snapshots <= 2 ? '/api/workspace?webTab=open' : '/api/workspace');
+      return ok({ ...state('Test'), ...(snapshots === 1 ? {} : { onlineMembers: ['other'] }) });
+    }
+    if (!url.endsWith('/api/web-presence')) throw Error('Unexpected URL');
+    const signal = init.signal!;
+    watches.push(signal);
+    return new Promise<Response>((_, reject) =>
+      signal.addEventListener('abort', () => reject(new Error('Stopped')), { once: true }),
+    );
+  }));
+  const ws = useWorkspace({ value: 'session' });
+  try {
+    ws.start();
+    await vi.waitFor(() => expect(ws.ready.value).toBe(true));
+    expect(watches).toHaveLength(0);
+    await ws.refresh();
+    await ws.refresh();
+    expect(watches).toHaveLength(1);
+    expect(ws.onlineMembers.value.has('other')).toBe(true);
+    expect(ws.presence.value).toEqual({});
+  } finally { ws.stop(); }
+  expect(watches[0]?.aborted).toBe(true);
+  expect(ws.onlineMembers.value.size).toBe(0);
+});
 it('sends file-only messages as multipart and retries with the same client id', async () => {
   const uploads: FormData[] = [];
   let fail = true;

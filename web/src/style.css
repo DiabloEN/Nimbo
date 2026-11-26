@@ -3246,3 +3246,16 @@ textarea:focus-visible {
   box-shadow: 0 8px 24px #0006;
   font-size: 12px;
 }
+.member-presence-avatar {
+  position: relative;
+  flex: none;
+}
+.member-online-dot {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #81bc96;
+}

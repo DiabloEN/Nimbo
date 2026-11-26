@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { activeServer } from '../composables/serverConnection';
+import { invitationLink } from '../composables/serverLinks';
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import AppSelect from './AppSelect.vue';
 import type { Invitation } from '../composables/useWorkspace';
@@ -49,7 +50,7 @@ onBeforeUnmount(() => {
   clearTimeout(clearMarker);
 });
 function link(item: Invitation) {
-  return activeServer.value + '/#/invite/' + encodeURIComponent(item.code);
+  return invitationLink(activeServer.value, item.code);
 }
 async function createInvitation() {
   const item = (await props.request('/api/invitations', 'POST', {
@@ -77,19 +78,9 @@ async function run(action: () => Promise<unknown>) {
     busy.value = false;
   }
 }
-function shareText(item: Invitation) {
-  return (
-    'Приглашение в Nimbo\nСсылка для входа: ' +
-    link(item) +
-    '\nАдрес сервера: ' +
-    activeServer.value +
-    '\nКод приглашения: ' +
-    item.code
-  );
-}
 async function copy(item: Invitation) {
   try {
-    await navigator.clipboard.writeText(shareText(item));
+    await navigator.clipboard.writeText(link(item));
     copied.value = item.id;
   } catch {
     error.value = 'Не удалось скопировать. Выделите приглашение вручную.';
@@ -124,13 +115,12 @@ async function copy(item: Invitation) {
           <span v-if="item.expiresAt">До {{ dateFormat.format(item.expiresAt) }}</span>
           <span v-else>{{ item.singleUse ? 'До первого входа' : 'Без срока' }}</span>
         </p>
-        <textarea
+        <input
           readonly
-          :value="shareText(item)"
-          rows="4"
-          aria-label="Текст приглашения"
-          @focus="($event.target as HTMLTextAreaElement).select()"
-        ></textarea>
+          :value="link(item)"
+          aria-label="Ссылка приглашения"
+          @focus="($event.target as HTMLInputElement).select()"
+        />
         <div class="invitation-actions">
           <button type="button" class="soft-button" @click="copy(item)">
             {{ copied === item.id ? 'Скопировано' : 'Скопировать приглашение' }}
@@ -234,9 +224,8 @@ async function copy(item: Invitation) {
   font-size: 11px;
   padding: 6px 8px;
 }
-.invitation-list textarea {
+.invitation-list input {
   width: 100%;
-  resize: none;
   line-height: 1.6;
   font-size: 11px;
   margin: 10px 0;

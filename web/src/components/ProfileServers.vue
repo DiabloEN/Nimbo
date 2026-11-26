@@ -2,10 +2,12 @@
 import { computed, ref, watch } from 'vue';
 import { enrollServer } from '../composables/enrollServer';
 import { activeServer } from '../composables/serverConnection';
+import { readServerLink } from '../composables/serverLinks';
 import AppIcon from './AppIcon.vue';
 import { serverAddress, newServerKey, type SavedServer } from '../composables/profileFile';
 const props = defineProps<{
   servers: SavedServer[];
+  requestedServer?: { origin: string; code: string };
   name: string;
   currentRole?: SavedServer['role'];
   save: (servers: SavedServer[]) => void;
@@ -20,7 +22,7 @@ const currentServer = activeServer,
   leaving = ref(false),
   saving = ref(false),
   inviteCode = ref('');
-const emit = defineEmits<{ open: [server: SavedServer] }>();
+const emit = defineEmits<{ open: [server: SavedServer]; receivedServer: [] }>();
 watch(activeServer, () => {
   editing.value = null;
   removing.value = '';
@@ -43,6 +45,27 @@ function edit(server?: SavedServer) {
   note.value = '';
   removing.value = '';
 }
+function fillLink(raw: string) {
+  const link = readServerLink(raw);
+  if (!link || editing.value !== '') return false;
+  draftUrl.value = link.origin;
+  inviteCode.value = link.code;
+  return true;
+}
+function pasteLink(event: ClipboardEvent) {
+  if (fillLink(event.clipboardData?.getData('text') || '')) event.preventDefault();
+}
+watch(
+  () => props.requestedServer,
+  (link) => {
+    if (!link) return;
+    edit();
+    draftUrl.value = link.origin;
+    inviteCode.value = link.code;
+    emit('receivedServer');
+  },
+  { immediate: true },
+);
 function commit(servers: SavedServer[]) {
   try {
     props.save(servers);
@@ -273,7 +296,13 @@ function role(server: SavedServer) {
     <button v-if="editing === null" class="add-server" type="button" @click="edit()">
       <AppIcon name="plus" :size="17" />Добавить сервер
     </button>
-    <form v-if="editing === ''" class="server-editor" @submit.prevent="save">
+    <form
+      v-if="editing === ''"
+      class="server-editor"
+      @submit.prevent="save"
+      @paste="pasteLink"
+      @input="fillLink(($event.target as HTMLInputElement).value)"
+    >
       <h4>{{ editing ? 'Изменить сервер' : 'Новый сервер' }}</h4>
       <label v-if="editing"
         >Название в вашем списке<input
@@ -283,7 +312,7 @@ function role(server: SavedServer) {
           autocomplete="off"
           :disabled="saving" /></label
       ><label
-        >Адрес<input
+        >Адрес или ссылка приглашения<input
           v-model="draftUrl"
           required
           inputmode="url"

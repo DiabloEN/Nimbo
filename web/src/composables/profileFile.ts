@@ -177,13 +177,22 @@ export async function avatarFromFile(file: File) {
     bitmap.close();
   }
 }
+export function profileDownloadName(nickname: string) {
+  const stem = nickname
+    .replace(/[<>:"/\\|?*\p{Cc}\p{Cs}\u202a-\u202e\u2066-\u2069]/gu, '')
+    .trim()
+    .replace(/[. ]+$/, '');
+  // Windows treats these as devices even when followed by a file extension.
+  const deviceName = /^(?:con|prn|aux|nul|conin\$|conout\$|(?:com|lpt)[1-9¹²³]) *(?:\.|$)/i;
+  return (stem && !deviceName.test(stem) ? stem : 'profile') + '.nimbo';
+}
 export function downloadProfile(profile: ProfileFile) {
   const url = URL.createObjectURL(
     new Blob([JSON.stringify(profile, null, 2)], { type: 'application/json' }),
   );
   const link = document.createElement('a');
   link.href = url;
-  link.download = 'profile.nimbo';
+  link.download = profileDownloadName(profile.name);
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

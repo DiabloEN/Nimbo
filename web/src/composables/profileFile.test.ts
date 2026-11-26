@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseProfile } from './profileFile';
+import { parseProfile, profileDownloadName } from './profileFile';
 const profile = {
   format: 'nimbo-profile',
   version: 1,
@@ -15,6 +15,20 @@ const profile = {
   ],
 };
 describe('profile file boundary', () => {
+  it.each([
+    ['Маша', 'Маша.nimbo'],
+    ['Mia 👩‍🎨 猫', 'Mia 👩‍🎨 猫.nimbo'],
+    ['Ма:ша?..  ', 'Маша.nimbo'],
+    ['X\u0001\u0085/\\Y', 'XY.nimbo'],
+    ['CON', 'profile.nimbo'],
+    ['lpt².backup', 'profile.nimbo'],
+    ['AUX .old', 'profile.nimbo'],
+    ['CONstance', 'CONstance.nimbo'],
+    ['<>?*...', 'profile.nimbo'],
+    ['', 'profile.nimbo'],
+  ])('exports nickname %j as %j', (nickname, file) => {
+    expect(profileDownloadName(nickname)).toBe(file);
+  });
   it('round trips identities without importing role claims, passwords or unrelated local preferences', () => {
     const result = parseProfile(
       JSON.stringify({ ...profile, role: 'owner', password: 'secret', volumes: { x: 200 } }),

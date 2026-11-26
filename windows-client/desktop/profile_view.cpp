@@ -148,15 +148,29 @@ void DesktopWindow::renderProfile(){
     }
     auto* add=control(UiText::AddServer(),"add",44);add->setObjectName("startAddServer");add->setIcon(icon("plus"));serversBox->addWidget(add);
     auto* newServer=panel("#1b1b1b",12);serversBox->addWidget(newServer);auto* nf=stack(newServer,12,6);
-    nf->addWidget(caption(UiText::NewServer(),12,"#eee",true));auto* addressField=field(nf,UiText::AddressOrInvitationLink());addressField->setPlaceholderText("https://nimbo.example.com");auto* code=field(nf,UiText::InvitationCode());
+    nf->addWidget(caption(UiText::NewServer(),12,"#eee",true));auto* addressField=field(nf,UiText::AddressOrInvitationLink());addressField->setPlaceholderText("https://nimbo.example.com");
+    auto* codeGroup=new QWidget;nf->addWidget(codeGroup);auto* code=field(stack(codeGroup,0,6),UiText::InvitationCode());
     addressField->setObjectName("addServerAddress");code->setObjectName("addServerCode");
-    auto pasteLink=[addressField,code](const ServerLinks::Link& link){
+    auto* enroll=control(UiText::Add(),"small",32);enroll->setObjectName("submitServerLink");
+    auto destination=[addressField,servers]{
+        const auto url=DesktopProfile::origin(addressField->text());
+        if(!url.isEmpty())for(const auto value:servers){
+            const auto entry=value.toObject();if(DesktopProfile::origin(entry["url"].toString())==url)return entry;
+        }
+        return QJsonObject{};
+    };
+    auto updateDestination=[=,this]{
+        const auto entry=destination();const bool known=!entry.isEmpty();
+        enroll->setText(known?UiText::OpenServer2():UiText::Add());
+        codeGroup->setVisible(!known || (deniedProfile==localId && deniedOrigin==DesktopProfile::origin(entry["url"].toString())));
+    };
+    auto pasteLink=[addressField,code,updateDestination](const ServerLinks::Link& link){
         const QSignalBlocker blockAddress(addressField),blockCode(code);
-        addressField->setText(link.origin.toString());code->setText(link.code);
+        addressField->setText(link.origin.toString());code->setText(link.code);updateDestination();
     };
     const auto applyAddress=ServerLinks::bind(addressField,pasteLink,false);
     const auto applyCode=ServerLinks::bind(code,pasteLink);
-    auto* enroll=control(UiText::Add(),"small",32);enroll->setObjectName("submitServerLink");
+    connect(addressField,&QLineEdit::textChanged,newServer,updateDestination);
     auto* cancel=control(UiText::Cancel(),"quiet",32);pair(nf,enroll,cancel);newServer->hide();
     connect(add,&QPushButton::clicked,newServer,[=]{newServer->show();add->hide();addressField->setFocus();});
     connect(cancel,&QPushButton::clicked,newServer,[=]{newServer->hide();code->clear();addressField->clear();add->show();});
@@ -164,15 +178,13 @@ void DesktopWindow::renderProfile(){
     connect(enroll,&QPushButton::clicked,newServer,[=,this]{
         applyAddress();applyCode();
         auto url=DesktopProfile::origin(addressField->text());
-        for(auto value:servers){
-            const auto entry=value.toObject();
-            if(!url.isEmpty() && DesktopProfile::origin(entry["url"].toString())==url){
-                if(deniedOrigin==url && deniedProfile==localId && !code->text().trimmed().isEmpty()){
-                    switchServer(entry,true,code->text().trimmed());return;
-                }
-                if(!local && api.server==url)openView("room");else switchServer(entry);
-                return;
+        const auto entry=destination();
+        if(!entry.isEmpty()){
+            if(deniedOrigin==url && deniedProfile==localId && !code->text().trimmed().isEmpty()){
+                switchServer(entry,true,code->text().trimmed());return;
             }
+            if(!local && api.server==url)openView("room");else switchServer(entry);
+            return;
         }
         if(url.isEmpty()||code->text().trimmed().isEmpty()||code->text().size()>256){note(UiText::EnterTheAddressAndInvitationCode());return;}
         if(servers.size()>=64){note(UiText::YouCanSaveUpTo64Servers());return;}

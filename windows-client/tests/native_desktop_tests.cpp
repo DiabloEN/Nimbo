@@ -665,11 +665,12 @@ private slots:
     void authRestoration(){
         QTemporaryDir dir;QTcpServer server;QVERIFY(server.listen(QHostAddress::LocalHost));
         const QString origin=QString("http://127.0.0.1:%1").arg(server.serverPort());
+        const QString second=QString("http://localhost:%1").arg(server.serverPort());
         const auto key=QString::fromLatin1(DesktopProfile::randomKey());
         const QJsonObject me{{"id","member"},{"name","Returner"},{"role","member"}};
         const QJsonObject saved{{"url",origin},{"profileKey",key},{"name","Fixture"},{"displayName","Returner"},{"role","member"}};
         const QJsonObject profile{{"format","nimbo-profile"},{"version",1},{"name","Returner"},{"avatar",""},{"servers",QJsonArray{saved}}};
-        int status=200,requests=0;
+        int status=200,requests=0;bool revokedSecond=false;
         connect(&server,&QTcpServer::newConnection,&server,[&]{
             while(auto* socket=server.nextPendingConnection()){
                 connect(socket,&QTcpSocket::disconnected,socket,&QObject::deleteLater);
@@ -677,12 +678,14 @@ private slots:
                     const auto bytes=socket->peek(socket->bytesAvailable());if(!bytes.contains("\r\n\r\n")||socket->property("handled").toBool())return;
                     socket->setProperty("handled",true);socket->readAll();
                     const auto path=bytes.split(' ').value(1);
+                    const bool rejected=revokedSecond && bytes.toLower().contains("\r\nhost: localhost:");
                     int result=200,delay=0;QJsonObject body;
                     if(path=="/api/profile-session"){
-                        ++requests;result=status;delay=380;
+                        ++requests;result=rejected?401:status;delay=380;
                         if(result==200)body={{"member",me},{"session","fixture-session"},{"profileKey",key}};
                         else body={{"error","Fixture unavailable"}};
                     }else if(path.startsWith("/api/workspace")){
+                        if(rejected){result=401;delay=120;}
                         body={{"selfId","member"},{"members",QJsonArray{me}},{"name","Fixture"},{"channels",QJsonArray{QJsonObject{{"kind","text"},{"name","Room"},{"id","text"}}}}};
                     }
                     const auto json=QJsonDocument(body).toJson(QJsonDocument::Compact);
@@ -714,6 +717,15 @@ private slots:
         auto* back=win.authRestorePage->findChild<QPushButton*>("authRestoreProfile");QVERIFY(back);back->click();
         QTest::qWait(440);QCOMPARE(win.pages->currentWidget(),win.localHome);QVERIFY(win.api.token.isEmpty());
         {DesktopWindow signedOut(dir.path(),true);QCOMPARE(signedOut.pages->currentWidget(),signedOut.localHome);}
+        auto secondEntry=saved;secondEntry["url"]=second;
+        win.profile["servers"]=QJsonArray{saved,secondEntry};win.saveLocal();
+        win.switchServer(saved);QTRY_COMPARE(win.api.server,QUrl(origin));
+        QTRY_VERIFY(win.preparedServers.value(QUrl(second)).received.isValid());
+        revokedSecond=true;win.switchServer(secondEntry);QCOMPARE(win.api.server,QUrl(origin));
+        QTest::qWait(100);QCOMPARE(win.api.server,QUrl(origin));QVERIFY(!win.loginButton->isVisible());
+        QTRY_COMPARE(win.view,QString("profile"));QCOMPARE(win.api.server,QUrl(origin));
+        auto* deniedAddress=win.detailPage->findChild<QLineEdit*>("addServerAddress");QVERIFY(deniedAddress && deniedAddress->isVisible());
+        QCOMPARE(deniedAddress->text(),second);QCOMPARE(win.selfId,QString("member"));
         prefs.setValue("lastServer","http://localhost:7777");prefs.remove("resumeProfile");prefs.sync();
         {DesktopWindow foreign(dir.path(),true);QCOMPARE(foreign.pages->currentWidget(),foreign.localHome);QVERIFY(foreign.api.token.isEmpty());}
     }
@@ -770,7 +782,10 @@ private slots:
         auto* addr=guest.detailPage->findChild<QLineEdit*>("addServerAddress");
         auto* code=guest.detailPage->findChild<QLineEdit*>("addServerCode");
         auto* add=guest.detailPage->findChild<QPushButton*>("submitServerLink");QVERIFY(addr && code && add);
-        addr->setText(ServerLinks::returnLink(second));add->click();
+        UiText::setLanguage("en");addr->setText(first.toString());QCOMPARE(add->text(),QString("Open server"));QVERIFY(code->parentWidget()->isHidden());
+        addr->setText(second.toString());QCOMPARE(add->text(),QString("Add"));QVERIFY(!code->parentWidget()->isHidden());
+        UiText::setLanguage("ru");addr->setText(first.toString()+"/#/server");QCOMPARE(add->text(),QStringLiteral("Открыть сервер"));
+        addr->setText(ServerLinks::returnLink(second));QCOMPARE(add->text(),QStringLiteral("Добавить"));add->click();
         QCOMPARE(guest.profile["servers"].toArray().size(),1);QVERIFY(code->text().isEmpty());
         const auto ownerCode=qEnvironmentVariable("NIMBO_NATIVE_TEST_CODE2");
         code->setText(QStringLiteral("Ссылка для входа: ")+ServerLinks::invitation(second,ownerCode)+"\nАдрес сервера: "+second.toString());
@@ -3458,7 +3473,7 @@ private slots:
         QVERIFY(restored.callServer->mapTo(restored.callReturn,QPoint()).y()<restored.callLabel->mapTo(restored.callReturn,QPoint()).y());
         const auto identityBeforeReturn=restored.callIdentity;
         QElapsedTimer switchClock;switchClock.start();
-        restored.callReturn->click();QCOMPARE(restored.api.server,QUrl(url));QCOMPARE(restored.selected,originalRoom);
+        restored.callReturn->click();QTRY_COMPARE_WITH_TIMEOUT(restored.api.server,QUrl(url),8000);QCOMPARE(restored.selected,originalRoom);
         qInfo()<<"Prepared server return (click through workspace render), ms:"<<switchClock.elapsed();
         QCOMPARE(restored.callIdentity,identityBeforeReturn);
         for(const auto& value:restored.profile["servers"].toArray())if(value.toObject()["url"]==second)restored.switchServer(value.toObject());

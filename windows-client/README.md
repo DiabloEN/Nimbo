@@ -19,3 +19,5 @@ cd windows-client
 ```
 
 Сборщик берёт версию из `desktop/version.h` и создаёт Setup, архив для обновления и манифест в `dist`. Сведения о компонентах и лицензиях поставляются с приложением. [Сторонние компоненты](desktop/THIRD_PARTY.md)
+
+Для полного прогона `scripts/test-native-desktop.py` нужны собранные Qt-тесты, отдельный бинарник API для параметра `--server` и LiveKit Server в `.tools/media/server/livekit-server.exe`. Сценарии вложений и замера памяти используют тестовый ролик в `artifacts/oct30-qa/preview-flower.mp4`. Его SHA-256 — `0cd83d944a6ca7822b4a8306cecc60a36e859b041f6702c6a1ad9ead78924451`. [Тестовый ролик MDN, CC0](https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4)

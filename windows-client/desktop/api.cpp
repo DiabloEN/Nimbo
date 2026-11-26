@@ -101,8 +101,8 @@ QNetworkReply* ServerApi::sendJson(const QByteArray& method,const QString& path,
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     return network.sendCustomRequest(request,method,body.isEmpty()?QByteArray{}:QJsonDocument(body).toJson(QJsonDocument::Compact));
 }
-void ServerApi::profileSession(const QString& key,std::function<void(QJsonObject,QString,int)> callback){
-    auto* reply=sendJson("POST","/api/profile-session",{{"profileKey",key}});
+void ServerApi::requestWithStatus(const QByteArray& method,const QString& path,const QJsonObject& body,std::function<void(QJsonObject,QString,int)> callback){
+    auto* reply=sendJson(method,path,body);
     finishJson(reply,[reply,callback=std::move(callback)](QJsonObject result,QString error){
         callback(result,error,reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt());
     });

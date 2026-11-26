@@ -134,7 +134,6 @@ private:
     QWidget* switchNotice=nullptr;
     QLabel* switchMessage=nullptr;
     QPushButton* switchAction=nullptr;
-    QPushButton* switchInvite=nullptr;
     void finishServerSwitch(const QString& error={},bool denied=false);
     void showSwitchNotice(QString text,bool busy);
     void switchServer(const QJsonObject& entry, bool enroll = false, const QString& code = {},QString returnIdentity = {});

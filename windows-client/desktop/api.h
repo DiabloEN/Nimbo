@@ -15,7 +15,7 @@ public:
     QString token;
     explicit ServerApi(QObject* parent = nullptr) : QObject(parent) {}
     void request(QByteArray method, QString path, QJsonObject body, Callback callback);
-    void profileSession(const QString& key,std::function<void(QJsonObject,QString,int)> callback);
+    void requestWithStatus(const QByteArray& method,const QString& path,const QJsonObject& body,std::function<void(QJsonObject,QString,int)> callback);
     QString activeWorkspacePath() const;
     void syncMemberPresence(const QJsonObject& workspace);
     void stopMemberPresence();

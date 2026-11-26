@@ -23,6 +23,15 @@ const currentServer = activeServer,
   saving = ref(false),
   inviteCode = ref('');
 const emit = defineEmits<{ open: [server: SavedServer]; receivedServer: [] }>();
+const savedDestination = computed(() => {
+  if (editing.value !== '' || !draftUrl.value.trim()) return;
+  try {
+    const url = serverAddress(draftUrl.value);
+    return props.servers.find((server) => server.url === url);
+  } catch {
+    return;
+  }
+});
 watch(activeServer, () => {
   editing.value = null;
   removing.value = '';
@@ -45,15 +54,19 @@ function edit(server?: SavedServer) {
   note.value = '';
   removing.value = '';
 }
-function fillLink(raw: string) {
-  const link = readServerLink(raw);
+function fillLink(raw: string, plainOrigin = false, addressField = false) {
+  const link = readServerLink(raw, { plainOrigin });
   if (!link || editing.value !== '') return false;
+  const keepSeparateCode =
+    addressField && !raw.includes('#') && (!draftUrl.value || draftUrl.value === link.origin);
   draftUrl.value = link.origin;
-  inviteCode.value = link.code;
+  if (!keepSeparateCode) inviteCode.value = link.code;
   return true;
 }
 function pasteLink(event: ClipboardEvent) {
-  if (fillLink(event.clipboardData?.getData('text') || '')) event.preventDefault();
+  const text = event.clipboardData?.getData('text') || '';
+  const inAddress = event.target instanceof HTMLInputElement && event.target.getAttribute('autocomplete') === 'url';
+  if (fillLink(text, true, inAddress)) event.preventDefault();
 }
 watch(
   () => props.requestedServer,
@@ -99,7 +112,11 @@ async function save() {
         editing.value = null;
       return;
     }
-    if (props.servers.some((s) => s.url === url)) throw new Error('Этот сервер уже есть в списке.');
+    if (savedDestination.value) {
+      emit('open', savedDestination.value);
+      editing.value = null;
+      return;
+    }
     if (props.servers.length >= 64) throw new Error('Можно сохранить до 64 серверов.');
     if (!props.name.trim()) throw new Error('Сначала укажите своё имя в профиле.');
     if (!inviteCode.value.trim()) throw new Error('Введите код приглашения.');
@@ -320,7 +337,7 @@ function role(server: SavedServer) {
           placeholder="https://nimbo.example.com"
           :readonly="!!editing"
           :disabled="saving" /></label
-      ><label v-if="!editing"
+      ><label v-if="!savedDestination"
         >Код приглашения<input
           v-model="inviteCode"
           required
@@ -331,7 +348,7 @@ function role(server: SavedServer) {
       /></label>
       <div class="server-editor-actions">
         <button type="submit" class="soft-button" :disabled="saving">
-          {{ saving ? 'Подключаем…' : editing ? 'Сохранить' : 'Добавить' }}</button
+          {{ saving ? 'Подключаем…' : savedDestination ? 'Открыть сервер' : 'Добавить' }}</button
         ><button
           type="button"
           class="text-button"

@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta property="og:title" content="Nimbo. · Чаты и звонки" />
     <meta property="og:type" content="website" />
@@ -10,7 +11,11 @@
     <title>Nimbo · тестовая комната</title>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <main class="auth-page" aria-busy="true">
+        <span class="brand" role="status" aria-label="Загрузка Nimbo.">nimbo<span>.</span></span>
+      </main>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

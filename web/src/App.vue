@@ -22,7 +22,7 @@ import {
 } from './composables/serverConnection';
 import EnrollmentPage from './components/EnrollmentPage.vue';
 import MemberServerLink from './components/MemberServerLink.vue';
-import { readServerLink } from './composables/serverLinks';
+import { openedServerLink, readServerLink } from './composables/serverLinks';
 import ServerSwitcher from './components/ServerSwitcher.vue';
 import AntivirusSettings from './components/AntivirusSettings.vue';
 import ServerUpdates from './components/ServerUpdates.vue';
@@ -159,7 +159,8 @@ const localProfileOpen = ref(false);
 const personal = ref(profileLibrary.current() || readProfile()),
   importPreview = ref<ProfileFile>(),
   transferNote = ref('');
-const initialServerLink = readServerLink(location.href);
+const initialNavigation = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined;
+const initialServerLink = openedServerLink(location.href, initialNavigation?.type);
 if (!location.hash.startsWith('#/connect/') && !initialServerLink) restoreServerOrigin(personal.value.servers);
 const initialEntry = personal.value.servers.find((s) => s.url === activeServer.value);
 if (initialEntry) profileKey.value = initialEntry.profileKey;
@@ -264,15 +265,15 @@ const form = reactive({ name: '', password: '', withMic: true });
 const signInTarget = ref('');
 const returnWithProfile = computed(() => !!signInTarget.value && !form.password && personal.value.servers.some(s => s.url === signInTarget.value));
 const requestedServer = ref<ReturnType<typeof readServerLink>>();
-function useLoginLink(raw: string) {
-  const link = readServerLink(raw);
+function useLoginLink(raw: string, plainOrigin = false) {
+  const link = readServerLink(raw, { plainOrigin });
   if (!link) return false;
   signInTarget.value = link.origin;
   form.password = link.code;
   return true;
 }
 function pasteLoginLink(event: ClipboardEvent) {
-  if (useLoginLink(event.clipboardData?.getData('text') || '')) event.preventDefault();
+  if (useLoginLink(event.clipboardData?.getData('text') || '', true)) event.preventDefault();
 }
 const firstChannel = computed(() =>
   firstSidebarChannel(rooms.value, workspace.sectionOrder.value, workspace.sections.value),
@@ -430,6 +431,8 @@ function openHome() {
   void workspace.selectText(first.kind === 'text' ? first.id : '');
 }
 const enrollmentPage = location.hash.startsWith('#/enroll/');
+const resolvingEntry = ref(true);
+let restoreRun = 0;
 let connectingProfile = false;
 function readPath(change?: HashChangeEvent) {
   const path = window.location.hash.slice(1) || '/room';
@@ -439,12 +442,16 @@ function readPath(change?: HashChangeEvent) {
     history.replaceState(null, '', window.location.pathname + window.location.search + '#/profile');
     currentPath.value = '/profile';
     if (/^[A-Za-z0-9_-]{43}$/.test(key)) {
+      const run = ++restoreRun;
+      resolvingEntry.value = true;
       connectingProfile = true;
-      void connectSavedServer(key);
+      void connectSavedServer(key).finally(() => {
+        if (run === restoreRun) resolvingEntry.value = false;
+      });
     }
     return;
   }
-  const link = readServerLink(window.location.href);
+  const link = change ? openedServerLink(window.location.href) : initialServerLink;
   if (link) {
     history.replaceState(null, '', window.location.pathname + window.location.search + '#/room');
     currentPath.value = '/room';
@@ -1469,11 +1476,18 @@ let restoreTimer: ReturnType<typeof setTimeout> | undefined,
 async function restoreSignIn() {
   clearTimeout(restoreTimer);
   if (restoring.value || authenticated.value) return;
-  const linked = signInTarget.value === activeServer.value;
-  const ownEntry = linked && personal.value.servers.find((s) => s.url === activeServer.value);
-  const ok = ownEntry
-    ? await access.signIn('', '', true)
-    : !(linked && personal.value.name) && await access.restore();
+  const run = ++restoreRun;
+  const origin = activeServer.value;
+  const linked = signInTarget.value === origin;
+  const ownEntry = personal.value.servers.find((s) => s.url === origin);
+  const ok = await access.restore({
+    savedKey: ownEntry?.profileKey,
+    // A return link proves the selected profile's membership. A cookie alone
+    // may belong to another profile used in this browser.
+    profileOnly: !!personal.value.name && (linked || !ownEntry),
+  });
+  if (run !== restoreRun || origin !== activeServer.value) return;
+  resolvingEntry.value = false;
   if (ok) {
     restoreAttempts = 0;
     finishSignIn();
@@ -1482,7 +1496,7 @@ async function restoreSignIn() {
       () => void restoreSignIn(),
       Math.min(15000, 3000 * ++restoreAttempts),
     );
-  } else if (!linked && personal.value.name && !form.password) {
+  } else if (!linked && !ownEntry && personal.value.name && !form.password && currentPath.value !== '/login') {
     localProfileOpen.value = true;
   }
 }
@@ -1522,6 +1536,7 @@ onMounted(() => {
     .finally(() => clearTimeout(timeout));
 });
 onBeforeUnmount(() => {
+  ++restoreRun;
   serverSwitchAbort?.abort();
   clearTimeout(restoreTimer);
   window.removeEventListener('online', connectionOnline);
@@ -1551,11 +1566,14 @@ onBeforeUnmount(() => {
   </div>
   <EnrollmentPage v-if="enrollmentPage" />
   <SessionRecovery
-    v-else-if="!authenticated && (restoring || restoreFailed)"
+    v-else-if="!authenticated && restoreFailed"
     :failed="restoreFailed"
     :busy="restoring"
     @retry="restoreSignIn"
   />
+  <main v-else-if="!authenticated && (resolvingEntry || restoring)" class="auth-page" aria-busy="true">
+    <span class="brand" role="status" aria-label="Загрузка Nimbo.">nimbo<span>.</span></span>
+  </main>
   <main v-else-if="!authenticated && localProfileOpen" class="local-profile-home">
     <header>
       <a class="brand" href="#/profile">nimbo.</a

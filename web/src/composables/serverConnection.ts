@@ -24,17 +24,32 @@ export function serverFetch(origin: string, path: string, init: RequestInit = {}
 export function apiFetch(path: string, init: RequestInit = {}) {
   return serverFetch(activeServer.value, path, init);
 }
+const selectedServerKey = 'nimbo-active-server';
+function rememberTabOrigin() {
+  try {
+    sessionStorage.setItem(selectedServerKey, activeServer.value);
+  } catch {}
+}
 export function selectServerOrigin(origin: string) {
   activeServer.value = serverAddress(origin);
+  rememberTabOrigin();
   try {
-    localStorage.setItem('nimbo-active-server', activeServer.value);
+    localStorage.setItem(selectedServerKey, activeServer.value);
   } catch {}
 }
 export function restoreServerOrigin(servers: SavedServer[]) {
+  let saved: string | null = null;
   try {
-    const saved = localStorage.getItem('nimbo-active-server');
-    if (saved && servers.some((s) => s.url === saved)) activeServer.value = serverAddress(saved);
+    saved = sessionStorage.getItem(selectedServerKey);
   } catch {}
+  if (!saved) {
+    try {
+      saved = localStorage.getItem(selectedServerKey);
+    } catch {}
+  }
+  const entry = servers.find((s) => s.url === saved);
+  activeServer.value = entry ? serverAddress(entry.url) : clientOrigin;
+  rememberTabOrigin();
 }
 // Prepare everything before changing the visible workspace. Neither another
 // server's key nor the complete portable profile ever enters this request.

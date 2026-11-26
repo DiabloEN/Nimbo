@@ -76,6 +76,49 @@ func TestRememberRejectsExpiredBlockedAndForged(t *testing.T) {
 	cookie.Value = randomKey()
 	mustStatus(t, rememberedRequest(h, "GET", cookie), 401)
 }
+
+func TestRestoreSelectedProfileKeepsMatchingDeviceSession(t *testing.T) {
+	s, _ := openWorkspace("", "")
+	memberA, keyA, _ := s.login("A", "")
+	_, keyB, _ := s.login("B", "")
+	c := testConfig()
+	h := newWorkspaceHandler(c, s, nil)
+	cookie := sessionCookie(c, randomKey(), int(rememberDays.Seconds()))
+	hash := keyHash(cookie.Value)
+	entry := rememberedSession{memberA.ID, time.Now().Add(time.Hour).Unix()}
+	s.data.Sessions = map[string]rememberedSession{hash: entry}
+	request := func(key string, origin string, code int) {
+		r := httptest.NewRequest("POST", "/api/session/profile", strings.NewReader(`{"profileKey":"`+key+`"}`))
+		r.AddCookie(cookie)
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Origin", origin)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		mustStatus(t, w, code)
+		if len(w.Result().Cookies()) != 0 || strings.Contains(w.Body.String(), key) {
+			t.Fatal("profile verification changed cookie or exposed profile key")
+		}
+		if code == 200 {
+			var got struct {
+				Session string
+				Member  member
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || got.Member.ID != memberA.ID || got.Session == "" {
+				t.Fatal("verified session does not belong to selected member")
+			}
+		}
+	}
+	for i := 0; i < 12; i++ {
+		request(keyA, c.Origin, 200)
+	}
+	request(keyB, c.Origin, 401)
+	request(keyA, "https://foreign.example", 403)
+	if len(s.data.Sessions) != 1 || s.data.Sessions[hash] != entry {
+		t.Fatal("refreshes changed the remembered session")
+	}
+	s.data.Members[0].Blocked = true
+	request(keyA, c.Origin, 401)
+}
 func TestSeparateAdminCodeSelectsOnlyProvisionedIdentity(t *testing.T) {
 	c := testConfig()
 	password, key := randomKey(), randomKey()

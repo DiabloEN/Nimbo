@@ -1,5 +1,12 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { activeServer, clientOrigin, prepareServer, serverFetch } from './serverConnection';
+import {
+  activeServer,
+  clientOrigin,
+  prepareServer,
+  restoreServerOrigin,
+  selectServerOrigin,
+  serverFetch,
+} from './serverConnection';
 import { useWorkspace } from './useWorkspace';
 const target = {
   url: 'https://other.example:8443',
@@ -11,6 +18,28 @@ const state = { name: 'Other', channels: [], members: [], selfId: 'me', serverTi
 afterEach(() => {
   activeServer.value = clientOrigin;
   vi.unstubAllGlobals();
+});
+it('migrates the remembered selection per tab and ignores another tab changing the shared default', () => {
+  const key = 'nimbo-active-server';
+  const other = { ...target, url: 'https://second.example' };
+  const servers = [target, other];
+  const shared = new Map([[key, target.url]]);
+  const tab = new Map<string, string>();
+  const storage = (map: Map<string, string>) => ({
+    getItem: (k: string) => map.get(k) ?? null,
+    setItem: (k: string, value: string) => map.set(k, value),
+  });
+  vi.stubGlobal('localStorage', storage(shared));
+  vi.stubGlobal('sessionStorage', storage(tab));
+  restoreServerOrigin(servers);
+  expect(tab.get(key)).toBe(target.url);
+  shared.set(key, other.url);
+  restoreServerOrigin(servers);
+  expect(activeServer.value).toBe(target.url);
+  selectServerOrigin(other.url);
+  expect(tab.get(key)).toBe(other.url);
+  restoreServerOrigin([target]); // The current profile has no entry on the stored server.
+  expect(activeServer.value).toBe(clientOrigin);
 });
 it('prepares a target with only its key, no cookies or redirects; leaves the current server intact', async () => {
   const fetch = vi

@@ -5,16 +5,18 @@ export function invitationLink(origin: string, code: string) {
 }
 
 export function returnLink(origin: string) {
-  return serverAddress(origin) + '/#/server';
+  return serverAddress(origin);
 }
 
-export function readServerLink(text: string) {
+export function readServerLink(text: string, { plainOrigin = false } = {}) {
   // Old clients copied a multi-line message containing the link as well as the code.
   for (const token of text.trim().split(/\s+/)) {
     if (!/^https?:\/\//i.test(token)) continue;
     try {
       const url = new URL(token);
       const origin = serverAddress(url.href);
+      if (plainOrigin && token === text.trim() && url.href === origin + '/')
+        return { origin, code: '' };
       if (url.hash === '#/server') return { origin, code: '' };
       const route = /^#\/(?:i|invite)\/(.+)$/.exec(url.hash);
       if (!route) continue;
@@ -25,4 +27,10 @@ export function readServerLink(text: string) {
       // Ordinary addresses and invitation codes are handled by their existing forms.
     }
   }
+}
+
+export function openedServerLink(href: string, navigationType?: NavigationTimingType) {
+  // An unmarked root names a server on a new visit. Reload/history restore may
+  // belong to a multi-server tab and should keep its selected workspace.
+  return readServerLink(href, { plainOrigin: !navigationType || navigationType === 'navigate' });
 }

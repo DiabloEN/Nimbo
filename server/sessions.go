@@ -1,8 +1,11 @@
 package main
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"os"
@@ -116,7 +119,7 @@ func (s *workspaceStore) registerSessions(mux *http.ServeMux, c config) {
 			reject(w, 403, "Недопустимый источник запроса")
 			return
 		}
-		if r.Method != "GET" && r.Method != "DELETE" {
+		if r.Method == http.MethodHead {
 			w.Header().Set("Allow", "GET, DELETE")
 			reject(w, 405, "Метод недоступен")
 			return
@@ -135,18 +138,42 @@ func (s *workspaceStore) registerSessions(mux *http.ServeMux, c config) {
 			jsonReply(w, 200, map[string]bool{"ok": true})
 			return
 		}
+		var profileHash string
+		if r.Method == http.MethodPost {
+			if strings.Split(r.Header.Get("Content-Type"), ";")[0] != "application/json" {
+				reject(w, 415, "Нужен JSON-запрос")
+				return
+			}
+			var request struct {
+				ProfileKey string `json:"profileKey"`
+			}
+			decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256))
+			decoder.DisallowUnknownFields()
+			if decoder.Decode(&request) != nil || decoder.Decode(new(any)) != io.EOF || !validKey(request.ProfileKey) {
+				reject(w, 401, "Профиль не подтверждён")
+				return
+			}
+			profileHash = keyHash(request.ProfileKey)
+		}
 		s.mu.Lock()
 		entry, exists := s.data.Sessions[hash]
 		m := findMember(&s.data, entry.MemberID)
 		var current member
 		valid := exists && entry.Expires > time.Now().Unix() && m != nil && !isBlocked(m)
 		if valid {
+			if profileHash != "" && !hmac.Equal([]byte(m.KeyHash), []byte(profileHash)) {
+				s.mu.Unlock()
+				reject(w, 401, "Сессия принадлежит другому профилю")
+				return
+			}
 			current = *m
 			current.KeyHash = ""
 		}
 		s.mu.Unlock()
 		if !valid {
-			http.SetCookie(w, sessionCookie(c, "", -1))
+			if r.Method == http.MethodGet {
+				http.SetCookie(w, sessionCookie(c, "", -1))
+			}
 			reject(w, 401, "Войдите в Nimbo")
 			return
 		}
@@ -164,5 +191,6 @@ func (s *workspaceStore) registerSessions(mux *http.ServeMux, c config) {
 		jsonReply(w, 200, map[string]bool{"ok": true})
 	})
 	mux.HandleFunc("GET /api/session", handler)
+	mux.HandleFunc("POST /api/session/profile", handler)
 	mux.HandleFunc("DELETE /api/session", handler)
 }

@@ -1,4 +1,4 @@
-import { apiFetch, remoteServer, activeServer } from './serverConnection';
+import { apiFetch, remoteServer, activeServer, serverFetch } from './serverConnection';
 import { ref } from 'vue';
 
 // Password and API bearer stay in memory; the server remembers this browser
@@ -7,7 +7,7 @@ export function useAccess() {
   const session = ref(''),
     profileKey = ref(''),
     storageNote = ref(''),
-    member = ref<{ name: string; avatar?: string } | null>(null);
+    member = ref<{ id?: string; name: string; avatar?: string } | null>(null);
   try {
     profileKey.value = localStorage.getItem('nimbo-profile-key') || '';
   } catch {
@@ -21,29 +21,69 @@ export function useAccess() {
   let renewal: Promise<boolean> | undefined;
   let controller: AbortController | undefined;
   let generation = 0;
-  async function restore(background = false) {
-    if (remoteServer()) {
-      try {
-        if (localStorage.getItem('nimbo-signed-out:' + activeServer.value) === '1') return false;
-      } catch {}
-      return signIn('', '', true);
-    }
+  async function restore({ background = false, savedKey = '', profileOnly = false } = {}) {
+    const origin = activeServer.value;
     const current = ++generation;
+    controller?.abort();
     if (!background) restoring.value = true;
     error.value = '';
     controller = new AbortController();
     const requestController = controller;
     const timeout = setTimeout(() => requestController.abort(), 10000);
     try {
-      const response = await apiFetch('/api/session', { signal: requestController.signal });
-      if (current !== generation) return false;
-      if (response.status === 401) {
+      try {
+        if (localStorage.getItem('nimbo-signed-out:' + origin) === '1') {
+          restoreFailed.value = false;
+          return false;
+        }
+      } catch {
+        /* storage is optional */
+      }
+      const signal = requestController.signal;
+      let response: Response | undefined;
+      const profileRequest = {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profileKey: savedKey }),
+        signal,
+      };
+      if (!remoteServer()) {
+        if (savedKey) {
+          response = await serverFetch(origin, '/api/session/profile', profileRequest);
+        } else if (!profileOnly) {
+          response = await serverFetch(origin, '/api/session', { signal });
+        }
+        if (current !== generation || activeServer.value !== origin) return false;
+      }
+      // Older servers have no cookie-and-profile verification route.
+      if (savedKey && (!response || [401, 404, 405].includes(response.status))) {
+        response = await serverFetch(origin, '/api/profile-session', profileRequest);
+        if (current !== generation || activeServer.value !== origin) return false;
+      }
+      if (!response || response.status === 401 || response.status === 403) {
+        if (response && (savedKey || response.status === 403)) {
+          const denial = await response.json().catch(() => null);
+          if (current !== generation || activeServer.value !== origin) return false;
+          error.value =
+            typeof denial?.error === 'string' ? denial.error : 'Сохранённый вход недоступен.';
+        }
         restoreFailed.value = false;
         return false;
       }
       if (!response.ok) throw new Error();
       const result = await response.json();
-      if (current !== generation) return false;
+      if (current !== generation || activeServer.value !== origin) return false;
+      if (
+        !result.session ||
+        typeof result.session !== 'string' ||
+        typeof result.member?.name !== 'string'
+      )
+        throw new Error('Некорректный ответ сервера при восстановлении сессии.');
+      if (background && member.value?.id && member.value.id !== result.member.id) {
+        restoreFailed.value = false;
+        error.value = 'Текущая сессия принадлежит другому профилю.';
+        return false;
+      }
       session.value = result.session;
       member.value = result.member;
       authenticated.value = true;
@@ -65,7 +105,10 @@ export function useAccess() {
   }
   function renew() {
     if (!renewal) {
-      const pending = restore(true).finally(() => {
+      const pending = restore({
+        background: true,
+        savedKey: remoteServer() ? profileKey.value : '',
+      }).finally(() => {
         if (renewal === pending) renewal = undefined;
       });
       renewal = pending;
@@ -84,11 +127,9 @@ export function useAccess() {
         signal: AbortSignal.timeout(10000),
       });
       if (!response.ok) throw new Error();
-      if (remote) {
-        try {
-          localStorage.setItem('nimbo-signed-out:' + origin, '1');
-        } catch {}
-      }
+      try {
+        localStorage.setItem('nimbo-signed-out:' + origin, '1');
+      } catch {}
       if (origin !== activeServer.value) return true;
       reset();
       return true;

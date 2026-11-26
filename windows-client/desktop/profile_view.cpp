@@ -146,7 +146,7 @@ void DesktopWindow::renderProfile(){
         auto* stay=control(UiText::Cancel(),"quiet",26);removal->addWidget(stay);box->addWidget(reason);reason->hide();connect(stay,&QPushButton::clicked,reason,&QWidget::hide);
         connect(leave,&QPushButton::clicked,reason,[=]{editor->hide();reason->show();});serversBox->addSpacing(12);
     }
-    auto* add=control(UiText::AddServer(),"add",44);add->setIcon(icon("plus"));serversBox->addWidget(add);
+    auto* add=control(UiText::AddServer(),"add",44);add->setObjectName("startAddServer");add->setIcon(icon("plus"));serversBox->addWidget(add);
     auto* newServer=panel("#1b1b1b",12);serversBox->addWidget(newServer);auto* nf=stack(newServer,12,6);
     nf->addWidget(caption(UiText::NewServer(),12,"#eee",true));auto* addressField=field(nf,UiText::AddressOrInvitationLink());addressField->setPlaceholderText("https://nimbo.example.com");auto* code=field(nf,UiText::InvitationCode());
     addressField->setObjectName("addServerAddress");code->setObjectName("addServerCode");
@@ -167,6 +167,9 @@ void DesktopWindow::renderProfile(){
         for(auto value:servers){
             const auto entry=value.toObject();
             if(!url.isEmpty() && DesktopProfile::origin(entry["url"].toString())==url){
+                if(deniedOrigin==url && deniedProfile==localId && !code->text().trimmed().isEmpty()){
+                    switchServer(entry,true,code->text().trimmed());return;
+                }
                 if(!local && api.server==url)openView("room");else switchServer(entry);
                 return;
             }
@@ -271,7 +274,10 @@ void DesktopWindow::renderProfile(){
         connect(remove,&QPushButton::clicked,confirm,&QWidget::show);connect(no,&QPushButton::clicked,confirm,&QWidget::hide);
         connect(yes,&QPushButton::clicked,yes,[this,id]{removeLocalProfile(id);});
     }
-    main->addSpacing(12);auto* logoutButton=control(UiText::SignOutOfProfile(),"danger",34);logoutButton->setObjectName("logout");main->addWidget(logoutButton,0,Qt::AlignRight);connect(logoutButton,&QPushButton::clicked,this,[this,local]{if(local)showLogin();else logout();});
+    main->addSpacing(12);auto* logoutButton=control(UiText::SignOutOfProfile(),"danger",34);logoutButton->setObjectName("logout");main->addWidget(logoutButton,0,Qt::AlignRight);connect(logoutButton,&QPushButton::clicked,this,[this,local]{
+        if(!local){logout();return;}
+        QSettings(dataPath+"/desktop.ini",QSettings::IniFormat).setValue("resumeProfile",QString());showLogin();
+    });
     fade(page);
 }
 

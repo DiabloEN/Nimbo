@@ -1091,14 +1091,25 @@ void DesktopWindow::showSwitchNotice(QString message,bool busy){
         switchNotice->setStyleSheet("#serverSwitchStatus{background:#252525;border-radius:12px} QPushButton{background:transparent;border:0;padding:4px;font-size:12px}");
         auto* line=new QHBoxLayout(switchNotice);line->setContentsMargins(16,10,16,10);line->setSpacing(14);
         switchMessage=text("","font-size:12px;color:#ddd");switchMessage->setWordWrap(true);line->addWidget(switchMessage);
+        switchInvite=new QPushButton(UiText::SignIn());line->addWidget(switchInvite);
+        connect(switchInvite,&QPushButton::clicked,this,[this]{
+            const auto target=deniedOrigin;if(target.isEmpty() || deniedProfile!=localId)return;
+            finishServerSwitch();
+            if(pages->currentWidget()==localHome)openLocalHome();else openView("profile");
+            auto* page=pages->currentWidget()==localHome?localHome:detailPage;
+            if(auto* start=page->findChild<QPushButton*>("startAddServer"))start->click();
+            if(auto* input=page->findChild<QLineEdit*>("addServerAddress"))input->setText(target.toString());
+            if(auto* code=page->findChild<QLineEdit*>("addServerCode"))code->setFocus();
+        });
         switchAction=new QPushButton;line->addWidget(switchAction);
         connect(switchAction,&QPushButton::clicked,this,[this]{finishServerSwitch();});
     }
-    switchAction->setText(busy?UiText::Cancel():UiText::Close());switchMessage->setText(message);
+    switchInvite->hide();switchAction->setText(busy?UiText::Cancel():UiText::Close());switchMessage->setText(message);
     switchMessage->setFixedWidth(qBound(50,switchMessage->fontMetrics().horizontalAdvance(message)+2,qMax(50,width()-160)));
     switchNotice->adjustSize();switchNotice->move((width()-switchNotice->width())/2,16);switchNotice->show();switchNotice->raise();
 }
-void DesktopWindow::finishServerSwitch(const QString& error){
+void DesktopWindow::finishServerSwitch(const QString& error,bool denied){
+    if(denied){deniedOrigin=QUrl(switchTarget);deniedProfile=localId;}
     pendingUpdateView={};
     if(switchProbe){
         auto* probe=switchProbe.data();
@@ -1108,8 +1119,21 @@ void DesktopWindow::finishServerSwitch(const QString& error){
     }
     switchTarget.clear();serverSwitch->setEnabled(true);
     if(localHome)localHome->setEnabled(true);
+    if(!error.isEmpty() && authRestorePage && pages->currentWidget()==authRestorePage){
+        if(denied){
+            const auto url=authRestoreEntry["url"].toString();
+            showLogin();clearAuthRestore();
+            address->setText(url);loginLinkTarget->setText(QString(UiText::ServerLinkTarget()).arg(url));loginLinkTarget->show();
+            QSettings(dataPath+"/desktop.ini",QSettings::IniFormat).setValue("resumeProfile",QString());
+            note(error);
+        }else{
+            authRestoreStatus->setText(error);authRestoreStatus->show();authRestoreRetry->show();
+        }
+        return;
+    }
     if(!error.isEmpty()){
         showSwitchNotice(error,false);
+        if(denied){switchInvite->show();switchNotice->adjustSize();}
         if(pages->currentWidget()==localHome)note(error);
     }else if(switchNotice)switchNotice->hide();
 }
@@ -1125,7 +1149,8 @@ void DesktopWindow::switchServer(const QJsonObject& entry,bool enroll,const QStr
     }
     serverSwitch->setEnabled(false);
     if(localHome && pages->currentWidget()==localHome){localHome->setEnabled(false);note(UiText::Connecting());}
-    showSwitchNotice(UiText::ConnectingTo()+entry["name"].toString(target.authority()),true);
+    if(!authRestorePage || pages->currentWidget()!=authRestorePage)
+        showSwitchNotice(UiText::ConnectingTo()+entry["name"].toString(target.authority()),true);
     prepareServer(entry,enroll,code);
 }
 
@@ -1136,7 +1161,7 @@ void DesktopWindow::clearPreparedServers(){
 
 void DesktopWindow::warmSavedServers(){
     // Prepare at most two alternatives. Only an explicit click changes the active server.
-    if(pages->currentIndex()==0)return;
+    if(pages->currentIndex()==0 || (authRestorePage && pages->currentWidget()==authRestorePage))return;
     int remaining=2;
     for(const auto& value:profile["servers"].toArray()){
         const auto entry=value.toObject();
@@ -1163,7 +1188,7 @@ void DesktopWindow::prepareServer(QJsonObject entry,bool enroll,const QString& c
     }
     auto* probe=new ServerApi(this);probe->server=target;state.probe=probe;
     if(switchTarget==target.toString())switchProbe=probe;
-    auto finish=[this,target,probe](QString error){
+    auto finish=[this,target,probe](QString error,bool denied=false){
         auto it=preparedServers.find(target);
         if(it==preparedServers.end() || it->probe!=probe)return;
         it->probe=nullptr;
@@ -1171,7 +1196,7 @@ void DesktopWindow::prepareServer(QJsonObject entry,bool enroll,const QString& c
         const bool requested=switchProbe==probe;
         if(requested)switchProbe=nullptr;
         probe->reset();probe->deleteLater();
-        if(requested && !error.isEmpty())finishServerSwitch(error);
+        if(requested && !error.isEmpty())finishServerSwitch(error,denied);
     };
     QTimer::singleShot(15000,probe,[finish]{finish(UiText::TheServerDidNotRespondInTime2());});
     auto workspaceRequest=[this,target,probe,finish](QJsonObject saved,QString member){
@@ -1195,19 +1220,22 @@ void DesktopWindow::prepareServer(QJsonObject entry,bool enroll,const QString& c
     }
     QJsonObject body{{"profileKey",key}};
     if(enroll){body["name"]=entry["displayName"];body["password"]=code;}
-    probe->request("POST",enroll?"/api/auth":"/api/profile-session",body,[probe,entry,workspaceRequest,finish](QJsonObject auth,QString error) mutable {
+    auto accept=[probe,entry,workspaceRequest,finish](QJsonObject auth,QString error,int status) mutable {
         const auto member=auth["member"].toObject()["id"].toString();
         if(!error.isEmpty() || member.isEmpty() || auth["session"].toString().isEmpty()){
-            finish(error.isEmpty()?QString::fromUtf8(UiText::NoServerSessionReceived()):error);return;
+            finish(error.isEmpty()?QString::fromUtf8(UiText::NoServerSessionReceived()):error,status==401 || status==403);return;
         }
         probe->token=auth["session"].toString();
         entry["profileKey"]=auth["profileKey"].toString(entry["profileKey"].toString());
         workspaceRequest(entry,member);
-    });
+    };
+    if(enroll)probe->request("POST","/api/auth",body,[accept](QJsonObject auth,QString error) mutable {accept(auth,error,0);});
+    else probe->profileSession(key,std::move(accept));
 }
 
 void DesktopWindow::usePreparedServer(const QUrl& target,QJsonObject entry,bool registered){
-    const bool fromHome=localHome && pages->currentWidget()==localHome;
+    const bool restoring=authRestorePage && pages->currentWidget()==authRestorePage;
+    const bool fromHome=restoring || (localHome && pages->currentWidget()==localHome);
     const auto ready=preparedServers.take(target);
     if(attachmentViewer){pages->setCurrentIndex(1);pages->removeWidget(attachmentViewer);attachmentViewer->deleteLater();attachmentViewer=nullptr;}
     const auto data=ready.workspace;
@@ -1233,7 +1261,7 @@ void DesktopWindow::usePreparedServer(const QUrl& target,QJsonObject entry,bool 
     }
     if(joining && callIdentity.isEmpty()){pendingVoiceRoom.clear();setCall(false);}
 
-    api.reset();imageRequests.clear();api.server=target;api.token=session;workspaceLatency=0;workspaceFailed=false;QSettings(dataPath+"/desktop.ini",QSettings::IniFormat).setValue("lastServer",target.toString());
+    api.reset();imageRequests.clear();api.server=target;api.token=session;workspaceLatency=0;workspaceFailed=false;rememberActiveServer();
     auto servers=profile.value("servers").toArray();auto saved=entry;if(!saved["customName"].toBool())saved["name"]=data["name"];
     int index=0;while(index<servers.size()&&DesktopProfile::origin(servers[index].toObject()["url"].toString())!=target)++index;
     if(index==servers.size())servers.append(saved);else servers[index]=saved;if(servers!=profile["servers"].toArray()){profile["servers"]=servers;saveLocal();}
@@ -1249,6 +1277,7 @@ void DesktopWindow::usePreparedServer(const QUrl& target,QJsonObject entry,bool 
     clearChatHistory();compose->clear();stageSignature.clear();note({});renderWorkspace(data,WorkspaceRefresh::All);openView("room");
     if(fromHome){
         pages->setCurrentIndex(1);
+        if(restoring){password->clear();clearAuthRestore();}
         setMemberPanel(QSettings(dataPath+"/desktop.ini",QSettings::IniFormat).value("membersExpanded",false).toBool(),false);
         bindMute();timer.start(3000);
     }
@@ -1280,5 +1309,8 @@ void DesktopWindow::usePreparedServer(const QUrl& target,QJsonObject entry,bool 
     QTimer::singleShot(0,this,&DesktopWindow::warmSavedServers);
 }
 void DesktopWindow::logout(){
-    api.request("DELETE","/api/access-session",{},[this](auto,QString error){if(!error.isEmpty())note(error);else showLogin();});
+    api.request("DELETE","/api/access-session",{},[this](auto,QString error){
+        if(!error.isEmpty()){note(error);return;}
+        QSettings(dataPath+"/desktop.ini",QSettings::IniFormat).setValue("resumeProfile",QString());showLogin();
+    });
 }

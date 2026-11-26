@@ -131,6 +131,9 @@ DesktopWindow::DesktopWindow(QString directory,bool generated,QJsonObject restar
     connect(&mentionTimer,&QTimer::timeout,this,&DesktopWindow::acknowledgeVisibleMentions);
     if(legacyInstalledUpdate)
         restartView={{"profile",localId},{"server",prefs.value("lastServer").toString()},{"view","general"},{"bottom",true}};
+    if(restartView.isEmpty() && !localId.isEmpty() && prefs.contains("lastServer") &&
+       prefs.value("resumeProfile",localId).toString()==localId)
+        restartView={{"profile",localId},{"server",prefs.value("lastServer").toString()},{"view","room"}};
     restoreUpdateServer(restartView);
 }
 
@@ -153,11 +156,42 @@ void DesktopWindow::restoreUpdateServer(const QJsonObject& route){
     for(const auto value:profile["servers"].toArray()){
         const auto entry=value.toObject();
         const auto origin=DesktopProfile::origin(entry["url"].toString());
-        if(origin.isEmpty() || origin.toString()!=route["server"].toString())continue;
-        pendingUpdateView=route;
-        switchServer(entry);
+        if(origin.isEmpty() || origin.toString()!=route["server"].toString() || entry["profileKey"].toString().isEmpty())continue;
+        startAuthRestore(entry,route);
         return;
     }
+}
+void DesktopWindow::startAuthRestore(QJsonObject entry,QJsonObject route){
+    if(!authRestorePage){
+        authRestorePage=new QWidget;authRestorePage->setObjectName("authRestorePage");
+        auto* column=new QVBoxLayout(authRestorePage);column->setAlignment(Qt::AlignCenter);column->setSpacing(12);
+        auto* brand=label("nimbo.","font-weight:700;font-size:36px");brand->setObjectName("authRestoreBrand");
+        column->addWidget(brand,0,Qt::AlignCenter);
+        authRestoreStatus=label({},"font-size:12px;color:#a0a0a0");authRestoreStatus->setObjectName("authRestoreStatus");
+        authRestoreStatus->setTextFormat(Qt::PlainText);column->addWidget(authRestoreStatus,0,Qt::AlignCenter);
+        authRestoreRetry=new QPushButton(UiText::Retry());authRestoreRetry->setObjectName("authRestoreRetry");Ui::compactButton(authRestoreRetry);
+        column->addWidget(authRestoreRetry,0,Qt::AlignCenter);
+        auto* back=new QPushButton(UiText::OpenProfile());back->setObjectName("authRestoreProfile");Ui::compactButton(back);column->addWidget(back,0,Qt::AlignCenter);
+        connect(back,&QPushButton::clicked,this,[this]{
+            finishServerSwitch();QSettings(dataPath+"/desktop.ini",QSettings::IniFormat).setValue("resumeProfile",QString());
+            openLocalHome();clearAuthRestore();
+        });
+        connect(authRestoreRetry,&QPushButton::clicked,this,[this]{startAuthRestore(authRestoreEntry,authRestoreRoute);});
+        pages->addWidget(authRestorePage);
+    }
+    authRestoreEntry=entry;authRestoreRoute=route;pendingUpdateView=route;
+    authRestoreRetry->hide();authRestoreStatus->hide();pages->setCurrentWidget(authRestorePage);
+    switchServer(entry);
+}
+void DesktopWindow::clearAuthRestore(){
+    authRestoreEntry={};authRestoreRoute={};
+    if(auto* page=std::exchange(authRestorePage,nullptr)){pages->removeWidget(page);page->deleteLater();}
+    authRestoreStatus=nullptr;authRestoreRetry=nullptr;
+}
+void DesktopWindow::rememberActiveServer(){
+    QSettings prefs(dataPath+"/desktop.ini",QSettings::IniFormat);
+    prefs.setValue("lastServer",api.server.toString());prefs.setValue("resumeProfile",localId);
+    if(deniedProfile==localId && deniedOrigin==api.server){deniedProfile.clear();deniedOrigin=QUrl();}
 }
 // Register only static interface labels, before any profile or server data is loaded.
 QList<DesktopWindow::ChromeText> DesktopWindow::authoredChrome(QWidget* root) {
@@ -594,7 +628,7 @@ void DesktopWindow::chooseProfile(const QString& id,const QString& code,std::fun
         next["servers"]=servers;entry["profile"]=next;entries[index]=entry;
         if(!storeLibrary(entries,id)){rejected();return;}
         showLogin();profile=next;nickname->setText(target["displayName"].toString());applyProfileLanguage();restoreCameraEffect();
-        api.server=origin;api.token=session["session"].toString();saveLocal();
+        api.server=origin;api.token=session["session"].toString();saveLocal();rememberActiveServer();
         pages->setCurrentIndex(1);bindMute();openView("profile");refresh();timer.start(3000);
     });
 }
@@ -608,22 +642,28 @@ void DesktopWindow::signIn(bool fromProfile,bool imported) {
     if(!loginButton->isEnabled())return;
     auto url=DesktopProfile::origin(address->text());
     auto name=nickname->text().trimmed();
-    QJsonArray servers=profile.value("servers").toArray(); QString key;
-    for(auto item:servers) if(DesktopProfile::origin(item.toObject()["url"].toString())==url)key=item.toObject()["profileKey"].toString();
+    QJsonArray servers=profile.value("servers").toArray(); QString key;QJsonObject saved;
+    for(auto item:servers) if(DesktopProfile::origin(item.toObject()["url"].toString())==url){saved=item.toObject();key=saved["profileKey"].toString();}
     const bool linked=!url.isEmpty() && loginLinkTarget->property("origin").toUrl()==url;
-    if(linked && !key.isEmpty()){fromProfile=true;if(name.isEmpty())name=profile["name"].toString();}
+    const bool freshInvitation=deniedProfile==localId && deniedOrigin==url && !password->text().isEmpty();
+    if(linked && !key.isEmpty() && !freshInvitation){fromProfile=true;if(name.isEmpty())name=profile["name"].toString();}
     if(linked && key.isEmpty() && password->text().isEmpty()){note(UiText::AnInvitationCodeIsRequiredForThe());return;}
     if(url.isEmpty()||name.isEmpty()||(!fromProfile&&(password->text().isEmpty()||password->text().size()>256))){note(UiText::EnterTheServerAddressYourNameAnd());return;}
     if(fromProfile&&key.isEmpty()){note(UiText::ThisProfileHasNoKeyForThe());return;}
+    if(fromProfile){
+        resetLoginImport();api.reset();imageRequests.clear();
+        startAuthRestore(saved,{{"view",imported && !linked?"profile":"room"}});
+        return;
+    }
     if(key.isEmpty())key=QString::fromLatin1(DesktopProfile::randomKey());
     QJsonObject body{{"profileKey",key}};
-    if(!fromProfile){body["name"]=name;body["password"]=password->text();}
+    body["name"]=name;body["password"]=password->text();
     resetLoginImport();api.reset();imageRequests.clear(); api.server=url;
     pages->currentWidget()->setEnabled(false); note(UiText::Connecting());
-    api.request("POST",fromProfile?"/api/profile-session":"/api/auth",body,[this,url,name,servers,key,imported,linked](QJsonObject data,QString error) mutable {
+    api.request("POST","/api/auth",body,[this,url,name,servers,key](QJsonObject data,QString error) mutable {
         pages->currentWidget()->setEnabled(true);
-        if(!error.isEmpty()||data["session"].toString().isEmpty()){if(imported)openLocalHome();note(error.isEmpty()?UiText::NoSignInTokenReceived():error);return;}
-        password->clear(); api.token=data["session"].toString();QSettings(dataPath+"/desktop.ini",QSettings::IniFormat).setValue("lastServer",url.toString());
+        if(!error.isEmpty()||data["session"].toString().isEmpty()){note(error.isEmpty()?UiText::NoSignInTokenReceived():error);return;}
+        password->clear(); api.token=data["session"].toString();
         auto member=data["member"].toObject(); auto display=member["name"].toString(name);
         if(profile.value("format")!="nimbo-profile")profile={{"format","nimbo-profile"},{"version",1},{"name",display},{"avatar",""}};
         const auto credential=data["profileKey"].toString(key);
@@ -632,8 +672,8 @@ void DesktopWindow::signIn(bool fromProfile,bool imported) {
         entry["url"]=url.toString();entry["displayName"]=display;entry["profileKey"]=credential;entry["role"]=member["role"];
         if(!entry.contains("name"))entry["name"]=url.host();
         if(index<servers.size())servers[index]=entry;else servers.append(entry);
-        profile["servers"]=servers; pages->setCurrentIndex(1); note({}); saveLocal();
-        bindMute();openView(imported && !linked?"profile":"room");setMemberPanel(QSettings(dataPath+"/desktop.ini",QSettings::IniFormat).value("membersExpanded",false).toBool(),false);
+        profile["servers"]=servers; pages->setCurrentIndex(1); note({}); saveLocal();rememberActiveServer();
+        bindMute();openView("room");setMemberPanel(QSettings(dataPath+"/desktop.ini",QSettings::IniFormat).value("membersExpanded",false).toBool(),false);
         serverTitle->setText(url.host()); refresh(); timer.start(3000);
     });
 }

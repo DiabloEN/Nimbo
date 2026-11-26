@@ -662,6 +662,61 @@ public:
         return true;
     }
 private slots:
+    void authRestoration(){
+        QTemporaryDir dir;QTcpServer server;QVERIFY(server.listen(QHostAddress::LocalHost));
+        const QString origin=QString("http://127.0.0.1:%1").arg(server.serverPort());
+        const auto key=QString::fromLatin1(DesktopProfile::randomKey());
+        const QJsonObject me{{"id","member"},{"name","Returner"},{"role","member"}};
+        const QJsonObject saved{{"url",origin},{"profileKey",key},{"name","Fixture"},{"displayName","Returner"},{"role","member"}};
+        const QJsonObject profile{{"format","nimbo-profile"},{"version",1},{"name","Returner"},{"avatar",""},{"servers",QJsonArray{saved}}};
+        int status=200,requests=0;
+        connect(&server,&QTcpServer::newConnection,&server,[&]{
+            while(auto* socket=server.nextPendingConnection()){
+                connect(socket,&QTcpSocket::disconnected,socket,&QObject::deleteLater);
+                connect(socket,&QTcpSocket::readyRead,socket,[&,socket]{
+                    const auto bytes=socket->peek(socket->bytesAvailable());if(!bytes.contains("\r\n\r\n")||socket->property("handled").toBool())return;
+                    socket->setProperty("handled",true);socket->readAll();
+                    const auto path=bytes.split(' ').value(1);
+                    int result=200,delay=0;QJsonObject body;
+                    if(path=="/api/profile-session"){
+                        ++requests;result=status;delay=380;
+                        if(result==200)body={{"member",me},{"session","fixture-session"},{"profileKey",key}};
+                        else body={{"error","Fixture unavailable"}};
+                    }else if(path.startsWith("/api/workspace")){
+                        body={{"selfId","member"},{"members",QJsonArray{me}},{"name","Fixture"},{"channels",QJsonArray{QJsonObject{{"kind","text"},{"name","Room"},{"id","text"}}}}};
+                    }
+                    const auto json=QJsonDocument(body).toJson(QJsonDocument::Compact);
+                    QTimer::singleShot(delay,socket,[socket,result,json]{
+                        socket->write("HTTP/1.1 "+QByteArray::number(result)+" Fixture\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: "+QByteArray::number(json.size())+"\r\n\r\n"+json);
+                        socket->disconnectFromHost();
+                    });
+                });
+            }
+        });
+        QString id;
+        {DesktopWindow seed(dir.path(),true);seed.profile=profile;seed.saveLocal();id=seed.localId;}
+        QSettings prefs(dir.path()+"/desktop.ini",QSettings::IniFormat);
+        // A previous Windows version saved the address only. It belongs to this profile.
+        prefs.setValue("lastServer",origin);prefs.remove("resumeProfile");prefs.sync();
+        DesktopWindow win(dir.path(),true);win.setAttribute(Qt::WA_DontShowOnScreen);win.show();
+        QCOMPARE(win.pages->currentWidget(),win.authRestorePage);QVERIFY(!win.loginButton->isVisible());
+        int loginTransitions=0;connect(win.pages,&QStackedWidget::currentChanged,&win,[&](int index){if(index==0)++loginTransitions;});
+        QTRY_VERIFY(requests>0);QTest::qWait(120);QVERIFY(win.authRestorePage && !win.loginButton->isVisible());
+        QTRY_COMPARE(win.selfId,QString("member"));QCOMPARE(loginTransitions,0);QCOMPARE(win.api.server,QUrl(origin));QVERIFY(!win.authRestorePage);
+        status=503;win.showLogin();loginTransitions=0;
+        win.password->setText(origin);win.loginButton->click();QTRY_VERIFY(win.authRestoreRetry && win.authRestoreRetry->isVisible());
+        QCOMPARE(loginTransitions,0);QVERIFY(!win.loginButton->isVisible());
+        status=200;win.authRestoreRetry->click();QTRY_COMPARE(win.selfId,QString("member"));QCOMPARE(loginTransitions,0);
+        status=401;win.showLogin();loginTransitions=0;win.password->setText(origin+"/#/server");win.loginButton->click();
+        QTest::qWait(100);QVERIFY(!win.loginButton->isVisible());QTRY_VERIFY(win.loginButton->isVisible());
+        QCOMPARE(loginTransitions,1);QCOMPARE(win.address->text(),origin);QCOMPARE(win.profile["servers"].toArray().first().toObject()["profileKey"].toString(),key);
+        status=200;win.password->setText(origin);win.loginButton->click();QVERIFY(win.authRestorePage);
+        auto* back=win.authRestorePage->findChild<QPushButton*>("authRestoreProfile");QVERIFY(back);back->click();
+        QTest::qWait(440);QCOMPARE(win.pages->currentWidget(),win.localHome);QVERIFY(win.api.token.isEmpty());
+        {DesktopWindow signedOut(dir.path(),true);QCOMPARE(signedOut.pages->currentWidget(),signedOut.localHome);}
+        prefs.setValue("lastServer","http://localhost:7777");prefs.remove("resumeProfile");prefs.sync();
+        {DesktopWindow foreign(dir.path(),true);QCOMPARE(foreign.pages->currentWidget(),foreign.localHome);QVERIFY(foreign.api.token.isEmpty());}
+    }
     void serverLinks(){
         const QString host="https://chat.example:8443",code="AbCdEf0123456789_-abcd";
         const auto url=QUrl(host);
@@ -2622,8 +2677,8 @@ private slots:
         if(!url.isEmpty()){
             auto unregistered=original;unregistered["servers"]=QJsonArray{QJsonObject{{"url",url},{"profileKey",QString::fromLatin1(DesktopProfile::randomKey())}}};
             win.showLogin();win.address->setText(url);win.loadLoginFile(QJsonDocument(unregistered).toJson());
-            QTRY_COMPARE_WITH_TIMEOUT(win.pages->currentWidget(),win.localHome,10000);QVERIFY(win.api.token.isEmpty());
-            QVERIFY(!win.localStatus->text().isEmpty());QCOMPARE(win.localProfiles.size(),2);
+            QTRY_VERIFY_WITH_TIMEOUT(win.loginButton->isVisible(),10000);QVERIFY(win.api.token.isEmpty());
+            QVERIFY(!win.loginStatus->text().isEmpty());QCOMPARE(win.address->text(),url);QCOMPARE(win.localProfiles.size(),2);
         }
     }
     void switchLocalProfile(){

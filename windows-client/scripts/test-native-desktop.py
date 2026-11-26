@@ -64,7 +64,7 @@ def main():
                         peer.terminate()
                         peer.wait(timeout=10)
         return
-    out=ROOT/"artifacts/native-desktop";out.mkdir(exist_ok=True)
+    out=ROOT/"artifacts/native-desktop";out.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory(dir=out) as tmp:
         temp=Path(tmp);db=temp/"workspace.json";fixture=temp/"fixture.nimbo"
         profile_fixture(fixture,"write")

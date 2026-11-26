@@ -36,6 +36,15 @@ private:
     void syncUpdateContext();
     QJsonObject captureUpdateView() const;
     void restoreUpdateServer(const QJsonObject& route);
+    void startAuthRestore(QJsonObject entry,QJsonObject route);
+    void clearAuthRestore();
+    void rememberActiveServer();
+    QWidget* authRestorePage=nullptr;
+    QLabel* authRestoreStatus=nullptr;
+    QPushButton* authRestoreRetry=nullptr;
+    QJsonObject authRestoreEntry,authRestoreRoute;
+    QUrl deniedOrigin;
+    QString deniedProfile;
     QJsonObject pendingUpdateView;
     void recordServerOffer(const QJsonObject& state);
     void refreshUpdateBadge();
@@ -125,7 +134,8 @@ private:
     QWidget* switchNotice=nullptr;
     QLabel* switchMessage=nullptr;
     QPushButton* switchAction=nullptr;
-    void finishServerSwitch(const QString& error={});
+    QPushButton* switchInvite=nullptr;
+    void finishServerSwitch(const QString& error={},bool denied=false);
     void showSwitchNotice(QString text,bool busy);
     void switchServer(const QJsonObject& entry, bool enroll = false, const QString& code = {},QString returnIdentity = {});
     void openView(const QString& view);

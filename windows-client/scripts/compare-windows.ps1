@@ -41,7 +41,8 @@ if(!$Fresh){
 $plain=[IO.File]::ReadAllBytes((Join-Path $Fixture $(if($Switcher){'multi-profile.json'}else{'test-profile.json'})))
 [IO.File]::WriteAllBytes((Join-Path $data 'profile.dpapi'),[Security.Cryptography.ProtectedData]::Protect($plain,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser))
 }
-if($env:NIMBO_NATIVE_TEST_URL){[IO.File]::WriteAllText((Join-Path $data 'desktop.ini'),("[General]"+[Environment]::NewLine+"lastServer="+$env:NIMBO_NATIVE_TEST_URL))}
+$initialServer=if($env:NIMBO_QA_CHAT_CALL_CLOSE){$env:NIMBO_NATIVE_TEST_URL2}else{$env:NIMBO_NATIVE_TEST_URL}
+if($initialServer){[IO.File]::WriteAllText((Join-Path $data 'desktop.ini'),("[General]"+[Environment]::NewLine+"lastServer="+$initialServer))}
 if($VoiceRejoin){$env:NIMBO_QA_PLAY_CUES='1'}
 $env:QT_ACCESSIBILITY='1'
 $env:QT_SCALE_FACTOR_ROUNDING_POLICY='PassThrough'
@@ -97,6 +98,14 @@ try{
     Shot "missing"; $names=$root.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition) | ForEach-Object {$_.Current.Name} | Where-Object {$_} | Select-Object -First 25;throw "Missing control $name. Found $($names -join ', ')"
   }
   function Press([string]$name){$e=Find-Control $name;$e.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke();Start-Sleep -Milliseconds 250}
+  function Visible-Control([string]$name){
+    $match=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,$name)
+    $window=[Windows.Automation.AutomationElement]::FromHandle($hw)
+    foreach($element in $window.FindAll([Windows.Automation.TreeScope]::Descendants,$match)){
+      $bounds=$element.Current.BoundingRectangle
+      if(!$element.Current.IsOffscreen -and !$bounds.IsEmpty -and $bounds.Width -gt 0 -and $bounds.Height -gt 0){return $element}
+    }
+  }
   function Test-ChannelIcons {
     Press 'Изменить общий';$null=Find-Control 'Название канала общий';Shot 'channel-edit'
     Press 'Выбрать иконку канала'
@@ -227,8 +236,15 @@ try{
   if($Fresh){
     Shot 'login';return
   }
-  $initialServer=if($env:NIMBO_QA_CHAT_CALL_CLOSE){$env:NIMBO_NATIVE_TEST_URL2}else{$env:NIMBO_NATIVE_TEST_URL}
-  Press ('Открыть сервер '+([uri]$initialServer).Authority)
+  $cardName='Открыть сервер '+([uri]$initialServer).Authority
+  for($attempt=0;$attempt -lt 100;$attempt++){
+    if(Visible-Control 'Настройки'){break}
+    $card=Visible-Control $cardName
+    if($card -and $card.Current.IsEnabled){
+      $card.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke();break
+    }
+    Start-Sleep -Milliseconds 100
+  }
   $null=Find-Control 'Настройки'
   if($IdleMemory){
     $csv=Join-Path $OutputDir 'idle-memory.csv'
@@ -883,6 +899,10 @@ try{
           Press ('Открыть сервер '+([uri]$env:NIMBO_NATIVE_TEST_URL).Authority)
           $null=Find-Control 'Большая история' ([Windows.Automation.ControlType]::ListItem)
           Select-TestRoom 'Гостиная'
+          $previewJoin=Visible-Control 'Присоединяйтесь к разговору.'
+          if($previewJoin -and $previewJoin.Current.IsEnabled){
+            $previewJoin.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+          }
           $null=Find-Control 'Выключить микрофон'
           $observerHeaders=@{Authorization='Bearer '+$env:NIMBO_QA_OBSERVER_SESSION;'X-Nimbo-Client'='1';Origin='https://desktop.nimbo.invalid'}
           function Observed-Call {

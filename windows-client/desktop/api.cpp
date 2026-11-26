@@ -96,10 +96,19 @@ QNetworkRequest ServerApi::headers(const QString& path) const {
 void ServerApi::request(QByteArray method, QString path, QJsonObject body, Callback callback) {
     requestOnce(method,path,body,callback,true);
 }
-void ServerApi::requestOnce(QByteArray method,QString path,QJsonObject body,Callback callback,bool retry){
+QNetworkReply* ServerApi::sendJson(const QByteArray& method,const QString& path,const QJsonObject& body){
     auto request = headers(path);
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-    auto* reply = network.sendCustomRequest(request, method, body.isEmpty() ? QByteArray{} : QJsonDocument(body).toJson(QJsonDocument::Compact));
+    return network.sendCustomRequest(request,method,body.isEmpty()?QByteArray{}:QJsonDocument(body).toJson(QJsonDocument::Compact));
+}
+void ServerApi::profileSession(const QString& key,std::function<void(QJsonObject,QString,int)> callback){
+    auto* reply=sendJson("POST","/api/profile-session",{{"profileKey",key}});
+    finishJson(reply,[reply,callback=std::move(callback)](QJsonObject result,QString error){
+        callback(result,error,reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt());
+    });
+}
+void ServerApi::requestOnce(QByteArray method,QString path,QJsonObject body,Callback callback,bool retry){
+    auto* reply=sendJson(method,path,body);
     Retry again;
     if(retry && path!="/api/profile-session" && path!="/api/auth" && path!="/api/access-session")
         again=[=,this]{requestOnce(method,path,body,callback,false);};

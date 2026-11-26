@@ -3,6 +3,7 @@
 #include <QUrl>
 
 namespace DesktopProfile {
+QString downloadName(const QString& nickname);
 QUrl origin(QString address);
 QJsonObject validate(const QByteArray& json);
 void inspectEncrypted(const QByteArray& file);

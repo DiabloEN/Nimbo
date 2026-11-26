@@ -479,7 +479,7 @@ private:
         QVERIFY(!type->isVisible());QVERIFY(visibleButton("Создать приглашение"));
         visibleButton("Создать приглашение")->click();
         QTRY_VERIFY(type->isVisible());QCOMPARE(type->count(),6);
-        auto* label=section->findChild<QLineEdit*>();QVERIFY(label);QCOMPARE(label->maxLength(),80);
+        auto* label=section->findChild<QLineEdit*>("inviteLabel");QVERIFY(label);QCOMPARE(label->maxLength(),80);
         label->setText("Черновик");
         type->setCurrentIndex(1);visibleButton("Отмена")->click();QVERIFY(!type->isVisible());
         auto* open=visibleButton("Создать приглашение");QVERIFY(open);open->click();QCOMPARE(type->currentData().toInt(),3600);
@@ -501,12 +501,8 @@ private:
         QStringList labels;for(auto* caption:firstCard->findChildren<QLabel*>())labels.append(caption->text());
         QVERIFY(labels.contains("Для команды"));QVERIFY(labels.contains("Многоразовое"));QVERIFY(labels.contains("Только что создано"));
         QVERIFY(labels.join(" ").contains("Создано "));QVERIFY(labels.join(" ").contains("До "));
-        bool matches=false;
-        for(auto* text:section->findChildren<QPlainTextEdit*>()){
-            const auto lines=text->toPlainText().split(QChar::LineFeed);
-            if(lines.size()==4 && lines.last().endsWith(item["code"].toString()))matches=text->isReadOnly() && !text->toPlainText().contains(item["label"].toString());
-        }
-        QVERIFY(matches);
+        auto* link=firstCard->findChild<QLineEdit*>("inviteLink");QVERIFY(link && link->isReadOnly());
+        QCOMPARE(link->text(),ServerLinks::invitation(win.api.server,item["code"].toString()));
         QPushButton* revoke=nullptr;
         for(auto* b:section->findChildren<QPushButton*>())if(b->accessibleName()=="Отозвать приглашение "+*added.begin())revoke=b;
         QVERIFY(revoke);revoke->click();QTRY_COMPARE(ids(),before);
@@ -666,6 +662,74 @@ public:
         return true;
     }
 private slots:
+    void serverLinks(){
+        const QString host="https://chat.example:8443",code="AbCdEf0123456789_-abcd";
+        const auto url=QUrl(host);
+        QCOMPARE(ServerLinks::invitation(url,code),host+"/#/invite/"+code);
+        const auto legacy=QStringLiteral("Приглашение в Nimbo\nСсылка для входа: ")+host+"/#/i/"+code+"%2F%2B\nАдрес сервера: "+host;
+        const auto parsed=ServerLinks::read(legacy);QVERIFY(parsed);QCOMPARE(parsed->origin,url);QCOMPARE(parsed->code,code+"/+");
+        QCOMPARE(ServerLinks::returnLink(url),host);
+        const auto returning=ServerLinks::readEntry(ServerLinks::returnLink(url));QVERIFY(returning);QVERIFY(returning->code.isEmpty());QCOMPARE(returning->origin,url);
+        const auto oldReturn=ServerLinks::readEntry(host+"/#/server");QVERIFY(oldReturn);QVERIFY(oldReturn->code.isEmpty());QCOMPARE(oldReturn->origin,url);
+        for(const auto& raw:QStringList{host+"/#/connect/"+code,host+"/#/invite/%GG",host+"/#/invite/short",host+"/private/#/invite/"+code,
+                 "https://user@chat.example/#/invite/"+code,"http://chat.example/#/invite/"+code,host+"/#/invite/"+code+"%0A",host+"/#/invite/"+code+"%FF"})
+            QVERIFY(!ServerLinks::read(raw).has_value());
+        QTemporaryDir dir;DesktopWindow win(dir.path(),true);win.resize(1300,920);
+        win.setAttribute(Qt::WA_DontShowOnScreen);win.show();
+        win.nickname->setText("QA");win.password->setText(legacy);QCOMPARE(win.password->text(),code+"/+");QCOMPARE(win.address->text(),host);
+        win.password->setText(ServerLinks::returnLink(url));QVERIFY(win.password->text().isEmpty());
+        win.loginButton->click();QVERIFY(win.api.token.isEmpty());QVERIFY(win.api.server.isEmpty());QVERIFY(win.profile["servers"].toArray().isEmpty());
+        win.api.server=url;win.pages->setCurrentIndex(1);win.view="room";win.setMemberPanel(true,false);QCoreApplication::processEvents();
+        auto* button=win.memberPanel->findChild<QPushButton*>("copyServerLink");QVERIFY(button && button->isVisible());
+        QCOMPARE(button->size(),QSize(194,36));button->clearFocus();
+        const auto file=qEnvironmentVariable("NIMBO_QA_MEMBER_FOOTER");
+        if(!file.isEmpty()){
+            QWidget* footer=button->parentWidget();QCOMPARE(footer->size(),QSize(210,52));
+            const auto region=QRect(footer->mapTo(&win,QPoint()),footer->size());QVERIFY(win.grab(region).save(file));
+        }
+        if(QGuiApplication::platformName()=="offscreen"){
+            button->setFocus();QTest::keyClick(button,Qt::Key_Space);
+            QCOMPARE(QApplication::clipboard()->text(),host);QCOMPARE(button->text(),QString(UiText::Copied()));
+            QTRY_COMPARE_WITH_TIMEOUT(button->text(),QString(UiText::ServerLink()),3000);
+        }
+        win.setMemberPanel(false,false);QVERIFY(!button->isVisible());win.close();
+    }
+    void serverLinksLive(){
+        const QUrl first(qEnvironmentVariable("NIMBO_NATIVE_TEST_URL")),second(qEnvironmentVariable("NIMBO_NATIVE_TEST_URL2"));
+        if(first.host()!="127.0.0.1" || second.host()!="127.0.0.1")QSKIP("Two disposable localhost servers required");
+        QTemporaryDir ownerDir,guestDir,otherDir;
+        DesktopWindow owner(ownerDir.path(),true),guest(guestDir.path(),true),other(otherDir.path(),true);
+        for(auto* w:{&owner,&guest,&other}){w->setAttribute(Qt::WA_DontShowOnScreen);w->show();}
+        owner.nickname->setText("Link owner");owner.password->setText(ServerLinks::invitation(first,qEnvironmentVariable("NIMBO_NATIVE_TEST_CODE")));owner.loginButton->click();
+        QTRY_VERIFY(!owner.selfId.isEmpty());const auto ownerId=owner.selfId;
+        bool ready=false;QString invite;
+        owner.api.request("POST","/api/invitations",{{"singleUse",true},{"seconds",0}},[&](QJsonObject data,QString){invite=data["code"].toString();ready=true;});
+        QTRY_VERIFY(ready);QVERIFY(invite.size()==22);
+        const auto link=ServerLinks::invitation(first,invite);
+        owner.showLogin();owner.password->setText(link);owner.loginButton->click();QTRY_COMPARE(owner.selfId,ownerId);
+        guest.nickname->setText("Link guest");guest.password->setText(link);guest.loginButton->click();QTRY_VERIFY(!guest.selfId.isEmpty());const auto guestId=guest.selfId;
+        other.nickname->setText("Link stranger");other.password->setText(link);other.loginButton->click();
+        QTRY_VERIFY(other.pages->currentWidget()->isEnabled());QVERIFY(other.api.token.isEmpty());QVERIFY(other.profile["servers"].toArray().isEmpty());
+        guest.showLogin();guest.password->setText(ServerLinks::returnLink(first));guest.loginButton->click();QTRY_COMPARE(guest.selfId,guestId);
+        guest.openView("profile");
+        auto* addr=guest.detailPage->findChild<QLineEdit*>("addServerAddress");
+        auto* code=guest.detailPage->findChild<QLineEdit*>("addServerCode");
+        auto* add=guest.detailPage->findChild<QPushButton*>("submitServerLink");QVERIFY(addr && code && add);
+        addr->setText(ServerLinks::returnLink(second));add->click();
+        QCOMPARE(guest.profile["servers"].toArray().size(),1);QVERIFY(code->text().isEmpty());
+        const auto ownerCode=qEnvironmentVariable("NIMBO_NATIVE_TEST_CODE2");
+        code->setText(QStringLiteral("Ссылка для входа: ")+ServerLinks::invitation(second,ownerCode)+"\nАдрес сервера: "+second.toString());
+        QCOMPARE(addr->text(),second.toString());QVERIFY(code->text()==ownerCode);add->click();
+        QTRY_COMPARE(guest.profile["servers"].toArray().size(),2);
+        QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
+        addr=guest.detailPage->findChild<QLineEdit*>("addServerAddress");add=guest.detailPage->findChild<QPushButton*>("submitServerLink");QVERIFY(addr && add);
+        addr->setText(ServerLinks::returnLink(second));add->click();QTRY_COMPARE(guest.api.server,second);
+        QCOMPARE(guest.profile["servers"].toArray().size(),2);QVERIFY(!guest.api.token.isEmpty());
+        guest.showLogin();guest.password->setText(first.toString());guest.loginButton->click();QTRY_COMPARE(guest.selfId,guestId);
+        QCOMPARE(guest.api.server,first);QCOMPARE(guest.profile["servers"].toArray().size(),2);
+        guest.showLogin();guest.password->setText(second.toString()+"/#/server");guest.loginButton->click();
+        QTRY_COMPARE(guest.api.server,second);QTRY_VERIFY(!guest.selfId.isEmpty());QCOMPARE(guest.profile["servers"].toArray().size(),2);
+    }
     void installedShortcutMigration(){
         QTemporaryDir root;
         QVERIFY(root.isValid());
@@ -1113,6 +1177,114 @@ private slots:
         QCOMPARE(w.ownInkSession,epoch);
         QFile end(dir+"/done");QVERIFY(end.open(QIODevice::WriteOnly));end.close();
         w.leaveCall();QTRY_VERIFY(!w.inCall);
+    }
+    void memberPresenceLegacyResponse(){
+        for(const auto status:{404,200}){
+            QTcpServer legacy;
+            QVERIFY(legacy.listen(QHostAddress::LocalHost));
+            int requests=0,failures=0;
+            connect(&legacy,&QTcpServer::newConnection,&legacy,[&]{
+                auto* peer=legacy.nextPendingConnection();
+                connect(peer,&QIODevice::readyRead,peer,[&,peer]{
+                    if(!peer->canReadLine())return;
+                    peer->readAll();++requests;
+                    peer->write(status==200?"HTTP/1.1 200 OK\r\n":"HTTP/1.1 404 Not Found\r\n");
+                    peer->write("Content-Type: text/html\r\nContent-Length: 7\r\nConnection: close\r\n\r\n<html/>");
+                    peer->disconnectFromHost();
+                });
+            });
+            ServerApi api;api.server=QUrl(QString("http://127.0.0.1:%1").arg(legacy.serverPort()));
+            api.token="fixture";api.memberPresenceLost=[&]{++failures;};
+            const QJsonObject snapshot{{"onlineMembers",QJsonArray{}}};
+            api.syncMemberPresence(snapshot);
+            QTRY_COMPARE(failures,1);
+            QCOMPARE(api.activeWorkspacePath(),"/api/workspace");
+            for(int i=0;i<8;++i)api.syncMemberPresence(snapshot);
+            QTest::qWait(100);
+            QCOMPARE(requests,1);
+            api.reset();api.syncMemberPresence({});
+            QCOMPARE(api.activeWorkspacePath(),"/api/workspace");
+        }
+    }
+    void memberPresenceCrossClient(){
+        const auto dir=qEnvironmentVariable("NIMBO_QA_PRESENCE_DIR");
+        const auto url=qEnvironmentVariable("NIMBO_NATIVE_TEST_URL"),second=qEnvironmentVariable("NIMBO_NATIVE_TEST_URL2");
+        if(dir.isEmpty() || QUrl(url).host()!="127.0.0.1" || QUrl(second).host()!="127.0.0.1")
+            QSKIP("Requires an isolated web observer and two local servers");
+        QTemporaryDir profileDir;QVERIFY(profileDir.isValid());
+        QSettings(profileDir.path()+"/desktop.ini",QSettings::IniFormat).setValue("membersExpanded",true);
+        DesktopWindow w(profileDir.path(),true);
+        w.setAttribute(Qt::WA_DontShowOnScreen);w.resize(1264,784);w.show();
+        auto online=[&](QString name){
+            for(int i=0;i<w.members->count();++i){
+                auto* row=w.members->itemWidget(w.members->item(i));
+                if(!row)continue;
+                for(auto* label:row->findChildren<QLabel*>()){
+                    if(label->text()==name || label->text().startsWith(name+" ")){
+                        auto* avatar=row->findChild<QLabel*>("memberAvatar");
+                        return avatar && !avatar->accessibleDescription().isEmpty();
+                    }
+                }
+            }
+            return false;
+        };
+        auto mark=[&](QString label,QByteArray value="ok"){
+            QSaveFile f(dir+"/"+label);QVERIFY(f.open(QIODevice::WriteOnly));QCOMPARE(f.write(value),value.size());QVERIFY(f.commit());
+        };
+        auto marked=[&](QString label){return QFile::exists(dir+"/"+label);};
+        class FirstPaint final:public QObject{
+        public:
+            std::function<void(QWidget*)> observe;
+            bool eventFilter(QObject* obj,QEvent* event) override {
+                if(event->type()==QEvent::Paint && obj->objectName()=="memberAvatar")observe(static_cast<QWidget*>(obj));
+                return false;
+            }
+        } paints;
+        bool first=false,wrong=false;
+        paints.observe=[&](QWidget* avatar){
+            if(first)return;
+            for(auto* label:avatar->parentWidget()->findChildren<QLabel*>()){
+                if(!label->text().startsWith("Desktop Observer"))continue;
+                first=true;wrong=avatar->accessibleDescription().isEmpty();break;
+            }
+        };
+        qApp->installEventFilter(&paints);
+        w.address->setText(url);w.nickname->setText("Desktop Observer");
+        w.password->setText(qEnvironmentVariable("NIMBO_NATIVE_TEST_CODE"));w.loginButton->click();
+        QTRY_VERIFY_WITH_TIMEOUT(first,10000);QVERIFY(!wrong);QVERIFY(online("Desktop Observer"));QVERIFY(!w.inCall);
+        QString invite;
+        w.api.request("POST","/api/invitations",{{"seconds",600},{"singleUse",true}},
+                      [&](QJsonObject data,QString){invite=data["code"].toString();});
+        QTRY_VERIFY(!invite.isEmpty());mark("guest",invite.toUtf8());
+        QTRY_VERIFY_WITH_TIMEOUT(marked("web-sees-win") && online("Web Observer"),20000);
+        QVERIFY(w.members->grab().save(qEnvironmentVariable("NIMBO_QA_PRESENCE_OUTPUT")+"/windows-online.png"));
+        mark("win-sees-web");
+        QTRY_VERIFY_WITH_TIMEOUT(marked("web-disconnected") && !online("Web Observer"),25000);mark("win-sees-web-off");
+        QTRY_VERIFY_WITH_TIMEOUT(online("Web Observer"),25000);mark("win-sees-web-back");
+        // Break only this client's transport; the observer and both servers remain online.
+        QTcpServer disconnectedEndpoint;QVERIFY(disconnectedEndpoint.listen(QHostAddress::LocalHost));
+        connect(&disconnectedEndpoint,&QTcpServer::newConnection,&disconnectedEndpoint,[&]{
+            auto* socket=disconnectedEndpoint.nextPendingConnection();socket->abort();socket->deleteLater();
+        });
+        w.api.server=QUrl(QString("http://127.0.0.1:%1").arg(disconnectedEndpoint.serverPort()));
+        w.refresh();QTRY_VERIFY_WITH_TIMEOUT(w.workspaceFailed && !online("Desktop Observer") && !online("Web Observer"),10000);
+        mark("win-disconnected");QTRY_VERIFY_WITH_TIMEOUT(marked("web-sees-win-offline"),20000);
+        w.api.server=QUrl(url);w.refresh();
+        QTRY_VERIFY_WITH_TIMEOUT(online("Desktop Observer") && online("Web Observer"),15000);
+        QTRY_VERIFY_WITH_TIMEOUT(marked("web-sees-win-recovered"),20000);
+        const auto original=w.profile["servers"].toArray().first().toObject();
+        first=false;wrong=false;
+        w.switchServer(QJsonObject{{"url",second},{"displayName","Desktop Observer"}},true,qEnvironmentVariable("NIMBO_NATIVE_TEST_CODE2"));
+        QTRY_COMPARE_WITH_TIMEOUT(w.api.server,QUrl(second),10000);
+        QTRY_VERIFY_WITH_TIMEOUT(online("Desktop Observer"),10000);QVERIFY(!w.inCall);
+        mark("switched");
+        QTRY_VERIFY_WITH_TIMEOUT(marked("web-sees-switch"),20000);
+        first=false;wrong=false;w.switchServer(original);
+        QTRY_COMPARE_WITH_TIMEOUT(w.api.server,QUrl(url),10000);
+        QTRY_VERIFY_WITH_TIMEOUT(first,10000);QVERIFY(!wrong);
+        QTRY_VERIFY_WITH_TIMEOUT(marked("web-sees-return"),20000);
+        w.close();mark("win-closed");
+        QTRY_VERIFY_WITH_TIMEOUT(marked("web-sees-close"),20000);
     }
     void livePresenterInk(){
         const auto url=qEnvironmentVariable("NIMBO_NATIVE_TEST_URL");
@@ -2281,6 +2453,7 @@ private slots:
     }
     void invitationListOrder(){
         ServerApi api;
+        api.server=QUrl("https://chat.example");
         const auto entry=[](QString id,qint64 created,qint64 expires=0){
             return QJsonObject{{"id",id},{"code",id},{"createdAt",created},{"expiresAt",expires}};
         };
@@ -2292,7 +2465,8 @@ private slots:
         QCOMPARE(list->count(),expected.size());
         for(int i=0;i<expected.size();++i){
             auto* card=list->itemAt(i)->widget();
-            QVERIFY(card->findChild<QPlainTextEdit*>()->toPlainText().endsWith("Код приглашения: "+expected[i]));
+            const auto* link=card->findChild<QLineEdit*>("inviteLink");QVERIFY(link);
+            QCOMPARE(link->text(),ServerLinks::invitation(api.server,expected[i]));
             QStringList labels;
             for(auto* field:card->findChildren<QLabel*>())labels<<field->text();
             QVERIFY(labels.join(" ").contains("Без срока"));
@@ -2362,6 +2536,52 @@ private slots:
         auto original=photo.copy(0,0,photo.width()/2,photo.height()).scaled(320,320).convertToFormat(QImage::Format_RGBA8888);
         BackgroundBlur effect;auto changed=effect.apply(original,18);QCOMPARE(changed.size(),original.size());QVERIFY(changed!=original);
         if(auto dest=qEnvironmentVariable("NIMBO_NATIVE_TEST_SCREENSHOT");!dest.isEmpty())QVERIFY(changed.save(QFileInfo(dest).absolutePath()+"/camera-effect.png"));
+    }
+    void profileDownloadName_data() {
+        QTest::addColumn<QString>("nickname");
+        QTest::addColumn<QString>("expected");
+        QTest::newRow("cyrillic") << QStringLiteral("Маша") << QStringLiteral("Маша.nimbo");
+        QTest::newRow("emoji") << QStringLiteral("Mia 👩‍🎨 猫") << QStringLiteral("Mia 👩‍🎨 猫.nimbo");
+        QTest::newRow("punctuation") << QStringLiteral("Ма:ша?..  ") << QStringLiteral("Маша.nimbo");
+        QTest::newRow("controls") << QStringLiteral("X\x01\u0085/\\Y") << QStringLiteral("XY.nimbo");
+        QTest::newRow("surrogates") << (QString(QChar(0xd800))+u'X'+QChar(0xdc00)) << QStringLiteral("X.nimbo");
+        QTest::newRow("direction") << QStringLiteral("\ufeff 🐈\u202e\u2066 \ufeff") << QStringLiteral("🐈.nimbo");
+        QTest::newRow("device") << QStringLiteral("CON") << QStringLiteral("profile.nimbo");
+        QTest::newRow("device-number") << QStringLiteral("lpt².backup") << QStringLiteral("profile.nimbo");
+        QTest::newRow("device-space") << QStringLiteral("AUX .old") << QStringLiteral("profile.nimbo");
+        QTest::newRow("device-console") << QStringLiteral("CONOUT$.a") << QStringLiteral("profile.nimbo");
+        QTest::newRow("safe-prefix") << QStringLiteral("CONstance") << QStringLiteral("CONstance.nimbo");
+        QTest::newRow("no-stem") << QStringLiteral("<>?*...") << QStringLiteral("profile.nimbo");
+        QTest::newRow("empty") << QString() << QStringLiteral("profile.nimbo");
+    }
+    void profileDownloadName() {
+        QFETCH(QString,nickname);QFETCH(QString,expected);
+        QCOMPARE(DesktopProfile::downloadName(nickname),expected);
+    }
+    void namedProfileExport() {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        DesktopWindow win(directory.path(),true);
+        const QString original=QStringLiteral("Ма:ша? 🎨");
+        win.profile={{"format","nimbo-profile"},{"version",1},{"name",original},{"avatar",""},{"servers",QJsonArray{}}};
+        const bool previous=QCoreApplication::testAttribute(Qt::AA_DontUseNativeDialogs);
+        QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+        const auto restore=qScopeGuard([previous]{QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs,previous);});
+        QString suggested;
+        QTimer::singleShot(0,&win,[&]{
+            auto* dialog=qobject_cast<QFileDialog*>(QApplication::activeModalWidget());
+            if(!dialog){if(auto* modal=qobject_cast<QDialog*>(QApplication::activeModalWidget()))modal->reject();return;}
+            suggested=QFileInfo(dialog->selectedFiles().value(0)).fileName();
+            if(suggested!=QStringLiteral("Маша 🎨.nimbo")){dialog->reject();return;}
+            dialog->selectFile(directory.filePath(suggested));
+            static_cast<QDialog*>(dialog)->accept();
+        });
+        const bool saved=win.exportProfile("fixture-password");
+        QCOMPARE(suggested,QStringLiteral("Маша 🎨.nimbo"));QVERIFY(saved);
+        QFile file(directory.filePath(suggested));QVERIFY(file.open(QIODevice::ReadOnly));
+        const auto contents=file.readAll();
+        QCOMPARE(QJsonDocument::fromJson(contents).object()["format"].toString(),QStringLiteral("nimbo-encrypted-profile"));
+        QCOMPARE(DesktopProfile::open(contents,"fixture-password"),win.profile);
     }
     void profileExchange() {
         const auto fixture=qEnvironmentVariable("NIMBO_WEB_FIXTURE");

@@ -1,6 +1,7 @@
 #pragma once
 #include "interface_text.h"
 #include "api.h"
+#include "server_links.h"
 #include "youtube_surface.h"
 #include <QtWidgets>
 
@@ -35,6 +36,15 @@ public:
         setObjectName("linkPreview");setMaximumWidth(420);setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Fixed);
         setFlat(true);setCursor(Qt::PointingHandCursor);setAccessibleName(id.isEmpty()?url.host():UiText::PlayYoutubeVideo());
         setFixedHeight(id.isEmpty()?1:236);
+        if(const auto local=ServerLinks::read(link.first)){
+            title=local->code.isEmpty()?UiText::NimboServerPreview():UiText::NimboInvitePreview();
+            picture=QIcon(QCoreApplication::applicationDirPath()+"/assets/nimbo.ico").pixmap(72,72);
+            setFixedHeight(96);setAccessibleName(title);
+            connect(this,&QPushButton::clicked,this,[this]{QDesktopServices::openUrl(url);});
+            return;
+        }
+        static const QRegularExpression reserved(QStringLiteral("^/(?:connect|enroll|invite|i)/"));
+        if(reserved.match(url.fragment()).hasMatch()){unavailable=true;hide();return;}
         QUrlQuery query;query.addQueryItem("url",link.first);query.addQueryItem("channel",channel);query.addQueryItem("message",message);
         const auto path="/api/link-preview?"+query.toString(QUrl::FullyEncoded);
         auto display=[self=QPointer<LinkCard>(this),relayout](QJsonObject result,bool resized){

@@ -3,6 +3,7 @@
 #include "window.h"
 #include "invitation_settings.h"
 #include "member_settings.h"
+#include "member_server_link.h"
 #include "wrap_layout.h"
 #include "message_text.h"
 #include "message_input.h"
@@ -17,6 +18,25 @@
 
 using namespace Ui;
 namespace {
+class MemberAvatar final : public QLabel {
+public:
+    MemberAvatar(){setObjectName("memberAvatar");setFixedSize(34,34);}
+    void setOnline(bool value){
+        const QString description=value?QString::fromUtf8(UiText::MemberOnline()):QString();
+        if(online==value && accessibleDescription()==description)return;
+        online=value;setAccessibleDescription(description);setToolTip(description);update();
+    }
+protected:
+    void paintEvent(QPaintEvent* event) override {
+        QLabel::paintEvent(event);
+        if(!online)return;
+        QPainter painter(this);painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen);painter.setBrush(QColor("#81bc96"));
+        painter.drawEllipse(QRectF(width()-7,height()-7,7,7));
+    }
+private:
+    bool online=false;
+};
 class RosterToggle final : public QPushButton {
 public:
     RosterToggle():arrow(Ui::tintedIcon("chevronDown",QColor("#a0a0a0"))),
@@ -322,6 +342,7 @@ void DesktopWindow::buildWorkspace() {
     memberToggle=new RosterToggle;memberToggle->setObjectName("memberToggle");side->addWidget(memberToggle);
     members=new QListWidget;members->setObjectName("members");members->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     side->addWidget(members,1);
+    memberServerLink=new MemberServerLink;side->addWidget(memberServerLink);
     rosterMotion=new QVariantAnimation(this);rosterMotion->setStartValue(0.);rosterMotion->setEndValue(1.);rosterMotion->setDuration(240);
     connect(rosterMotion,&QVariantAnimation::valueChanged,this,[this](const QVariant& value){
         rosterProgress=value.toReal();layoutMemberPanel();
@@ -586,7 +607,8 @@ void DesktopWindow::renderWorkspace(const QJsonObject& incoming,WorkspaceRefresh
         static_cast<VoiceChannelList*>(channels)->setActivityVisible(hasActivity);
         channels->setCurrentRow(next<0?first:next);selectChannel();
     }
-    if(refresh==WorkspaceRefresh::All||previous["selfId"]!=selfId||previous["members"]!=data["members"]||previous["roles"]!=data["roles"]){
+    const bool rebuildMembers=refresh==WorkspaceRefresh::All||previous["selfId"]!=selfId||previous["members"]!=data["members"]||previous["roles"]!=data["roles"];
+    if(rebuildMembers && !awaitingMemberRoster){
         members->clear();mentionChoices={};mentionLabels.clear();
         auto choice=[this](QString kind,QString id,QString label){mentionChoices.append(QJsonObject{{"kind",kind},{"id",id},{"label",label}});mentionLabels<<label;};
         choice("everyone","everyone","everyone");
@@ -597,16 +619,28 @@ void DesktopWindow::renderWorkspace(const QJsonObject& incoming,WorkspaceRefresh
             auto* item=new QListWidgetItem(members);item->setData(Qt::UserRole,id);item->setSizeHint({0,53});
             auto* row=new QWidget;row->setAttribute(Qt::WA_TransparentForMouseEvents);row->setStyleSheet("background:transparent");
             auto* h=new QHBoxLayout(row);h->setContentsMargins(16,0,16,0);h->setSpacing(10);
-            auto* image=text("");image->setPixmap(avatar(name,avatars.value(id),34));h->addWidget(image);
+            auto* image=new MemberAvatar;image->setPixmap(avatar(name,avatars.value(id),34));h->addWidget(image);
             auto* labels=new QVBoxLayout;labels->setSpacing(2);labels->setAlignment(Qt::AlignVCenter);labels->addWidget(text(name+(id==selfId?UiText::You():""),"font-size:12px;font-weight:500"));
             labels->addWidget(text(roleName(person),"font-size:10px;color:#737373"));h->addLayout(labels,1);members->setItemWidget(item,row);
         }
         static_cast<QStringListModel*>(mentions->model())->setStringList(mentionLabels);
     }
+    if(!awaitingMemberRoster && (rebuildMembers || previous["onlineMembers"]!=data["onlineMembers"]))
+        updateMemberPresence(data["onlineMembers"].toArray());
     auto* toggle=static_cast<RosterToggle*>(memberToggle);toggle->count=roster.size();
     toggle->setAccessibleName(QString(UiText::Members1()).arg(roster.size()));toggle->update();
     updateChatSound(previous.isEmpty() || previous["selfId"]!=data["selfId"]);
     updateMentionIndicators();refreshStage();updateAvatars();
+}
+void DesktopWindow::updateMemberPresence(const QJsonArray& online){
+    QSet<QString> ids;
+    for(const auto& value:online)ids.insert(value.toString());
+    for(int i=0;i<members->count();++i){
+        auto* item=members->item(i);
+        auto* row=members->itemWidget(item);
+        if(auto* avatar=row?row->findChild<QLabel*>("memberAvatar",Qt::FindDirectChildrenOnly):nullptr)
+            static_cast<MemberAvatar*>(avatar)->setOnline(ids.contains(item->data(Qt::UserRole).toString()));
+    }
 }
 void DesktopWindow::updateAvatars(){
     QSet<QString> present;
@@ -629,8 +663,9 @@ void DesktopWindow::updateAvatars(){
 void DesktopWindow::setMemberPanel(bool expanded,bool animate){
     expandedMembers=expanded;memberToggle->setChecked(expanded);
     QSettings(dataPath+"/desktop.ini",QSettings::IniFormat).setValue("membersExpanded",expanded);
-    if(!expanded && members->hasFocus())memberToggle->setFocus();
+    if(!expanded && (members->hasFocus() || memberServerLink->isAncestorOf(QApplication::focusWidget())))memberToggle->setFocus();
     members->setEnabled(expanded);
+    memberServerLink->setEnabled(expanded);
     rosterMotion->setDirection(expanded?QAbstractAnimation::Forward:QAbstractAnimation::Backward);
     if(animate && Ui::animationsEnabled()){
         if(rosterMotion->state()!=QAbstractAnimation::Running)rosterMotion->start();
@@ -656,6 +691,8 @@ void DesktopWindow::layoutMemberPanel(){
     const int height=62+qRound(qMax(0,page->height()-16-62)*smooth(2*rosterProgress-1));
     memberPanel->setGeometry(page->width()-218,8,210,height);memberPanel->raise();
     members->setVisible(height>62);
+    memberServerLink->setServer(api.server);
+    memberServerLink->setVisible(height>=114);
     auto* toggle=static_cast<RosterToggle*>(memberToggle);toggle->progress=rosterProgress;toggle->update();
 }
 QJsonObject DesktopWindow::localPerson() const {
@@ -1138,7 +1175,8 @@ void DesktopWindow::prepareServer(QJsonObject entry,bool enroll,const QString& c
     };
     QTimer::singleShot(15000,probe,[finish]{finish(UiText::TheServerDidNotRespondInTime2());});
     auto workspaceRequest=[this,target,probe,finish](QJsonObject saved,QString member){
-        probe->request("GET","/api/workspace",{},[this,target,probe,saved,member,finish](QJsonObject data,QString error){
+        const bool opening=switchProbe==probe;
+        probe->request("GET",opening?"/api/workspace?webTab=open":"/api/workspace",{},[this,target,probe,saved,member,finish,opening](QJsonObject data,QString error){
             auto it=preparedServers.find(target);
             if(it==preparedServers.end() || it->probe!=probe)return;
             if(error.isEmpty() && (!data["channels"].isArray() || !data["members"].isArray() || data["selfId"]!=member))
@@ -1148,7 +1186,7 @@ void DesktopWindow::prepareServer(QJsonObject entry,bool enroll,const QString& c
             it->workspace=data;it->received.start();
             const bool requested=switchProbe==probe;
             finish({});
-            if(requested)usePreparedServer(target,saved);
+            if(requested)usePreparedServer(target,saved,opening);
         });
     };
     if(!enroll && !state.token.isEmpty()){
@@ -1168,7 +1206,7 @@ void DesktopWindow::prepareServer(QJsonObject entry,bool enroll,const QString& c
     });
 }
 
-void DesktopWindow::usePreparedServer(const QUrl& target,QJsonObject entry){
+void DesktopWindow::usePreparedServer(const QUrl& target,QJsonObject entry,bool registered){
     const bool fromHome=localHome && pages->currentWidget()==localHome;
     const auto ready=preparedServers.take(target);
     if(attachmentViewer){pages->setCurrentIndex(1);pages->removeWidget(attachmentViewer);attachmentViewer->deleteLater();attachmentViewer=nullptr;}
@@ -1203,6 +1241,11 @@ void DesktopWindow::usePreparedServer(const QUrl& target,QJsonObject entry){
     clearMessageActions();outbox.clear();outboxOrder.clear();drafts.clear();draftFormats.clear();fileDrafts.clear();mentionDrafts.clear();replyId.clear();sendSignature.clear();rooms={};workspace={};lastMessages={};avatars.clear();avatarVersions.clear();
     if(!returnIdentity.isEmpty() && inCall && callIdentity==returnIdentity && callOrigin==target.toString())selected=activeVoice;
     if(!route.isEmpty())selected=route["channel"].toString();
+    // A prefetched roster is passive. Switch channels immediately, but paint the
+    // roster from the first authenticated snapshot of this visit, including self.
+    awaitingMemberRoster=!registered && data["onlineMembers"].isArray();
+    if(awaitingMemberRoster){members->clear();mentionChoices={};mentionLabels.clear();static_cast<QStringListModel*>(mentions->model())->setStringList({});}
+    else api.syncMemberPresence(data);
     clearChatHistory();compose->clear();stageSignature.clear();note({});renderWorkspace(data,WorkspaceRefresh::All);openView("room");
     if(fromHome){
         pages->setCurrentIndex(1);
@@ -1233,7 +1276,7 @@ void DesktopWindow::usePreparedServer(const QUrl& target,QJsonObject entry){
             }
         }
     }
-    if(workspaceReceived.elapsed()>500)QTimer::singleShot(0,this,&DesktopWindow::refresh);
+    if(awaitingMemberRoster || workspaceReceived.elapsed()>500)QTimer::singleShot(0,this,&DesktopWindow::refresh);
     QTimer::singleShot(0,this,&DesktopWindow::warmSavedServers);
 }
 void DesktopWindow::logout(){

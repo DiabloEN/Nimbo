@@ -1,9 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="290" height="44" viewBox="0 0 290 44" role="img" aria-labelledby="title">
-  <title id="title">Скачать для Windows x64 · 0.3.57</title>
+  <title id="title">Скачать для Windows x64 · 0.3.58</title>
   <rect x=".5" y=".5" width="289" height="43" rx="10" fill="#181818" stroke="#484848"/>
   <path fill="#ededed" d="M15 13h8v8h-8zm10 0h8v8h-8zM15 23h8v8h-8zm10 0h8v8h-8z"/>
   <g font-family="Segoe UI, Arial, sans-serif">
     <text x="44" y="27" fill="#fafafa" font-size="15" font-weight="600">Скачать для Windows</text>
-    <text x="209" y="27" fill="#c1c1c1" font-size="12">x64 · 0.3.57</text>
+    <text x="209" y="27" fill="#c1c1c1" font-size="12">x64 · 0.3.58</text>
   </g>
 </svg>

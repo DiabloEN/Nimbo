@@ -1,4 +1,6 @@
 #include "interface_text.h"
+#include "server_links.h"
+#include "member_server_link.h"
 #include "window.h"
 #include "desktop_updates.h"
 #include "message_input.h"
@@ -53,6 +55,10 @@ DesktopWindow::DesktopWindow(QString directory,bool generated,QJsonObject restar
     updates=new DesktopUpdates(this,dataPath);
     updates->restartView=[this]{return captureUpdateView();};
     updates->restartApplication=[this]{close();};
+    api.memberPresenceLost=[this]{
+        workspace.remove("onlineMembers");
+        updateMemberPresence({});
+    };
     api.activeProfileKey=[this]{
         for(auto value:profile["servers"].toArray()){
             const auto entry=value.toObject();
@@ -186,6 +192,9 @@ void DesktopWindow::applyProfileLanguage() {
     if (!UiText::setLanguage(profile["language"].toString())) return;
     if(gameOverlay)gameOverlay->languageChanged();
     translateChrome(chromeTexts);
+    memberServerLink->refreshLanguage();
+    if(auto origin=loginLinkTarget->property("origin").toUrl();!origin.isEmpty())
+        loginLinkTarget->setText(QString(UiText::ServerLinkTarget()).arg(origin.toString()));
     sendQuality->setItemText(0,UiText::Auto());
     refreshUpdateBadge();
     translateSidebar();
@@ -211,7 +220,9 @@ void DesktopWindow::styleCaption(){
     DwmSetWindowAttribute(handle,DWMWA_BORDER_COLOR,&border,sizeof(border));
 }
 void DesktopWindow::closeEvent(QCloseEvent* event) {
+    api.stopMemberPresence();timer.stop();
     if(forceClose || (!joining && !inCall && !pendingVoiceDepartures && !leavingVoice)){
+        closingWindow=true;
         QMainWindow::closeEvent(event);
         return;
     }
@@ -364,7 +375,14 @@ void DesktopWindow::buildLogin() {
     for(auto* field:{nickname,password})field->setFixedHeight(42);
     new PasswordReveal(password);
     formLabel(UiText::YourName(),"font-size:12px;color:#b9b9b9",17);f->addSpacing(8);f->addWidget(nickname);f->addSpacing(18);
-    formLabel(UiText::AccessCode(),"font-size:12px;color:#b9b9b9",17);f->addSpacing(8);f->addWidget(password);f->addSpacing(30);
+    formLabel(UiText::CodeOrInvitationLink(),"font-size:12px;color:#b9b9b9",17);f->addSpacing(8);f->addWidget(password);
+    loginLinkTarget=formLabel({},"font-size:11px;color:#a0a0a0",17);loginLinkTarget->setTextFormat(Qt::PlainText);loginLinkTarget->hide();
+    const auto applyLoginLink=ServerLinks::bind(password,[this](const ServerLinks::Link& link){
+        const QSignalBlocker block(password);
+        address->setText(link.origin.toString());password->setText(link.code);
+        loginLinkTarget->setProperty("origin",link.origin);loginLinkTarget->setText(QString(UiText::ServerLinkTarget()).arg(link.origin.toString()));loginLinkTarget->show();
+    });
+    f->addSpacing(30);
     loginButton=button(UiText::SignInToNimbo());loginButton->setLayoutDirection(Qt::RightToLeft);
     auto arrow=Ui::icon("arrow").pixmap(18,18);{QPainter painter(&arrow);painter.setCompositionMode(QPainter::CompositionMode_SourceIn);painter.fillRect(arrow.rect(),QColor("#111"));}
     loginButton->setIcon(QIcon(arrow));loginButton->setIconSize({18,18});loginButton->setFixedHeight(48);loginButton->setObjectName("primary");
@@ -376,7 +394,7 @@ void DesktopWindow::buildLogin() {
     auto* scroll=new QScrollArea;scroll->setFrameShape(QFrame::NoFrame);scroll->setWidgetResizable(true);scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setStyleSheet("QScrollBar:vertical{background:#101010;width:6px} QScrollBar::handle:vertical{background:#333;min-height:20px} QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0}");
     scroll->setWidget(page);pages->addWidget(scroll);
-    connect(loginButton,&QPushButton::clicked,this,[this]{ signIn(false); });
+    connect(loginButton,&QPushButton::clicked,this,[this,applyLoginLink]{applyLoginLink();signIn(false);});
     connect(password,&QLineEdit::returnPressed,loginButton,&QPushButton::click);
     connect(importButton,&QPushButton::clicked,this,&DesktopWindow::importProfile);
     connect(loginProfiles,&QComboBox::activated,this,[this](int index){
@@ -386,6 +404,7 @@ void DesktopWindow::buildLogin() {
     });
 }
 void DesktopWindow::showLogin() {
+    awaitingMemberRoster=false;
     if(attachmentViewer){pages->removeWidget(attachmentViewer);attachmentViewer->deleteLater();attachmentViewer=nullptr;}
     workspaceReceived.invalidate();
     if(switchNotice)finishServerSwitch();
@@ -394,7 +413,7 @@ void DesktopWindow::showLogin() {
     rooms = {}; selected.clear(); kind.clear(); drafts.clear();draftFormats.clear(); sendSignature.clear();
     workspaceLatency=0;workspaceFailed=false;workspace={};updateNetworkIndicator();self={};selfId.clear();syncUpdateContext();thumbnails.clear();imageFiles.clear();imageRequests.clear();fileDrafts.clear();mentionDrafts.clear();avatars.clear();avatarVersions.clear();stageSignature.clear();lastMessages={};view="room";content->setCurrentWidget(roomPage);
     clearMessageActions();outbox.clear();outboxOrder.clear();++channelGeneration; refreshing = false; loadingMessages = false; sending = false;
-    channels->clear(); members->clear(); clearChatHistory(); compose->clear(); password->clear();
+    channels->clear(); members->clear(); clearChatHistory(); compose->clear(); password->clear();loginLinkTarget->setProperty("origin",{});loginLinkTarget->clear();loginLinkTarget->hide();
     sendButton->setEnabled(true);
     pages->setCurrentIndex(0); loginStatus->clear();loginStatus->hide(); loginProfiles->clear();for(auto v:localProfiles){auto e=v.toObject();loginProfiles->addItem(e["profile"].toObject()["name"].toString(),e["id"].toString());}
     loginProfiles->setCurrentIndex(qMax(0,loginProfiles->findData(localId)));loginProfiles->parentWidget()->setVisible(!localProfiles.isEmpty());
@@ -580,7 +599,8 @@ void DesktopWindow::chooseProfile(const QString& id,const QString& code,std::fun
     });
 }
 bool DesktopWindow::exportProfile(const QString& pass) {
-    auto path=QFileDialog::getSaveFileName(this,UiText::DownloadProfile(),"profile.nimbo","Nimbo (*.nimbo)"); if(path.isEmpty())return false;
+    const auto name=DesktopProfile::downloadName(profile["name"].toString());
+    auto path=QFileDialog::getSaveFileName(this,UiText::DownloadProfile(),name,"Nimbo (*.nimbo)"); if(path.isEmpty())return false;
     try { if(!writeFile(path,DesktopProfile::seal(profile,pass))) throw std::runtime_error("save"); note(UiText::ProtectedNimboFileDownloaded());return true; }
     catch(...){note(UiText::CouldNotSaveTheProfileCheckThe());return false;}
 }
@@ -588,16 +608,19 @@ void DesktopWindow::signIn(bool fromProfile,bool imported) {
     if(!loginButton->isEnabled())return;
     auto url=DesktopProfile::origin(address->text());
     auto name=nickname->text().trimmed();
-    if(url.isEmpty()||name.isEmpty()||(!fromProfile&&password->text().isEmpty())){note(UiText::EnterTheServerAddressYourNameAnd());return;}
     QJsonArray servers=profile.value("servers").toArray(); QString key;
     for(auto item:servers) if(DesktopProfile::origin(item.toObject()["url"].toString())==url)key=item.toObject()["profileKey"].toString();
+    const bool linked=!url.isEmpty() && loginLinkTarget->property("origin").toUrl()==url;
+    if(linked && !key.isEmpty()){fromProfile=true;if(name.isEmpty())name=profile["name"].toString();}
+    if(linked && key.isEmpty() && password->text().isEmpty()){note(UiText::AnInvitationCodeIsRequiredForThe());return;}
+    if(url.isEmpty()||name.isEmpty()||(!fromProfile&&(password->text().isEmpty()||password->text().size()>256))){note(UiText::EnterTheServerAddressYourNameAnd());return;}
     if(fromProfile&&key.isEmpty()){note(UiText::ThisProfileHasNoKeyForThe());return;}
     if(key.isEmpty())key=QString::fromLatin1(DesktopProfile::randomKey());
     QJsonObject body{{"profileKey",key}};
     if(!fromProfile){body["name"]=name;body["password"]=password->text();}
     resetLoginImport();api.reset();imageRequests.clear(); api.server=url;
     pages->currentWidget()->setEnabled(false); note(UiText::Connecting());
-    api.request("POST",fromProfile?"/api/profile-session":"/api/auth",body,[this,url,name,servers,key,imported](QJsonObject data,QString error) mutable {
+    api.request("POST",fromProfile?"/api/profile-session":"/api/auth",body,[this,url,name,servers,key,imported,linked](QJsonObject data,QString error) mutable {
         pages->currentWidget()->setEnabled(true);
         if(!error.isEmpty()||data["session"].toString().isEmpty()){if(imported)openLocalHome();note(error.isEmpty()?UiText::NoSignInTokenReceived():error);return;}
         password->clear(); api.token=data["session"].toString();QSettings(dataPath+"/desktop.ini",QSettings::IniFormat).setValue("lastServer",url.toString());
@@ -610,18 +633,25 @@ void DesktopWindow::signIn(bool fromProfile,bool imported) {
         if(!entry.contains("name"))entry["name"]=url.host();
         if(index<servers.size())servers[index]=entry;else servers.append(entry);
         profile["servers"]=servers; pages->setCurrentIndex(1); note({}); saveLocal();
-        bindMute();openView(imported?"profile":"room");setMemberPanel(QSettings(dataPath+"/desktop.ini",QSettings::IniFormat).value("membersExpanded",false).toBool(),false);
+        bindMute();openView(imported && !linked?"profile":"room");setMemberPanel(QSettings(dataPath+"/desktop.ini",QSettings::IniFormat).value("membersExpanded",false).toBool(),false);
         serverTitle->setText(url.host()); refresh(); timer.start(3000);
     });
 }
 void DesktopWindow::refresh() {
-    if (refreshing || api.token.isEmpty()) return;
+    if (refreshing || api.token.isEmpty() || closingWindow) return;
     refreshing=true;
     QElapsedTimer elapsed;elapsed.start();
-    api.request("GET","/api/workspace",{},[this,elapsed](QJsonObject data,QString error){
+    api.request("GET",api.activeWorkspacePath(),{},[this,elapsed](QJsonObject data,QString error){
+        if(closingWindow)return;
         refreshing=false;workspaceLatency=elapsed.elapsed();workspaceFailed=!error.isEmpty();
-        if(workspaceFailed){updateNetworkIndicator();note(error);return;}
-        workspaceReceived.start();renderWorkspace(data);
+        const auto roster=std::exchange(awaitingMemberRoster,false)?WorkspaceRefresh::All:WorkspaceRefresh::Changed;
+        if(workspaceFailed){
+            api.stopMemberPresence();workspace.remove("onlineMembers");updateMemberPresence({});
+            if(roster==WorkspaceRefresh::All)renderWorkspace(workspace,roster);
+            updateNetworkIndicator();note(error);return;
+        }
+        api.syncMemberPresence(data);
+        workspaceReceived.start();renderWorkspace(data,roster);
         loadMessages();
     });
 }

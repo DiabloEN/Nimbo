@@ -15,6 +15,7 @@
 #include <memory>
 
 class DesktopUpdates;
+class MemberServerLink;
 class PresenterInk;
 class QSoundEffect;
 class StreamViewer; class MessageInput; class VoiceCard; class QLabel; class QPushButton; class QLineEdit; class QListWidget; class QComboBox;
@@ -58,6 +59,8 @@ private:
     void buildWorkspace();
     enum class WorkspaceRefresh { Changed, Channels, All };
     void renderWorkspace(const QJsonObject& data, WorkspaceRefresh refresh = WorkspaceRefresh::Changed);
+    void updateMemberPresence(const QJsonArray& online);
+    bool awaitingMemberRoster=false;
     QJsonArray roomPeople(const QString& room) const;
     void refreshStage();bool eventFilter(QObject*,QEvent*) override;
     QJsonObject localPerson() const;
@@ -226,7 +229,7 @@ private:
     QString switchReturnIdentity;
     void prepareServer(QJsonObject entry, bool enroll=false, const QString& code={});
     void warmSavedServers();
-    void usePreparedServer(const QUrl& target,QJsonObject entry);
+    void usePreparedServer(const QUrl& target,QJsonObject entry,bool registered=false);
     void clearPreparedServers();
     QString view = "room", callOrigin, avatarOwner, stageSignature, switchTarget;
     QStringList mentionLabels;
@@ -235,6 +238,7 @@ private:
     QPushButton *serverSwitch, *profileButton, *memberToggle, *settingsButton, *notifyButton, *backButton, *attachButton, *emojiButton, *olderButton, *emptyRoom;
     QLabel *serverDescription, *serverBadge, *titleIcon, *roomCount, *selfAvatar,*profileName;
     QWidget *memberPanel, *stage, *dock, *roomPage, *detailPage, *header, *stageCards;
+    MemberServerLink* memberServerLink;
     QStackedWidget *content;
     QVBoxLayout *detailLayout, *roomLayout;
     QHBoxLayout *headerLayout;
@@ -310,6 +314,7 @@ private:
     QTimer timer;
     QStackedWidget *pages;
     QLineEdit *address, *nickname, *password;
+    QLabel* loginLinkTarget;
     MessageInput* compose;
     QListWidget *channels, *messages, *members;
     QPushButton *loginButton, *importButton, *joinButton, *muteButton, *cameraButton, *screenButton, *sendButton;

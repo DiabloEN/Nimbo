@@ -2,6 +2,7 @@
 #include "window.h"
 #include "ui.h"
 #include "profile.h"
+#include "server_links.h"
 #include "avatar_editor.h"
 #include "password_reveal.h"
 #include <algorithm>
@@ -147,16 +148,31 @@ void DesktopWindow::renderProfile(){
     }
     auto* add=control(UiText::AddServer(),"add",44);add->setIcon(icon("plus"));serversBox->addWidget(add);
     auto* newServer=panel("#1b1b1b",12);serversBox->addWidget(newServer);auto* nf=stack(newServer,12,6);
-    nf->addWidget(caption(UiText::NewServer(),12,"#eee",true));auto* addressField=field(nf,UiText::Address());addressField->setPlaceholderText("https://nimbo.example.com");auto* code=field(nf,UiText::InvitationCode());code->setMaxLength(256);
-    auto* enroll=control(UiText::Add(),"small",32);auto* cancel=control(UiText::Cancel(),"quiet",32);pair(nf,enroll,cancel);newServer->hide();
+    nf->addWidget(caption(UiText::NewServer(),12,"#eee",true));auto* addressField=field(nf,UiText::AddressOrInvitationLink());addressField->setPlaceholderText("https://nimbo.example.com");auto* code=field(nf,UiText::InvitationCode());
+    addressField->setObjectName("addServerAddress");code->setObjectName("addServerCode");
+    auto pasteLink=[addressField,code](const ServerLinks::Link& link){
+        const QSignalBlocker blockAddress(addressField),blockCode(code);
+        addressField->setText(link.origin.toString());code->setText(link.code);
+    };
+    const auto applyAddress=ServerLinks::bind(addressField,pasteLink,false);
+    const auto applyCode=ServerLinks::bind(code,pasteLink);
+    auto* enroll=control(UiText::Add(),"small",32);enroll->setObjectName("submitServerLink");
+    auto* cancel=control(UiText::Cancel(),"quiet",32);pair(nf,enroll,cancel);newServer->hide();
     connect(add,&QPushButton::clicked,newServer,[=]{newServer->show();add->hide();addressField->setFocus();});
     connect(cancel,&QPushButton::clicked,newServer,[=]{newServer->hide();code->clear();addressField->clear();add->show();});
     auto enrollmentKey=std::make_shared<QPair<QUrl,QString>>();
     connect(enroll,&QPushButton::clicked,newServer,[=,this]{
+        applyAddress();applyCode();
         auto url=DesktopProfile::origin(addressField->text());
-        if(url.isEmpty()||code->text().trimmed().isEmpty()){note(UiText::EnterTheAddressAndInvitationCode());return;}
+        for(auto value:servers){
+            const auto entry=value.toObject();
+            if(!url.isEmpty() && DesktopProfile::origin(entry["url"].toString())==url){
+                if(!local && api.server==url)openView("room");else switchServer(entry);
+                return;
+            }
+        }
+        if(url.isEmpty()||code->text().trimmed().isEmpty()||code->text().size()>256){note(UiText::EnterTheAddressAndInvitationCode());return;}
         if(servers.size()>=64){note(UiText::YouCanSaveUpTo64Servers());return;}
-        for(auto entry:servers)if(DesktopProfile::origin(entry.toObject()["url"].toString())==url){note(UiText::ThisServerIsAlreadyInTheList());return;}
         if(enrollmentKey->first!=url)*enrollmentKey={url,QString::fromLatin1(DesktopProfile::randomKey())};
         auto key=enrollmentKey->second;auto* probe=new ServerApi(newServer);probe->server=url;newServer->setEnabled(false);
         probe->request("POST","/api/enroll",{{"name",self.isEmpty()?profile["name"]:self["name"]},{"password",code->text().trimmed()},{"profileKey",key}},[=,this](auto reply,QString error){

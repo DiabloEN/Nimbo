@@ -34,9 +34,53 @@ void ServerApi::rememberPreview(const QString& path,const QJsonObject& result){
 }
 
 void ServerApi::reset() {
+    stopMemberPresence();presenceUnsupported=false;
     uploads.clear();++generation;++cacheEpoch;checkingDisk=false;deferredDownloads.clear();mediaDir.clear();mediaCursor.clear();cacheReady=false;pendingMedia.clear();renewalWaiters.clear();previews.clear();
     server = QUrl(); token.clear();
     for (auto* reply : network.findChildren<QNetworkReply*>()) if (reply->isRunning()) reply->abort();
+}
+QString ServerApi::activeWorkspacePath() const {
+    return presenceReply || presenceUnsupported ? QStringLiteral("/api/workspace") :
+        QStringLiteral("/api/workspace?webTab=open");
+}
+void ServerApi::stopMemberPresence(){
+    const auto reply=presenceReply;
+    presenceReply.clear();
+    if(reply)reply->abort();
+}
+void ServerApi::syncMemberPresence(const QJsonObject& workspace){
+    if(!workspace.value("onlineMembers").isArray()){
+        presenceUnsupported=true;
+        stopMemberPresence();
+        return;
+    }
+    startMemberPresence();
+}
+void ServerApi::startMemberPresence(){
+    if(presenceUnsupported || presenceReply || token.isEmpty())return;
+    auto request=headers("/api/web-presence");
+    request.setTransferTimeout(20000);
+    auto* reply=network.get(request);
+    presenceReply=reply;
+    reply->setReadBufferSize(4096);
+    connect(reply,&QNetworkReply::metaDataChanged,this,[reply]{
+        const int status=reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if(status>=200 && status!=204 && reply->isRunning())reply->abort();
+    });
+    connect(reply,&QNetworkReply::finished,this,[this,reply]{
+        reply->deleteLater();
+        if(presenceReply!=reply)return;
+        presenceReply.clear();
+        const auto status=reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if(reply->error()!=QNetworkReply::NoError || status!=204){
+            // Old servers may return their HTML entry page on an unknown route.
+            presenceUnsupported=status==404 || status==405 || status==200;
+            qWarning("WINDOWS_MEMBER_PRESENCE_LOST: HTTP %d, network %d",status,int(reply->error()));
+            if(memberPresenceLost)memberPresenceLost();
+            return; // A successful workspace poll retries transient failures.
+        }
+        startMemberPresence();
+    });
 }
 QNetworkRequest ServerApi::headers(const QString& path) const {
     QNetworkRequest request(QUrl(server.toString() + path));

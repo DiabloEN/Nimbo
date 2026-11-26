@@ -1,14 +1,15 @@
 #pragma once
 #include "interface_text.h"
 #include "api.h"
+#include "server_links.h"
 #include "ui.h"
 
-class InvitationText final : public QPlainTextEdit {
+class InvitationText final : public QLineEdit {
 public:
-    using QPlainTextEdit::QPlainTextEdit;
+    using QLineEdit::QLineEdit;
 protected:
     void focusInEvent(QFocusEvent* event) override {
-        QPlainTextEdit::focusInEvent(event);
+        QLineEdit::focusInEvent(event);
         selectAll();
     }
 };
@@ -23,7 +24,7 @@ public:
                      "QPushButton:hover,QPushButton:focus{background:#303030}"
                      "QPushButton[quiet=true]{background:transparent;color:#aaa}"
                      "QPushButton#inviteSubmit{background:#e4e4e4;color:#111}"
-                     "QPlainTextEdit{background:#202020;border:0;border-radius:8px;padding:6px 8px;font-size:11px}");
+                     "QLineEdit#inviteLink{background:#202020;border:0;border-radius:8px;padding:6px 12px;font-size:11px}");
         auto* column=new QVBoxLayout(this);
         column->setContentsMargins(0,0,0,0);column->setSpacing(0);
         error=Ui::text("","color:#efaaaa;font-size:12px");error->setWordWrap(true);column->addWidget(error);error->hide();
@@ -46,7 +47,7 @@ public:
         auto* labelField=new QVBoxLayout;labelField->setSpacing(8);options->addLayout(labelField,1);
         const QString caption=UiText::LabelOptional();
         labelField->addWidget(Ui::text(caption,"font-size:11px"));
-        label=new QLineEdit;label->setAccessibleName(caption);label->setMaxLength(80);
+        label=new QLineEdit;label->setObjectName("inviteLabel");label->setAccessibleName(caption);label->setMaxLength(80);
         label->setPlaceholderText(UiText::ForExampleForTheTeam());label->setFixedHeight(42);
         labelField->addWidget(label);labelField->setAlignment(Qt::AlignTop);fields->addSpacing(6);
         auto* actions=new QHBoxLayout;actions->setSpacing(8);fields->addLayout(actions);
@@ -116,9 +117,7 @@ private:
         empty->setVisible(active.isEmpty());scroll->setVisible(!active.isEmpty());
         for(const auto& item:active){
             const auto id=item["id"].toString(),code=item["code"].toString();
-            const auto origin=api.server.toString();
-            const auto payload=UiText::InvitationToNimboNjoinLink()+origin+"/#/invite/"+QString::fromLatin1(QUrl::toPercentEncoding(code))+
-                               UiText::NserverAddress()+origin+UiText::NinvitationCode()+code;
+            const auto payload=ServerLinks::invitation(api.server,code);
             auto* card=new QWidget;card->setObjectName("inviteCard");card->setAttribute(Qt::WA_StyledBackground);
             auto* box=new QVBoxLayout(card);box->setContentsMargins(16,14,16,14);box->setSpacing(4);
             auto* meta=new QHBoxLayout;meta->setSpacing(12);box->addLayout(meta);
@@ -144,8 +143,8 @@ private:
             dates.append(end?UiText::Until()+date(end):(personal?UiText::UntilFirstSignIn():UiText::NoExpiry2()));
             auto* info=Ui::text(dates.join("    "),"font-size:11px;color:#a0a0a0");
             info->setWordWrap(true);box->addWidget(info);box->addSpacing(6);
-            auto* text=new InvitationText;text->setReadOnly(true);text->setPlainText(payload);text->setAccessibleName(UiText::InvitationText());
-            text->setFixedHeight(91);box->addWidget(text);box->addSpacing(6);
+            auto* text=new InvitationText;text->setObjectName("inviteLink");text->setReadOnly(true);text->setText(payload);text->setAccessibleName(UiText::InvitationLink());
+            text->setFixedHeight(38);box->addWidget(text);box->addSpacing(6);
             auto* copy=new QPushButton(id==copied?UiText::Copied():UiText::CopyInvitation());box->addWidget(copy,0,Qt::AlignLeft);
             connect(copy,&QPushButton::clicked,this,[this,copy,id,payload]{
                 QApplication::clipboard()->setText(payload);

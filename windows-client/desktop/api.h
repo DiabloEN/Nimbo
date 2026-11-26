@@ -15,6 +15,10 @@ public:
     QString token;
     explicit ServerApi(QObject* parent = nullptr) : QObject(parent) {}
     void request(QByteArray method, QString path, QJsonObject body, Callback callback);
+    QString activeWorkspacePath() const;
+    void syncMemberPresence(const QJsonObject& workspace);
+    void stopMemberPresence();
+    std::function<void()> memberPresenceLost;
     QJsonObject cachedPreview(const QString& path);
     void rememberPreview(const QString& path,const QJsonObject& result);
     void bytes(QString path, int limit, std::function<void(QByteArray,QString)> callback);
@@ -42,6 +46,9 @@ private:
     struct UploadState{bool cancelled=false;QPointer<QNetworkReply> reply;};
     QHash<QString,std::shared_ptr<UploadState>> uploads;
     QNetworkAccessManager network;
+    QPointer<QNetworkReply> presenceReply;
+    bool presenceUnsupported=false;
+    void startMemberPresence();
     QCache<QString,QTemporaryFile> previews{4096}; // KiB of session-local temporary files
     void waitForMediaChanges();
     void reconcileMedia(const QString& revision);

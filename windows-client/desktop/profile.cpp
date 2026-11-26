@@ -59,6 +59,30 @@ QByteArray crypt(bool encrypt, QByteArray input, QByteArray salt, QByteArray iv,
 }
 }
 QByteArray randomKey() { return randomBytes(32).toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals); }
+QString downloadName(const QString& nickname) {
+    QString stem;
+    for (qsizetype i = 0; i < nickname.size(); ++i) {
+        const QChar ch = nickname[i];
+        if (ch.isHighSurrogate() && i + 1 < nickname.size() && nickname[i + 1].isLowSurrogate()) {
+            stem += ch;
+            stem += nickname[++i];
+            continue;
+        }
+        if (ch.isSurrogate() || ch.category() == QChar::Other_Control ||
+            QStringLiteral("<>:\"/\\|?*").contains(ch) ||
+            (ch >= u'\u202a' && ch <= u'\u202e') || (ch >= u'\u2066' && ch <= u'\u2069')) continue;
+        stem += ch;
+    }
+    // Match the web export's Unicode trim (including BOM) before trimming trailing dots.
+    static const QRegularExpression whitespace(QStringLiteral(R"(^[\s\x{feff}]+|[\s\x{feff}]+$)"),
+                                                QRegularExpression::UseUnicodePropertiesOption);
+    stem.remove(whitespace);
+    while (stem.endsWith(u'.') || stem.endsWith(u' ')) stem.chop(1);
+    static const QRegularExpression device(QStringLiteral(R"(^(?:con|prn|aux|nul|conin\$|conout\$|(?:com|lpt)[1-9¹²³]) *(?:\.|$))"),
+                                            QRegularExpression::CaseInsensitiveOption);
+    if (stem.isEmpty() || device.match(stem).hasMatch()) stem = QStringLiteral("profile");
+    return stem + QStringLiteral(".nimbo");
+}
 QUrl origin(QString address) {
     address = address.trimmed();
     if (!address.contains("://")) address.prepend("https://");

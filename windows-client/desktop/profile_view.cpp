@@ -152,6 +152,12 @@ void DesktopWindow::renderProfile(){
     auto* codeGroup=new QWidget;nf->addWidget(codeGroup);auto* code=field(stack(codeGroup,0,6),UiText::InvitationCode());
     addressField->setObjectName("addServerAddress");code->setObjectName("addServerCode");
     auto* enroll=control(UiText::Add(),"small",32);enroll->setObjectName("submitServerLink");
+    auto* cancel=control(UiText::Cancel(),"quiet",32);
+    cancel->setStyleSheet("padding:0 4px;font-size:11px");
+    auto* serverActions=row(nf,6);
+    serverActions->setAlignment(Qt::AlignLeft);
+    serverActions->addWidget(enroll,0,Qt::AlignLeft);
+    serverActions->addWidget(cancel,0,Qt::AlignLeft);
     auto destination=[addressField,servers]{
         const auto url=DesktopProfile::origin(addressField->text());
         if(!url.isEmpty())for(const auto value:servers){
@@ -162,6 +168,10 @@ void DesktopWindow::renderProfile(){
     auto updateDestination=[=,this]{
         const auto entry=destination();const bool known=!entry.isEmpty();
         enroll->setText(known?UiText::OpenServer2():UiText::Add());
+        const auto margins=nf->contentsMargins();
+        const int available=serversWidget->width()-margins.left()-margins.right();
+        const int required=enroll->sizeHint().width()+serverActions->spacing()+cancel->sizeHint().width();
+        serverActions->setDirection(required>available?QBoxLayout::TopToBottom:QBoxLayout::LeftToRight);
         codeGroup->setVisible(!known || (deniedProfile==localId && deniedOrigin==DesktopProfile::origin(entry["url"].toString())));
     };
     auto pasteLink=[addressField,code,updateDestination](const ServerLinks::Link& link){
@@ -171,7 +181,7 @@ void DesktopWindow::renderProfile(){
     const auto applyAddress=ServerLinks::bind(addressField,pasteLink,false);
     const auto applyCode=ServerLinks::bind(code,pasteLink);
     connect(addressField,&QLineEdit::textChanged,newServer,updateDestination);
-    auto* cancel=control(UiText::Cancel(),"quiet",32);pair(nf,enroll,cancel);newServer->hide();
+    newServer->hide();
     connect(add,&QPushButton::clicked,newServer,[=]{newServer->show();add->hide();addressField->setFocus();});
     connect(cancel,&QPushButton::clicked,newServer,[=]{newServer->hide();code->clear();addressField->clear();add->show();});
     auto enrollmentKey=std::make_shared<QPair<QUrl,QString>>();
